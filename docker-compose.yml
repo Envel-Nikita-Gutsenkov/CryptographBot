@@ -1,0 +1,41 @@
+services:
+  cryptograph:
+    build: .
+    image: cryptograph:latest
+    container_name: cryptograph
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      RUST_LOG: info
+      MAX_RSS_MB: "300"
+      HANG_TIMEOUT_SECS: "300"
+      SQLITE_DB: "/app/data/crypto.db"
+    # Hard memory limits — OOM → container restart → fresh process
+    mem_limit: 312m
+    memswap_limit: 312m
+    cpus: "0.50"
+    volumes:
+      # Named volume — persists SQLite DB across restarts/rebuilds
+      - cryptograph_data:/app/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pgrep -x cryptograph || exit 1" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    # NOTE: read_only removed — SQLite WAL mode requires write access to
+    # the DB directory (creates .db-shm and .db-wal files).
+    # Only /app/data (volume) is writable; rest of FS is still immutable.
+    tmpfs:
+      - /tmp:size=64m
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  cryptograph_data:
+    driver: local

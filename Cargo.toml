@@ -1,0 +1,99 @@
+[package]
+name = "cryptograph"
+version = "1.0.0"
+edition = "2021"
+description = "Telegram crypto intelligence bot"
+default-run = "cryptograph"
+
+[[bin]]
+name = "cryptograph"
+path = "src/main.rs"
+
+[lib]
+name = "cryptograph"
+path = "src/lib.rs"
+
+[dependencies]
+# Telegram
+teloxide = { version = "0.12", default-features = false, features = ["macros", "ctrlc_handler", "rustls"] }
+
+# Async runtime (minimal feature set)
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "sync", "time", "signal", "fs"] }
+
+# HTTP (no OpenSSL — rustls only, smaller binary + no system dep)
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+
+# Serialization
+serde       = { version = "1.0", default-features = false, features = ["derive"] }
+serde_json  = { version = "1.0", default-features = false }
+bincode     = "1.3"
+
+# Cryptography — hybrid PQ-safe
+aes-gcm         = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+blake3          = { version = "1.5", default-features = false }
+zeroize         = { version = "1.7", features = ["derive"] }
+rand            = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
+
+# Caching & rate limiting
+moka        = { version = "0.12", default-features = false, features = ["future"] }
+governor    = { version = "0.6", default-features = false, features = ["std", "dashmap"] }
+nonzero_ext = "0.3"
+
+# Charts (minimal features — only what we use)
+plotters        = { version = "0.3", default-features = false, features = ["bitmap_backend", "bitmap_encoder", "line_series", "area_series", "full_palette", "ab_glyph"] }
+plotters-bitmap = { version = "0.3", default-features = false }
+
+# Time
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock", "std"] }
+
+# Error handling
+anyhow    = "1.0"
+thiserror = "1.0"
+
+# Env & config
+dotenvy = "0.15"
+
+# Logging (structured, async-friendly)
+tracing             = "0.1"
+tracing-subscriber  = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "ansi"] }
+
+# Performance
+dashmap     = { version = "5.5", default-features = false }
+parking_lot = { version = "0.12", default-features = false }
+
+# Utilities
+hex     = { version = "0.4", default-features = false, features = ["alloc"] }
+futures = { version = "0.3", default-features = false, features = ["executor"] }
+base64  = "0.21"
+rusqlite = { version = "0.31", features = ["bundled"] }
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-native-roots"] }
+futures-util = "0.3"
+urlencoding = "2.1"
+percent-encoding = "2.3"
+html-escape = "0.2"
+
+
+[dev-dependencies]
+wiremock    = "0.6"
+tokio       = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }
+tempfile    = "3.10"
+
+[profile.dev]
+opt-level   = 0
+debug       = false
+incremental = true
+codegen-units = 16
+
+[profile.test]
+opt-level   = 0
+debug       = false
+incremental = true
+codegen-units = 16
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 1
+panic         = "abort"
+strip         = true

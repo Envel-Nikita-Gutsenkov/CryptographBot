@@ -1,0 +1,35 @@
+/target
+/target/
+!.env.example
+*.cgrp
+*.png
+*.log
+/dist/
+*.sqlite*
+*.db*
+
+# Secrets — NEVER commit real .env
+.env
+# runtime artifacts
+model_memory.json
+
+# Dev junk / one-off scripts — never re-commit these
+/portfolio_backup.json
+/test_*.json
+/rss2json_test.json
+/errors.json
+/payload.json
+/report.json
+/api.html
+/cf_models.json
+/scratch/
+/script.py
+/fix_*.py
+/refactor.py
+/rewrite.py
+/parse*.js
+/modify.js
+/gen_models.rs
+/test_*.rs
+/test_commands.txt
+/short_report.txt

@@ -1,0 +1,41 @@
+[Unit]
+Description=Cryptograph Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cryptograph
+Group=cryptograph
+WorkingDirectory=/opt/cryptograph
+ExecStart=/opt/cryptograph/cryptograph
+
+# Restart on any non-zero exit (crash, OOM exit, watchdog exit)
+Restart=on-failure
+RestartSec=5s
+StartLimitBurst=10
+StartLimitIntervalSec=120
+
+# Resource limits
+MemoryMax=312M
+MemorySwapMax=0
+CPUQuota=50%
+LimitNOFILE=65536
+LimitNPROC=512
+
+# Env
+Environment=RUST_LOG=info
+Environment=MAX_RSS_MB=400
+Environment=HANG_TIMEOUT_SECS=300
+EnvironmentFile=/opt/cryptograph/.env
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/cryptograph
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

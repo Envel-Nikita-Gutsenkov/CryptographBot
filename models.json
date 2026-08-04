@@ -1,0 +1,538 @@
+{
+    "models": [
+        {
+            "alias": "gpt-oss-120b",
+            "provider": "Groq",
+            "roles": [
+                "main",
+                "critic",
+                "news"
+            ],
+            "id": "openai/gpt-oss-120b",
+            "display": "Groq GPT-OSS 120B",
+            "priority": 1
+        },
+        {
+            "alias": "command-a-plus",
+            "provider": "Cohere",
+            "roles": [
+                "main"
+            ],
+            "id": "command-a-plus-05-2026",
+            "display": "Command A+ (05-2026)",
+            "priority": 1
+        },
+        {
+            "alias": "gpt-oss-120b",
+            "provider": "Cerebras",
+            "roles": [
+                "main",
+                "critic",
+                "news"
+            ],
+            "id": "gpt-oss-120b",
+            "display": "Cerebras GPT-OSS 120B",
+            "priority": 1
+        },
+        {
+            "alias": "deepseek-v4-pro",
+            "provider": "Nvidia",
+            "roles": [
+                "main",
+                "critic"
+            ],
+            "id": "deepseek-ai/deepseek-v4-pro",
+            "display": "DeepSeek V4 Pro",
+            "priority": 2
+        },
+        {
+            "alias": "command-a-reasoning",
+            "provider": "Cohere",
+            "roles": [
+                "main",
+                "critic"
+            ],
+            "id": "command-a-reasoning-08-2025",
+            "display": "Command A Reasoning",
+            "priority": 3
+        },
+        {
+            "alias": "groq-compound",
+            "provider": "Groq",
+            "roles": [
+                "main"
+            ],
+            "id": "groq/compound",
+            "display": "Groq Compound",
+            "priority": 3
+        },
+        {
+            "alias": "mistral-large",
+            "provider": "Mistral",
+            "roles": [
+                "main",
+                "news"
+            ],
+            "id": "mistral-large-2512",
+            "display": "Mistral Large 25.12",
+            "priority": 3
+        },
+        {
+            "alias": "gemini-3.5-flash",
+            "provider": "Gemini",
+            "roles": [
+                "main",
+                "news",
+                "watcher",
+                "macro"
+            ],
+            "id": "gemini-3.5-flash",
+            "display": "Gemini 3.5 Flash",
+            "priority": 4
+        },
+        {
+            "alias": "nemotron-3-super",
+            "provider": "Nvidia",
+            "roles": [
+                "main"
+            ],
+            "id": "nvidia/nemotron-3-super-120b-a12b",
+            "display": "Nemotron 3 Super 120B",
+            "priority": 4
+        },
+        {
+            "alias": "qwq-32b",
+            "provider": "Cloudflare",
+            "roles": [
+                "critic",
+                "main"
+            ],
+            "id": "@cf/qwen/qwq-32b",
+            "display": "QwQ 32B (CF)",
+            "priority": 3
+        },
+        {
+            "alias": "deepseek-r1-distill-qwen-32b",
+            "provider": "Cloudflare",
+            "roles": [
+                "main",
+                "critic"
+            ],
+            "id": "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
+            "display": "DeepSeek R1 Distill Qwen 32B (CF)",
+            "priority": 4
+        },
+        {
+            "alias": "minimax-m3",
+            "provider": "Nvidia",
+            "roles": [
+                "main",
+                "critic"
+            ],
+            "id": "minimaxai/minimax-m3",
+            "display": "MiniMax M3 Preview",
+            "priority": 5
+        },
+        {
+            "alias": "gpt-oss-120b-cf",
+            "provider": "Cloudflare",
+            "roles": [
+                "main",
+                "critic"
+            ],
+            "id": "@cf/openai/gpt-oss-120b",
+            "display": "GPT OSS 120B (CF)",
+            "priority": 5
+        },
+        {
+            "alias": "mistral-small-3.1-cf",
+            "provider": "Cloudflare",
+            "roles": [
+                "main",
+                "critic",
+                "macro"
+            ],
+            "id": "@cf/mistralai/mistral-small-3.1-24b-instruct",
+            "display": "Mistral Small 3.1 (CF)",
+            "priority": 6
+        },
+        {
+            "alias": "llama-4-scout",
+            "provider": "Cloudflare",
+            "roles": [
+                "main",
+                "critic",
+                "macro"
+            ],
+            "id": "@cf/meta/llama-4-scout-17b-16e-instruct",
+            "display": "Llama 4 Scout 17b (CF)",
+            "priority": 7
+        },
+        {
+            "alias": "nemotron-3-120b",
+            "provider": "Cloudflare",
+            "roles": [
+                "main"
+            ],
+            "id": "@cf/nvidia/nemotron-3-120b-a12b",
+            "display": "Nemotron 3 Super (CF)",
+            "priority": 7
+        },
+        {
+            "alias": "gemini-3-pro-preview",
+            "provider": "Gemini",
+            "roles": [
+                "main",
+                "critic"
+            ],
+            "id": "gemini-3-pro-preview",
+            "display": "Gemini 3 Pro",
+            "priority": 8
+        },
+        {
+            "alias": "gemini-3.1-pro-preview",
+            "provider": "Gemini",
+            "roles": [
+                "main",
+                "critic"
+            ],
+            "id": "gemini-3.1-pro-preview",
+            "display": "Gemini 3.1 Pro",
+            "priority": 9
+        },
+        {
+            "alias": "gemini-omni-flash-preview",
+            "provider": "Gemini",
+            "roles": [
+                "main",
+                "news"
+            ],
+            "id": "gemini-omni-flash-preview",
+            "display": "Gemini Omni Flash",
+            "priority": 10
+        },
+        {
+            "alias": "gemini-2.5-flash",
+            "provider": "Gemini",
+            "roles": [
+                "news",
+                "watcher",
+                "macro"
+            ],
+            "id": "gemini-2.5-flash",
+            "display": "Gemini 2.5 Flash",
+            "priority": 1
+        },
+        {
+            "alias": "llama-3.3-70b",
+            "provider": "Groq",
+            "roles": [
+                "news",
+                "main"
+            ],
+            "id": "llama-3.3-70b-versatile",
+            "display": "Groq Llama 3.3 70B",
+            "priority": 2
+        },
+        {
+            "alias": "qwen3.6-27b",
+            "provider": "Groq",
+            "roles": [
+                "news"
+            ],
+            "id": "qwen/qwen3.6-27b",
+            "display": "Groq Qwen 3.6 27B",
+            "priority": 2
+        },
+        {
+            "alias": "gemma-4-31b",
+            "provider": "Gemini",
+            "roles": [
+                "news"
+            ],
+            "id": "gemma-4-31b-it",
+            "display": "Gemma 4 31B",
+            "priority": 3
+        },
+        {
+            "alias": "gemma-4-31b",
+            "provider": "Cerebras",
+            "roles": [
+                "news"
+            ],
+            "id": "gemma-4-31b",
+            "display": "Gemma 4 31B (Cerebras)",
+            "priority": 3
+        },
+        {
+            "alias": "mistral-medium-2508",
+            "provider": "Mistral",
+            "roles": [
+                "news"
+            ],
+            "id": "mistral-medium-2508",
+            "display": "Mistral Medium 25.08",
+            "priority": 4
+        },
+        {
+            "alias": "mistral-medium-2505",
+            "provider": "Mistral",
+            "roles": [
+                "news"
+            ],
+            "id": "mistral-medium-2505",
+            "display": "Mistral Medium 25.05",
+            "priority": 5
+        },
+        {
+            "alias": "zai-glm-4.7",
+            "provider": "Cerebras",
+            "roles": [
+                "news",
+                "watcher"
+            ],
+            "id": "zai-glm-4.7",
+            "display": "Cerebras GLM 4.7",
+            "priority": 4
+        },
+        {
+            "alias": "command-a-03-2025",
+            "provider": "Cohere",
+            "roles": [
+                "news"
+            ],
+            "id": "command-a-03-2025",
+            "display": "Command A (03-2025)",
+            "priority": 4
+        },
+        {
+            "alias": "nemotron-49b",
+            "provider": "Nvidia",
+            "roles": [
+                "main",
+                "news"
+            ],
+            "id": "nvidia/llama-3.3-nemotron-super-49b-v1.5",
+            "display": "Nemotron Super 49B v1.5",
+            "priority": 5
+        },
+        {
+            "alias": "command-r-08-2024",
+            "provider": "Cohere",
+            "roles": [
+                "news"
+            ],
+            "id": "command-r-08-2024",
+            "display": "Command R 08-2024",
+            "priority": 6
+        },
+        {
+            "alias": "llama-3.3-70b",
+            "provider": "Nvidia",
+            "roles": [
+                "news"
+            ],
+            "id": "meta/llama-3.3-70b-instruct",
+            "display": "Llama 3.3 70B (Nvidia)",
+            "priority": 6
+        },
+        {
+            "alias": "gemma-4-26b-cf",
+            "provider": "Cloudflare",
+            "roles": [
+                "news"
+            ],
+            "id": "@cf/google/gemma-4-26b-a4b-it",
+            "display": "Gemma 4 26B (CF)",
+            "priority": 4
+        },
+        {
+            "alias": "gpt-oss-20b",
+            "provider": "Cloudflare",
+            "roles": [
+                "news",
+                "watcher"
+            ],
+            "id": "@cf/openai/gpt-oss-20b",
+            "display": "GPT OSS 20B (CF)",
+            "priority": 3
+        },
+        {
+            "alias": "qwen3-30b-a3b",
+            "provider": "Cloudflare",
+            "roles": [
+                "news"
+            ],
+            "id": "@cf/qwen/qwen3-30b-a3b-fp8",
+            "display": "Qwen3 30B A3B (CF)",
+            "priority": 5
+        },
+        {
+            "alias": "deepseek-v4-flash",
+            "provider": "Nvidia",
+            "roles": [
+                "news",
+                "watcher"
+            ],
+            "id": "deepseek-ai/deepseek-v4-flash",
+            "display": "DeepSeek V4 Flash",
+            "priority": 3
+        },
+        {
+            "alias": "llama-3.1-8b-instant",
+            "provider": "Groq",
+            "roles": [
+                "watcher"
+            ],
+            "id": "llama-3.1-8b-instant",
+            "display": "Groq Llama 3.1 8B (Fast)",
+            "priority": 1
+        },
+        {
+            "alias": "glm-4.7-flash",
+            "provider": "Cloudflare",
+            "roles": [
+                "watcher"
+            ],
+            "id": "@cf/zai-org/glm-4.7-flash",
+            "display": "GLM 4.7 Flash (CF)",
+            "priority": 2
+        },
+        {
+            "alias": "gemini-3.5-flash-lite",
+            "provider": "Gemini",
+            "roles": [
+                "watcher"
+            ],
+            "id": "gemini-3.5-flash-lite",
+            "display": "Gemini 3.5 Flash Lite",
+            "priority": 3
+        },
+        {
+            "alias": "gemini-3.6-flash",
+            "provider": "Gemini",
+            "roles": [
+                "watcher",
+                "news"
+            ],
+            "id": "gemini-3.6-flash",
+            "display": "Gemini 3.6 Flash",
+            "priority": 4
+        },
+        {
+            "alias": "gemini-3.1-flash-lite",
+            "provider": "Gemini",
+            "roles": [
+                "watcher"
+            ],
+            "id": "gemini-3.1-flash-lite",
+            "display": "Gemini 3.1 Flash Lite",
+            "priority": 5
+        },
+        {
+            "alias": "gemini-flash-latest",
+            "provider": "Gemini",
+            "roles": [
+                "watcher",
+                "news"
+            ],
+            "id": "gemini-flash-latest",
+            "display": "Gemini Flash (latest)",
+            "priority": 6
+        },
+        {
+            "alias": "gemini-2.5-flash-lite",
+            "provider": "Gemini",
+            "roles": [
+                "watcher"
+            ],
+            "id": "gemini-2.5-flash-lite",
+            "display": "Gemini 2.5 Flash Lite",
+            "priority": 7
+        },
+        {
+            "alias": "gemini-2.0-flash",
+            "provider": "Gemini",
+            "roles": [
+                "watcher"
+            ],
+            "id": "gemini-2.0-flash",
+            "display": "Gemini 2.0 Flash",
+            "priority": 8
+        },
+        {
+            "alias": "open-mistral-nemo",
+            "provider": "Mistral",
+            "roles": [
+                "watcher"
+            ],
+            "id": "open-mistral-nemo",
+            "display": "Mistral Nemo",
+            "priority": 5
+        },
+        {
+            "alias": "nemotron-nano-30b",
+            "provider": "Nvidia",
+            "roles": [
+                "watcher"
+            ],
+            "id": "nvidia/nemotron-3-nano-30b-a3b",
+            "display": "Nemotron 3 Nano 30B",
+            "priority": 7
+        },
+        {
+            "alias": "command-r7b-12-2024",
+            "provider": "Cohere",
+            "roles": [
+                "watcher"
+            ],
+            "id": "command-r7b-12-2024",
+            "display": "Command R7B 12-2024",
+            "priority": 8
+        },
+        {
+            "alias": "allam-2-7b",
+            "provider": "Groq",
+            "roles": [
+                "watcher"
+            ],
+            "id": "allam-2-7b",
+            "display": "Groq Allam 2 7B",
+            "priority": 9
+        },
+        {
+            "alias": "groq-compound-mini",
+            "provider": "Groq",
+            "roles": [
+                "watcher",
+                "main"
+            ],
+            "id": "groq/compound-mini",
+            "display": "Groq Compound Mini",
+            "priority": 10
+        },
+        {
+            "alias": "gemma-4-26b-a4b-it",
+            "provider": "Gemini",
+            "roles": [
+                "news"
+            ],
+            "id": "gemma-4-26b-a4b-it",
+            "display": "Gemma 4 26B",
+            "priority": 6
+        },
+        {
+            "alias": "deepseek-v4-flash",
+            "provider": "DeepSeek",
+            "roles": [
+                "main",
+                "critic",
+                "news",
+                "watcher"
+            ],
+            "id": "deepseek-v4-flash",
+            "display": "DeepSeek V4 Flash (paid)",
+            "priority": 9
+        }
+    ]
+}
