@@ -34,6 +34,13 @@ impl CryptoCompareProvider {
         }
     }
 
+    /// Whether a usable API key is configured. Without one every
+    /// CryptoCompare call fails with 401, historically marking the provider
+    /// as 100% error in daily metrics for zero benefit.
+    pub fn is_configured(&self) -> bool {
+        !self.api_key.is_empty() && !self.api_key.starts_with("xxxxxx")
+    }
+
     pub async fn get_quotes(&self, symbols: &[&str]) -> Result<Vec<super::RawQuote>> {
         if symbols.is_empty() {
             return Ok(Vec::new());

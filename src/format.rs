@@ -15,7 +15,61 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
     out
 }
 
-// ── Price formatting ──────────────────────────────────────────────────────────
+// ── Cache normalization ──
+
+/// Compact, formatting-free version of an AI-generated summary for cache storage.
+/// Cached summaries (`news_summaries`, `news_summary_history`, `macro_cache`)
+/// are only ever re-read as AI prompt context — never rendered — so markdown
+/// scaffolding (`###`, `**`, backticks) and emoji are pure token and storage
+/// overhead. Bullet markers and list whitespaces are preserved.
+pub fn plain_for_cache(s: &str) -> String {
+    // Strip inline markers first, then per-line scaffolding.
+    let de_markdown = s
+        .replace("**", "")
+        .replace(&format!("{}", '`'), "")
+        .replace('*', "");
+
+    let mut out = String::with_capacity(s.len());
+    for raw_line in de_markdown.lines() {
+        let line = raw_line.trim().trim_start_matches('#').trim();
+        if line.is_empty() {
+            out.push('\n');
+            continue;
+        }
+        for c in line.chars() {
+            let v = c as u32;
+            let pictograph = (0x1F000..=0x1FAFF).contains(&v) // emoji main
+                || (0x2600..=0x27BF).contains(&v) // misc symbols & dingbats
+                || (0x2B00..=0x2BFF).contains(&v) // arrows/stars blocks
+                || (0x1F1E6..=0x1F1FF).contains(&v) // flags
+                || v == 0xFE0F // variation selector-16
+                || v == 0x200D // zero-width joiner
+                || v == 0x20E3 // combining enclosing keycap
+                || v == 0xFFFD; // replacement char
+            if pictograph {
+                continue;
+            }
+            out.push(c);
+        }
+        out.push('\n');
+    }
+
+    // Collapse runs of blank lines to a single one.
+    let mut collapsed = String::with_capacity(out.len());
+    let mut last_blank = false;
+    for line in out.lines() {
+        let blank = line.is_empty();
+        if blank && last_blank {
+            continue;
+        }
+        collapsed.push_str(line);
+        collapsed.push('\n');
+        last_blank = blank;
+    }
+    collapsed.trim().to_string()
+}
+
+// ── Price formatting ─────────────────────────────────────────────────────────
 
 pub fn format_thousands(n: f64, decimals: usize) -> String {
     let parts: Vec<String> = format!("{:.1$}", n, decimals)
@@ -376,7 +430,43 @@ pub fn format_fng(fng: &FearAndGreed) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{redact_secrets, truncate_chars};
+    use super::{plain_for_cache, redact_secrets, truncate_chars};
+
+    #[test]
+    fn plain_for_cache_strips_markdown_and_emoji() {
+        let s = "### 📊 ETH Market Update\n\n**Bearish bias:** traders are leveraged short.\n- Funding: +0.0040%\n";
+        let p = plain_for_cache(s);
+        assert!(!p.contains('#'));
+        assert!(!p.contains("**"));
+        assert!(
+            p.chars().all(|c| (c as u32) < 0x2600),
+            "no pictographs: {p}"
+        );
+        assert!(p.contains("Bearish bias: traders are leveraged short"));
+        assert!(p.contains("Funding: +0.0040%"));
+    }
+
+    #[test]
+    fn plain_for_cache_keeps_text_and_numbers() {
+        let s = "### Summary\nBTC $83,60 (-0.9%)\n\n\n\t\nprice_7d_ago: 85766.87 USD";
+        let p = plain_for_cache(s);
+        assert!(p.contains("BTC $83,60 (-0.9%)"));
+        assert!(p.contains("price_7d_ago: 85766.87 USD"));
+        // runs of blank lines collapse to a single blank line
+        assert!(!p.contains("\n\n\n"));
+    }
+
+    #[test]
+    fn plain_for_cache_collapses_blank_lines_and_trims() {
+        let p = plain_for_cache("\n\n### heading\n\n\n\nbody line\n\n\n");
+        assert_eq!(p, "heading\n\nbody line");
+    }
+
+    #[test]
+    fn plain_for_cache_keeps_cyrillic() {
+        let p = plain_for_cache("### 🚀 Проверка\nСигнал: докупать не надо");
+        assert!(p.contains("Сигнал: докупать не надо"));
+    }
 
     #[test]
     fn truncate_chars_is_char_safe() {

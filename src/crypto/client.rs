@@ -654,10 +654,7 @@ impl CryptoClientInner {
             BinanceProvider::NAME,
             self.binance.get_history(symbol, days),
         );
-        let cc = self.fetch_history_guarded(
-            crate::crypto::providers::cryptocompare::NAME,
-            self.cryptocompare.get_history(symbol, days),
-        );
+        let cc = self.history_from_cc(symbol, days);
         let (cg, bi, cc) = tokio::join!(cg, bi, cc);
 
         let mut candidates: Vec<Vec<(i64, f64)>> = Vec::new();
@@ -726,6 +723,19 @@ impl CryptoClientInner {
 
     /// Health-gated history fetch: skips providers that are temporarily banned
     /// and records failures so a consistently bad provider is excluded.
+    /// CryptoCompare history gate: without a configured API key the provider
+    /// always fails with 401, so skip it (without an error record) entirely.
+    async fn history_from_cc(&self, symbol: &str, days: u32) -> Option<Vec<(i64, f64)>> {
+        if !self.cryptocompare.is_configured() {
+            return None;
+        }
+        self.fetch_history_guarded(
+            crate::crypto::providers::cryptocompare::NAME,
+            self.cryptocompare.get_history(symbol, days),
+        )
+        .await
+    }
+
     async fn fetch_history_guarded<F>(&self, name: &'static str, fut: F) -> Option<Vec<(i64, f64)>>
     where
         F: std::future::Future<Output = crate::error::Result<Vec<(i64, f64)>>>,
@@ -1148,9 +1158,10 @@ impl CryptoClientInner {
     }
 
     async fn fetch_from_ccp(&self, symbols: &[&str]) -> Option<Vec<RawQuote>> {
-        if !self
-            .health
-            .should_probe(crate::crypto::providers::cryptocompare::NAME)
+        if !self.cryptocompare.is_configured()
+            || !self
+                .health
+                .should_probe(crate::crypto::providers::cryptocompare::NAME)
         {
             return None;
         }
@@ -1180,6 +1191,9 @@ impl CryptoClientInner {
             Ok(Ok(q)) => Some(q),
             Ok(Err(e)) => {
                 let err: BotError = e;
+                // Low rate (~several per day): surfacing the real reason lets us
+                // diagnose provider dips from logs instead of only counters.
+                warn!("Binance quotes failed: {err}");
                 self.health
                     .record_err(BinanceProvider::NAME, &err.to_string());
                 None

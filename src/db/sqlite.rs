@@ -107,6 +107,9 @@ fn open_and_init_db(db_path: &str) -> anyhow::Result<Connection> {
 }
 
 impl SqliteStore {
+    fn normalize_cached_text(text: &str) -> String {
+        crate::format::plain_for_cache(text)
+    }
     pub fn new(db_path: &str) -> anyhow::Result<Self> {
         let (tx, mut rx) = mpsc::channel::<SqliteMessage>(1000);
         let db_path = db_path.to_string();
@@ -540,13 +543,15 @@ impl SqliteStore {
             .await;
     }
 
-    /// Asynchronously fire-and-forget a news summary
+    /// Asynchronously fire-and-forget a news summary.
+    /// Stored text is normalized (no markdown / emoji): all consumers of these
+    /// rows are AI prompt contexts, never rendered messages.
     pub async fn save_news_summary(&self, symbol: &str, summary: &str) {
         let _ = self
             .tx
             .send(SqliteMessage::SaveNewsSummary {
                 symbol: symbol.to_uppercase(),
-                summary: summary.to_string(),
+                summary: Self::normalize_cached_text(summary),
             })
             .await;
     }
@@ -556,7 +561,7 @@ impl SqliteStore {
     pub async fn save_news_summary_history(&self, symbol: &str, summary: &str) {
         let db_path = self.db_path.clone();
         let symbol = symbol.to_uppercase();
-        let summary = summary.to_string();
+        let summary = Self::normalize_cached_text(summary);
         let _ = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             let conn = Connection::open(&db_path)?;
             conn.execute(
@@ -568,13 +573,14 @@ impl SqliteStore {
         .await;
     }
 
-    /// Asynchronously fire-and-forget a macro summary
+    /// Asynchronously fire-and-forget a macro summary (normalized the same way
+    /// as news summaries; deterministic metric dumps pass through unchanged).
     pub async fn save_macro_summary(&self, symbol: &str, summary: &str) {
         let _ = self
             .tx
             .send(SqliteMessage::SaveMacroSummary {
                 symbol: symbol.to_uppercase(),
-                summary: summary.to_string(),
+                summary: Self::normalize_cached_text(summary),
             })
             .await;
     }
@@ -1699,18 +1705,9 @@ fn init_db(conn: &mut Connection) -> rusqlite::Result<()> {
     // Migration for existing DBs: OHLCV columns on price_history. Older
     // schemas only had (symbol, price, timestamp); without these columns the
     // price-logging INSERT fails and the SQLite history fallback stays empty.
-    let _ = conn.execute(
-        "ALTER TABLE price_history ADD COLUMN open REAL;",
-        (),
-    );
-    let _ = conn.execute(
-        "ALTER TABLE price_history ADD COLUMN high REAL;",
-        (),
-    );
-    let _ = conn.execute(
-        "ALTER TABLE price_history ADD COLUMN low REAL;",
-        (),
-    );
+    let _ = conn.execute("ALTER TABLE price_history ADD COLUMN open REAL;", ());
+    let _ = conn.execute("ALTER TABLE price_history ADD COLUMN high REAL;", ());
+    let _ = conn.execute("ALTER TABLE price_history ADD COLUMN low REAL;", ());
 
     // Migration for existing DBs: model fingerprint (OpenRouter `updated` field)
     // lets the lazy ranker skip re-testing models that have not changed.

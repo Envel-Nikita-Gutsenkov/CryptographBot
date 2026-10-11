@@ -8,6 +8,8 @@ use std::time::Duration;
 pub struct BinanceProvider {
     http: Client,
     cache: Cache<String, RawQuote>,
+    // Prod default, injected in tests via with_base_url
+    base_url: String,
 }
 
 impl BinanceProvider {
@@ -18,13 +20,26 @@ impl BinanceProvider {
             http: Client::builder()
                 .timeout(Duration::from_secs(8))
                 .use_rustls_tls()
+                // Pin the socket family to IPv4: api.binance.com is served via
+                // CloudFront (AAAA present, and on hosts with a broken v6 route
+                // ~20% of attempts stalled past the timeout while IPv4 was
+                // always instant). CoinGecko/BYbit etc. were verified working
+                // on both stacks, so this stays Binance-specific.
+                .local_address(Some(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)))
                 .build()
                 .unwrap(),
             cache: Cache::builder()
                 .time_to_live(Duration::from_secs(30))
                 .max_capacity(200)
                 .build(),
+            base_url: "https://api.binance.com".to_string(),
         }
+    }
+
+    #[cfg(test)]
+    fn with_base_url(mut self, url: &str) -> Self {
+        self.base_url = url.to_string();
+        self
     }
 
     pub async fn get_quotes(&self, symbols: &[&str]) -> Result<Vec<RawQuote>> {
@@ -34,7 +49,11 @@ impl BinanceProvider {
             let sym_upper = s.to_uppercase();
             match self.cache.get(&sym_upper).await {
                 Some(q) => out.push(q),
-                None => fetch.push(sym_upper),
+                // Dedupe: callers may repeat symbols (watchlist + holdings),
+                // and the batch 24hr endpoint rejects any duplicate with
+                // code -1151, failing the whole batch.
+                None if !fetch.contains(&sym_upper) => fetch.push(sym_upper),
+                None => {}
             }
         }
         if fetch.is_empty() {
@@ -56,7 +75,10 @@ impl BinanceProvider {
 
         let resp = self
             .http
-            .get("https://api.binance.com/api/v3/ticker/24hr")
+            .get(format!(
+                "{}/api/v3/ticker/24hr",
+                self.base_url.trim_end_matches('/')
+            ))
             .query(&[("symbols", &symbols_json)])
             .send()
             .await?;
@@ -134,7 +156,10 @@ impl BinanceProvider {
 
         let resp = self
             .http
-            .get("https://api.binance.com/api/v3/klines")
+            .get(format!(
+                "{}/api/v3/klines",
+                self.base_url.trim_end_matches('/')
+            ))
             .query(&[
                 ("symbol", pair.as_str()),
                 ("interval", interval),
@@ -184,4 +209,42 @@ struct BinanceTicker {
     last_price: String,
     #[serde(rename = "quoteVolume")]
     quote_volume: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Callers may pass the same symbol twice (watchlist + holdings overlap).
+    /// The batch 24hr endpoint rejects duplicates with code -1151, so the
+    /// provider must send each symbol once. If the dedupe regresses, the
+    /// request becomes `["BTCUSDT","BTCUSDT"]`, no mock matches it and the
+    /// call fails.
+    #[tokio::test]
+    async fn dedupes_symbols_in_batch_request() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::query_param("symbols", "[\"BTCUSDT\"]"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "symbol": "BTCUSDT",
+                        "lastPrice": "50000.00",
+                        "priceChangePercent": "1.0",
+                        "quoteVolume": "1000.0"
+                    }
+                ])),
+            )
+            .mount(&server)
+            .await;
+
+        let p = BinanceProvider::new().with_base_url(&server.uri());
+        let quotes = p
+            .get_quotes(&["BTC", "BTC"])
+            .await
+            .expect("deduped call ok");
+        assert_eq!(quotes.len(), 1);
+        assert_eq!(quotes[0].symbol, "BTC");
+        assert_eq!(quotes[0].price_usd, 50000.0);
+    }
 }
