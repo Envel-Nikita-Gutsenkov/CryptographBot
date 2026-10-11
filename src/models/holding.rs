@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use super::purchase::CorrectionEntry;
+use serde::{Deserialize, Serialize};
 
 /// Current balance of a symbol in a specific wallet.
 /// Derived from purchases + transfers, but overridable with corrections.

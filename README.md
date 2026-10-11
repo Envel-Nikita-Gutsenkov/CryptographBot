@@ -48,7 +48,8 @@ Because it is fed *real, pre-computed data* ("on a platter"), Cryptograph **answ
 
 * **MoE double-checked pipeline:** every important answer is produced by **two independent models racing**, then reviewed and merged by a **fact-checking critic** that validates every number against the ground-truth market data. Hallucinated prices get corrected or rejected.
 * **Web search:** if a question needs fresh information (wallets, regulations, latest news), the model can search the web — Tavily / Exa first, then a free local fallback.
-* **Free-first:** runs entirely on **free API tiers** (Gemini, Groq, Cerebras, NVIDIA, Mistral, Cohere, Cloudflare). A paid **DeepSeek** model is available as a last resort, with a hard **monthly budget enforced in code** (default 3M tokens / 150 requests) so it can never be burned by accident.
+* **Free-first:** runs entirely on **free API tiers** (Gemini, Groq, Cerebras, NVIDIA, Mistral, Cohere, Cloudflare, OpenRouter free). A paid **DeepSeek** model is available as a last resort, with a hard **monthly budget enforced in code** (default 3M tokens / 150 requests) so it can never be burned by accident. OpenRouter has a hard **daily 300-request budget**.
+* **Self-improving model pool:** a lazy ranker (`models refresh|rank|stats|calibrate`) discovers free models across all providers, benchmarks **at most 3 per day** (30-day cooldown, fingerprint-change detection) with a non-OpenRouter judge, and assigns roles — so the pools self-tune without burning rate limits.
 * **Self-healing:** model health is tracked from real traffic only; failing models get a 1-hour cooldown; workers restart automatically on panic with exponential backoff; schema self-migrates on every boot.
 
 ### 🎯 Goals & Memory (Proactive Mode)
@@ -78,9 +79,12 @@ P&L breakdowns, portfolio allocation donuts, and historical price charts rendere
 ### 5. 🧹 No Spam
 Price alerts have cooldowns and quiet hours. The AI watcher and the goal worker decide *whether* to message you, and the goal worker is explicitly instructed to prefer silence over noise.
 
+### 6. 🧭 Network Efficiency
+Quotes are served from a local cache with real-time refresh by the Binance WS stream; providers are fanned out only on cache misses — dozens of times fewer provider calls than naive per-request polling. Deterministic analytics (7-day min/max, volatility gates, milestone anchors) are computed from local SQLite history — no AI and no network calls where plain math is enough.
+
 ---
 
-## 🧩 Feature Suite
+### 🧩 Feature Suite
 
 **Market Intelligence**
 * `/price BTC ETH` — live quotes with changes & ATH discounts
@@ -109,6 +113,14 @@ Price alerts have cooldowns and quiet hours. The AI watcher and the goal worker 
 * `/alert add BTC < 60000 cooldown:6h`, `/alert list`, `/alert del N`
 * AI market watcher with severity levels (Critical/Important) and cooldowns
 
+**Trading (CLI + Telegram — Win-Win Accumulator)**
+* `trade allocate SOL 50` — isolated capital pool
+* `trade rule BTC ceiling 65000` — operator limits ("don't buy above $65k")
+* `trade tick SOL 75 --execute` — deterministic engine cycle
+* `trade backtest --batch --symbols BTC,ETH,SOL,LINK --from 2020-01-01 --to 2026-09-01`
+* `trade strategies` / `trade strategy apply Win-Win-Accumulator` / `trade tune`
+* `/trade ...`, `/tradetask ...` — Telegram mirrors (sim mode by default)
+
 **System & Privacy**
 * `/settings`, `/stats` (model health, data-source reliability, web-search usage, DeepSeek budget)
 * `/backup`, `/restore` — versioned JSON backup
@@ -123,7 +135,8 @@ Price alerts have cooldowns and quiet hours. The AI watcher and the goal worker 
 | `TELOXIDE_TOKEN` | ✅ | Your Telegram bot token |
 | `ALLOWED_ADMIN_IDS` | ✅ | Comma-separated Telegram user IDs allowed to use the bot |
 | `GEMINI_API_KEY` | ◻️ | Free AI tier (strongly recommended — main fallback model) |
-| `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `NVIDIA_API_KEY`, `MISTRAL_API_KEY`, `COHERE_API_KEY`, `CLOUDFLARE_API_TOKEN` | ◻️ | Additional free AI tiers (the more, the more resilient) |
+| `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `NVIDIA_API_KEY`, `MISTRAL_API_KEY`, `COHERE_API_KEY`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `HF_API_KEY` | ◻️ | Additional free AI tiers (the more, the more resilient) |
+| `OPENROUTER_API_KEY` | ◻️ | Free-tier model discovery + ranking; hard daily 300-request budget |
 | `DEEPSEEK_API_KEY` | ◻️ | Optional paid last-resort model (budget-capped: 3M tokens / 150 req per month) |
 | `CMC_API_KEY`, `COINGECKO_API_KEY`, `COINCAP_API_KEY`, `CRYPTOCOMPARE_API_KEY` | ◻️ | Market data providers (free tiers are fine) |
 | `HELIUS_API_KEY`, `ANKR_RPC_URL` | ◻️ | On-chain wallet balances |
@@ -167,11 +180,18 @@ The workflow is "build on your machine, deploy on the server" — no Rust toolch
 Same workflow — repackage with `build_dist.ps1`, copy to the server, `./run.sh`. **Your data survives:** the SQLite volume is preserved, the schema migrates itself, and only ephemeral caches are reset. No manual database commands ever needed.
 
 ### 🧪 CLI Diagnostics
-The bot ships with built-in CLI modes to see *exactly* what the AI does:
+The bot ships with built-in CLI modes to see *exactly* what the AI does — and to
+hard-test every subsystem 1:1 with the Telegram code paths, without touching
+Telegram:
 ```bash
 cargo run -- analyze BTC                 # deep AI analysis in the terminal
-cargo run -- goal demo                   # replay a proactive goal scan, stage by stage
 cargo run -- ask demo "your question"    # replay /ask with prompts, web searches, drafts, critic
+cargo run -- goal demo                   # replay a proactive goal scan, stage by stage
+cargo run -- scenario scenarios/euphoria.json "стоит ли докупать?" --fast  # deterministic what-if
+cargo run -- search "новости по ETH"     # inspect only the web-search flow
+cargo run -- models refresh|rank|stats   # lazy model ranking across providers
+cargo run -- trade status                # trading module (sim by default)
+cargo run -- wipe-knowledge              # reset caches, keep users/goals/memos/budgets
 ```
 
 ---
@@ -191,8 +211,12 @@ cargo run -- ask demo "your question"    # replay /ask with prompts, web searche
 - [Features](docs/features.md)
 - [Architecture](docs/architecture.md)
 - [Database](docs/database.md)
-- [AI Pipeline](docs/ai_pipeline_guide.md)
+- [Complete System Guide](docs/system_guide.md)
+- [AI Pipeline & Model Orchestration](docs/ai_pipeline_guide.md)
+- [System Brain & Scheduler](docs/system_brain_guide.md)
+- [AI Analytics & MoE](docs/ai_analytics.md)
 - [Backup & Restore](docs/backup_restore_guide.md)
+- [Trading Module (Win-Win Accumulator)](docs/trading/README.md)
 
 ---
 

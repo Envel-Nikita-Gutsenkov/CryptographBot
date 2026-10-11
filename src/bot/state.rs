@@ -22,8 +22,13 @@ pub enum State {
     },
 
     // Transfer wizard
-    TransferStep1 { symbol: String },
-    TransferStep2 { symbol: String, from_wallet_id: u64 },
+    TransferStep1 {
+        symbol: String,
+    },
+    TransferStep2 {
+        symbol: String,
+        from_wallet_id: u64,
+    },
     TransferStep3 {
         symbol: String,
         from_wallet_id: u64,
@@ -33,16 +38,26 @@ pub enum State {
 
     // Wallet addition
     WalletStep1,
-    WalletStep2 { name: String, kind: WalletKind },
+    WalletStep2 {
+        name: String,
+        kind: WalletKind,
+    },
 
     // Backup restore confirmation
-    AwaitingRestoreConfirm { portfolio_snapshot: Box<Portfolio> },
+    AwaitingRestoreConfirm {
+        portfolio_snapshot: Box<Portfolio>,
+    },
 
     // Purchase correction
-    CorrectingPurchase { purchase_id: u64 },
+    CorrectingPurchase {
+        purchase_id: u64,
+    },
 
     // Holding manual override
-    CorrectingHolding { wallet_id: u64, symbol: String },
+    CorrectingHolding {
+        wallet_id: u64,
+        symbol: String,
+    },
 
     // AI analysis wizard
     AiWizard,

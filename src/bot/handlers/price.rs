@@ -1,10 +1,6 @@
 use std::sync::Arc;
 
-use teloxide::{
-    payloads::SendMessageSetters,
-    prelude::*,
-    types::ParseMode,
-};
+use teloxide::{payloads::SendMessageSetters, prelude::*, types::ParseMode};
 
 use crate::{
     bot::keyboards,
@@ -28,19 +24,18 @@ pub async fn handle_price(
     guard_admin(&bot, &msg, user_id, &config).await?;
 
     let symbols = if args.trim().is_empty() {
-        store.read(user_id, |p| {
-            p.settings.default_watchlist.clone()
-        })
+        store.read(user_id, |p| p.settings.default_watchlist.clone())
     } else {
-        args.split_whitespace()
-            .map(|s| s.to_uppercase())
-            .collect()
+        args.split_whitespace().map(|s| s.to_uppercase()).collect()
     };
 
     if symbols.is_empty() {
-        bot.send_message(msg.chat.id, "No symbols configured\\. Use /watchlist add BTC")
-            .parse_mode(ParseMode::MarkdownV2)
-            .await?;
+        bot.send_message(
+            msg.chat.id,
+            "No symbols configured\\. Use /watchlist add BTC",
+        )
+        .parse_mode(ParseMode::MarkdownV2)
+        .await?;
         return Ok(());
     }
 
@@ -51,7 +46,8 @@ pub async fn handle_price(
 
     match quotes {
         Err(BotError::RateLimited) => {
-            bot.send_message(msg.chat.id, "⚠️ Rate limit hit — please wait a moment").await?;
+            bot.send_message(msg.chat.id, "⚠️ Rate limit hit — please wait a moment")
+                .await?;
         }
         Err(e) => {
             bot.send_message(msg.chat.id, format!("Error: {e}")).await?;
@@ -59,7 +55,10 @@ pub async fn handle_price(
         Ok(quotes) => {
             for q in &quotes {
                 let keyboard = teloxide::types::InlineKeyboardMarkup::new(vec![vec![
-                    teloxide::types::InlineKeyboardButton::callback("📈 View Chart", &format!("chart:{}:1d", q.symbol))
+                    teloxide::types::InlineKeyboardButton::callback(
+                        "📈 View Chart",
+                        &format!("chart:{}:1d", q.symbol),
+                    ),
                 ]]);
                 bot.send_message(msg.chat.id, fmt_quote_card(q))
                     .parse_mode(ParseMode::MarkdownV2)
@@ -139,7 +138,12 @@ pub async fn handle_top_chart(
     Ok(())
 }
 
-async fn guard_admin(bot: &Bot, msg: &Message, user_id: u64, config: &Config) -> anyhow::Result<()> {
+async fn guard_admin(
+    bot: &Bot,
+    msg: &Message,
+    user_id: u64,
+    config: &Config,
+) -> anyhow::Result<()> {
     if !config.is_admin(user_id) {
         bot.send_message(msg.chat.id, "⛔ Unauthorized").await?;
         anyhow::bail!(BotError::Unauthorized);

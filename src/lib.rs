@@ -9,4 +9,5 @@ pub mod format;
 pub mod models;
 pub mod security;
 pub mod supervisor;
+pub mod trading;
 pub mod watchdog;

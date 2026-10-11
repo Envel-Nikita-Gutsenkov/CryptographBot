@@ -1,12 +1,23 @@
 //! Interactive AI model test.
-//! Run: `cargo test -- --nocapture ai_model_interactive`
+//! Run explicitly: `cargo test -- --ignored --nocapture ai_model_interactive`
 //! Requires GEMINI_API_KEY and/or MISTRAL_API_KEY in env.
+//!
+//! Marked `#[ignore]` so the default `cargo test` run never blocks on stdin:
+//! this is a manual REPL-style probe, not an automated assertion.
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 
 #[tokio::test]
+#[ignore = "interactive REPL probe; run explicitly with -- --ignored --nocapture"]
 async fn ai_model_interactive() {
     dotenvy::dotenv().ok();
+
+    // Non-interactive environments (CI, scripts) have no stdin — skip instead
+    // of panicking so the default test run stays green.
+    if !io::stdin().is_terminal() {
+        println!("Skipped: stdin is not a terminal (non-interactive run).");
+        return;
+    }
 
     let models = cryptograph_models();
     println!("\n=== AI Model Interactive Test ===\n");
@@ -17,7 +28,10 @@ async fn ai_model_interactive() {
     io::stdout().flush().unwrap();
 
     let stdin = io::stdin();
-    let line = stdin.lock().lines().next()
+    let line = stdin
+        .lock()
+        .lines()
+        .next()
         .expect("No input")
         .expect("Read error");
     let input = line.trim().to_string();
@@ -40,7 +54,10 @@ async fn ai_model_interactive() {
     println!("Enter test prompt (or press Enter for default): ");
     io::stdout().flush().unwrap();
 
-    let prompt_line = stdin.lock().lines().next()
+    let prompt_line = stdin
+        .lock()
+        .lines()
+        .next()
         .expect("No input")
         .expect("Read error");
     let prompt = prompt_line.trim().to_string();
@@ -67,19 +84,25 @@ async fn ai_model_interactive() {
 fn cryptograph_models() -> Vec<(&'static str, &'static str)> {
     vec![
         // Gemini
-        ("gemini-2.5-pro",       "Gemini 2.5 Pro"),
-        ("gemini-2.5-flash",     "Gemini 2.5 Flash"),
-        ("gemini-2.0-flash",     "Gemini 2.0 Flash"),
+        ("gemini-2.5-pro", "Gemini 2.5 Pro"),
+        ("gemini-2.5-flash", "Gemini 2.5 Flash"),
+        ("gemini-2.0-flash", "Gemini 2.0 Flash"),
         // Groq (priority order)
-        ("openai/gpt-oss-120b",                          "Groq GPT-oss 120B (Reasoning)"),
-        ("meta-llama/llama-4-scout-17b-16e-instruct",    "Groq Llama 4 Scout 17B (Flagship)"),
-        ("llama-3.3-70b-versatile",                      "Groq Llama 3.3 70B (Heavyweight)"),
-        ("qwen/qwen3-32b",                               "Groq Qwen3 32B (Balanced)"),
-        ("llama-3.1-8b-instant",                         "Groq Llama 3.1 8B (Fast)"),
+        ("openai/gpt-oss-120b", "Groq GPT-oss 120B (Reasoning)"),
+        (
+            "meta-llama/llama-4-scout-17b-16e-instruct",
+            "Groq Llama 4 Scout 17B (Flagship)",
+        ),
+        (
+            "llama-3.3-70b-versatile",
+            "Groq Llama 3.3 70B (Heavyweight)",
+        ),
+        ("qwen/qwen3-32b", "Groq Qwen3 32B (Balanced)"),
+        ("llama-3.1-8b-instant", "Groq Llama 3.1 8B (Fast)"),
         // Mistral
-        ("mistral-large-2512",   "Mistral Large 25.12"),
-        ("mistral-medium-2505",  "Mistral Medium 25.05"),
-        ("magistral-medium-2509","Magistral Medium 25.09"),
+        ("mistral-large-2512", "Mistral Large 25.12"),
+        ("mistral-medium-2505", "Mistral Medium 25.05"),
+        ("magistral-medium-2509", "Magistral Medium 25.09"),
     ]
 }
 
@@ -114,16 +137,18 @@ async fn call_model(model_id: &str, prompt: &str) -> anyhow::Result<String> {
     }
 
     // Mistral
-    let api_key = std::env::var("MISTRAL_API_KEY")
-        .map_err(|_| anyhow::anyhow!("MISTRAL_API_KEY not set"))?;
+    let api_key =
+        std::env::var("MISTRAL_API_KEY").map_err(|_| anyhow::anyhow!("MISTRAL_API_KEY not set"))?;
     let body = serde_json::json!({
         "model": model_id,
         "messages": [{"role": "user", "content": prompt}]
     });
-    let resp = client.post("https://api.mistral.ai/v1/chat/completions")
+    let resp = client
+        .post("https://api.mistral.ai/v1/chat/completions")
         .header("Authorization", format!("Bearer {api_key}"))
         .json(&body)
-        .send().await?;
+        .send()
+        .await?;
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();

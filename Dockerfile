@@ -26,6 +26,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY --from=builder /build/target/release/cryptograph /app/cryptograph
 COPY models.json /app/models.json
+# Bundled trading seed: copied into the SQLite volume on first open so a
+# fresh install starts with trained profiles + regime winners.
+COPY data/trading_sim_seed.db /app/data/trading_sim_seed.db
 
 RUN mkdir -p /app/data \
     && chown -R cryptograph:cryptograph /app

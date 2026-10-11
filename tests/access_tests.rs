@@ -22,13 +22,11 @@ fn approved_user_gains_access() {
 #[test]
 fn username_lookup_case_insensitive() {
     // Simulate find_by_username
-    let db: Vec<(u64, Option<String>)> = vec![
-        (42, Some("Alice".into())),
-        (99, Some("Bob".into())),
-    ];
+    let db: Vec<(u64, Option<String>)> = vec![(42, Some("Alice".into())), (99, Some("Bob".into()))];
     let find = |needle: &str| {
         let n = needle.trim_start_matches('@').to_lowercase();
-        db.iter().find(|(_, u)| u.as_deref().map(|x| x.to_lowercase()) == Some(n.clone()))
+        db.iter()
+            .find(|(_, u)| u.as_deref().map(|x| x.to_lowercase()) == Some(n.clone()))
             .map(|(id, _)| *id)
     };
     assert_eq!(find("@alice"), Some(42));

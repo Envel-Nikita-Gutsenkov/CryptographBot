@@ -15,24 +15,44 @@ Create a `.env` file in the root directory. You can copy the template from `.env
 
 ```ini
 # --- Telegram API Config ---
-TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+TELOXIDE_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 
 # --- Allowed Admin User IDs (Comma-separated) ---
 ALLOWED_ADMIN_IDS=111111111,222222222
 
 # --- Data Sources Keys ---
 CMC_API_KEY=your-coinmarketcap-pro-api-key
-HELIUS_API_KEY=your-solana-helius-rpc-key
+COINGECKO_API_KEY=your-coingecko-key          # optional
+COINCAP_API_KEY=your-coincap-key              # optional
+CRYPTOCOMPARE_API_KEY=your-cryptocompare-key  # optional
+HELIUS_API_KEY=your-solana-helius-rpc-key     # optional (on-chain wallets)
+ANKR_RPC_URL=your-ankr-rpc-url                # optional (EVM wallets)
 
-# --- Cryptographic Security ---
-# Must be exactly 32 bytes represented in Hex (64 characters)
-MASTER_KEY=767e0ca11656d80ba3124dca91f8c1c342230a1a99142ef31b1fbb6bb6525dfe
+# --- AI Provider Keys (free tiers; the more, the more resilient) ---
+GEMINI_API_KEY=your-gemini-key                # strongly recommended
+GROQ_API_KEY=your-groq-key
+CEREBRAS_API_KEY=your-cerebras-key
+NVIDIA_API_KEY=your-nvidia-key
+MISTRAL_API_KEY=your-mistral-key
+COHERE_API_KEY=your-cohere-key
+CLOUDFLARE_ACCOUNT_ID=your-cf-account-id
+CLOUDFLARE_API_TOKEN=your-cf-api-token
+HF_API_KEY=your-huggingface-key
+OPENROUTER_API_KEY=your-openrouter-key        # free-tier discovery + 300 req/day
+DEEPSEEK_API_KEY=your-deepseek-key            # optional paid last resort
 
 # --- System Settings ---
-ALERT_INTERVAL_SECONDS=300
-WALLET_POLL_MINUTES=15
-BYN_RATE_URL=https://api.nbrb.by/exrates/rates/431
+SQLITE_DB=crypto.db                            # default; /app/data/crypto.db in Docker
+ALERT_INTERVAL_SECS=300
+WALLET_POLL_MINS=15
+OPENROUTER_DAILY_REQ_BUDGET=300               # hard daily cap for OpenRouter free tier
+MAX_RSS_MB=512                                # watchdog RSS cap
+HANG_TIMEOUT_SECS=300                         # watchdog hang detection
 ```
+
+**Required:** `TELOXIDE_TOKEN`, `ALLOWED_ADMIN_IDS`, `CMC_API_KEY`. Everything
+else adds reliability, data sources, or features. There is **no `MASTER_KEY`**
+anymore — the session key is a random ephemeral value generated per process.
 
 ---
 

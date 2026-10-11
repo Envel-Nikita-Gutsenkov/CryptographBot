@@ -1,20 +1,23 @@
 use cryptograph::crypto::client::CryptoClient;
-use cryptograph::models::CmcQuote;
 use cryptograph::format::fmt_quote_card;
+use cryptograph::models::CmcQuote;
 
 #[tokio::test]
 async fn test_live_api_fetch() {
     // Tests that we can fetch BTC and it has expected fields populated.
     let client = CryptoClient::new("dummy", "dummy", "dummy", "dummy", None);
-    let quotes = client.get_quotes(&["BTC"]).await.expect("Failed to get quotes");
-    
+    let quotes = client
+        .get_quotes(&["BTC"])
+        .await
+        .expect("Failed to get quotes");
+
     assert!(!quotes.is_empty(), "Expected at least 1 quote");
     let btc = &quotes[0];
-    
+
     // Even without valid API keys for CMC/CG, the fallback to Binance/Bybit should give us a valid price.
     assert!(btc.price_usd > 0.0, "BTC price should be > 0");
     assert_eq!(btc.symbol, "BTC");
-    
+
     // Print the final formatted card so we can see it with real data
     println!("=== REAL FORMATTED CARD ===");
     println!("{}", fmt_quote_card(btc));
@@ -26,7 +29,10 @@ async fn test_news_fallback() {
     let client = CryptoClient::new("dummy", "dummy", "dummy", "dummy", None);
     let news = client.get_news("BTC").await.expect("Failed to fetch news");
     // With RSS fallback, it should return some news even if CryptoCompare needs an API key
-    assert!(!news.is_empty(), "News list should not be empty, RSS fallback should work");
+    assert!(
+        !news.is_empty(),
+        "News list should not be empty, RSS fallback should work"
+    );
 }
 
 #[test]
@@ -56,8 +62,16 @@ fn test_fmt_quote_card_missing_data() {
     };
 
     let formatted = fmt_quote_card(&missing_quote);
-    assert!(formatted.contains("`Rank: N/A`"), "Should contain Rank: N/A. Got: {}", formatted);
-    assert!(formatted.contains("*N/A*"), "Should contain N/A for market cap and volume. Got: {}", formatted);
+    assert!(
+        formatted.contains("`Rank: N/A`"),
+        "Should contain Rank: N/A. Got: {}",
+        formatted
+    );
+    assert!(
+        formatted.contains("*N/A*"),
+        "Should contain N/A for market cap and volume. Got: {}",
+        formatted
+    );
 }
 
 #[test]

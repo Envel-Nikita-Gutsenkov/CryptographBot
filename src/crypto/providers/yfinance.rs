@@ -1,6 +1,6 @@
-use std::time::Duration;
 use reqwest::Client;
 use serde::Deserialize;
+use std::time::Duration;
 
 use crate::error::{BotError, Result};
 
@@ -67,9 +67,12 @@ impl YFinanceProvider {
     }
 
     pub async fn get_quote(&self, symbol: &str) -> Result<TradFiQuote> {
-        let url = format!("https://query1.finance.yahoo.com/v8/finance/chart/{}?range=1y&interval=1d", symbol.to_uppercase());
+        let url = format!(
+            "https://query1.finance.yahoo.com/v8/finance/chart/{}?range=1y&interval=1d",
+            symbol.to_uppercase()
+        );
         let resp = self.http.get(&url).send().await?;
-        
+
         if resp.status() == 404 {
             return Err(BotError::SymbolNotFound(symbol.to_string()));
         }
@@ -77,11 +80,16 @@ impl YFinanceProvider {
             return Err(BotError::RateLimited);
         }
 
-        let body_str = resp.text().await.map_err(|e| BotError::CmcApi(e.to_string()))?;
+        let body_str = resp
+            .text()
+            .await
+            .map_err(|e| BotError::CmcApi(e.to_string()))?;
         let body: YfChartResp = serde_json::from_str(&body_str)
             .map_err(|e| BotError::CmcApi(format!("yf json parse error: {}", e)))?;
-        
-        let mut r = body.chart.result
+
+        let mut r = body
+            .chart
+            .result
             .and_then(|mut arr| arr.pop())
             .ok_or_else(|| BotError::SymbolNotFound(symbol.to_string()))?;
 
@@ -103,11 +111,21 @@ impl YFinanceProvider {
                 let current = closes[n - 1];
                 let calc_pct = |old: f64| -> f64 { ((current - old) / old) * 100.0 };
 
-                if n >= 2 { quote.change_1d = Some(calc_pct(closes[n - 2])); }
-                if n >= 6 { quote.change_7d = Some(calc_pct(closes[n - 6])); } // ~5 trading days = 1 week
-                if n >= 21 { quote.change_30d = Some(calc_pct(closes[n - 21])); } // ~21 trading days = 1 month
-                if n >= 63 { quote.change_90d = Some(calc_pct(closes[n - 63])); } // ~63 trading days = 3 months
-                if n >= 250 { quote.change_1y = Some(calc_pct(closes[0])); } // ~252 trading days = 1 year
+                if n >= 2 {
+                    quote.change_1d = Some(calc_pct(closes[n - 2]));
+                }
+                if n >= 6 {
+                    quote.change_7d = Some(calc_pct(closes[n - 6]));
+                } // ~5 trading days = 1 week
+                if n >= 21 {
+                    quote.change_30d = Some(calc_pct(closes[n - 21]));
+                } // ~21 trading days = 1 month
+                if n >= 63 {
+                    quote.change_90d = Some(calc_pct(closes[n - 63]));
+                } // ~63 trading days = 3 months
+                if n >= 250 {
+                    quote.change_1y = Some(calc_pct(closes[0]));
+                } // ~252 trading days = 1 year
             }
         }
 

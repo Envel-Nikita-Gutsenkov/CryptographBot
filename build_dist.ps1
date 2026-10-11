@@ -10,7 +10,8 @@ New-Item -ItemType Directory -Path $distDir | Out-Null
 
 # Copy assets
 Write-Host "Copying deployment assets..."
-Copy-Item ".\.env.example" -Destination "$distDir\.env"
+# NOTE: .env is intentionally NOT copied — the server already has the correct
+# one and uploading the template would overwrite real secrets (tokens/keys).
 Copy-Item ".\docker-compose.yml" -Destination "$distDir\docker-compose.yml"
 Copy-Item ".\Dockerfile" -Destination "$distDir\Dockerfile"
 Copy-Item ".\Cargo.toml" -Destination "$distDir\Cargo.toml"

@@ -1,6 +1,5 @@
 /// Portfolio math: cost basis, fee tracking, P&L, transfers.
 
-
 #[test]
 fn total_invested_tracks_cost_basis() {
     // Simulate: buy 0.5 BTC at $30k (total $30k) + 0.5 BTC at $60k (total $30k) = $60k invested

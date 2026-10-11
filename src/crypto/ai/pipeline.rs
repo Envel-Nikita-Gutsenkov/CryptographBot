@@ -160,16 +160,20 @@ pub async fn call_with_critic(
     let search_budget = super::search::SearchBudget::new();
     let budget_mgr = std::sync::Arc::new(super::search::BudgetManager::new(search_budget));
 
-    // 1. Race Dynamic Generators
-    let (draft_a, draft_b, gen_a, gen_b) = race_dynamic_generators(
-        client.clone(),
-        gemini_key.to_string(),
-        prompt.to_string(),
-        preferred_model.map(|s| s.to_string()),
-        db.clone(),
-        budget_mgr.clone(),
+    // 1. Race Dynamic Generators (bounded — a stuck provider must never hang /ask)
+    let (draft_a, draft_b, gen_a, gen_b) = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        race_dynamic_generators(
+            client.clone(),
+            gemini_key.to_string(),
+            prompt.to_string(),
+            preferred_model.map(|s| s.to_string()),
+            db.clone(),
+            budget_mgr.clone(),
+        ),
     )
-    .await?;
+    .await
+    .map_err(|_| anyhow::anyhow!("Generator race timed out after 120s"))??;
 
     // 2. Build Critic Prompt
     let format_instruction = if is_json {
@@ -179,39 +183,83 @@ pub async fn call_with_critic(
     };
     let critic_prompt = build_moe_critic_prompt(prompt, &draft_a, &draft_b, format_instruction);
 
-    // 3. Run Critic Queue
-    let (critic_model, critic_res) = run_dynamic_critic(
-        client.clone(),
-        gemini_key.to_string(),
-        critic_prompt,
-        preferred_model.map(|s| s.to_string()),
-        db,
-        budget_mgr,
+    // 3. Run Critic Queue (bounded — same hang protection as the generators)
+    let (critic_model, critic_res) = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        run_dynamic_critic(
+            client.clone(),
+            gemini_key.to_string(),
+            critic_prompt,
+            preferred_model.map(|s| s.to_string()),
+            db,
+            budget_mgr,
+        ),
     )
-    .await?;
+    .await
+    .map_err(|_| anyhow::anyhow!("Critic queue timed out after 120s"))??;
 
     if is_json {
-        let start_idx = critic_res.find('{').unwrap_or(0);
-        let end_idx = critic_res
-            .rfind('}')
-            .map(|i| i + 1)
-            .unwrap_or(critic_res.len());
+        let clean = super::providers::clean_model_output(&critic_res);
+        let start_idx = clean.find('{').unwrap_or(0);
+        let end_idx = clean.rfind('}').map(|i| i + 1).unwrap_or(clean.len());
         let clean_json = if start_idx < end_idx {
-            &critic_res[start_idx..end_idx]
+            &clean[start_idx..end_idx]
         } else {
-            critic_res.trim()
+            clean.trim()
         };
         return Ok(clean_json.to_string());
     } else {
-        let mut final_text = critic_res.trim();
-        if let Some(start_pos) = final_text.find("<final_analysis>") {
+        let clean_critic = super::providers::clean_model_output(&critic_res);
+        let mut final_text = String::new();
+        let mut critic_succeeded = false;
+
+        if let Some(start_pos) = clean_critic.find("<final_analysis>") {
             let content_start = start_pos + "<final_analysis>".len();
-            if let Some(end_pos) = final_text[content_start..].find("</final_analysis>") {
-                final_text = final_text[content_start..content_start + end_pos].trim();
+            if let Some(end_pos) = clean_critic[content_start..].find("</final_analysis>") {
+                let candidate = clean_critic[content_start..content_start + end_pos].trim();
+                if !candidate.is_empty() && !is_meta_critique(candidate) {
+                    final_text = candidate.to_string();
+                    critic_succeeded = true;
+                }
             } else {
-                final_text = final_text[content_start..].trim();
+                let candidate = clean_critic[content_start..].trim();
+                if !candidate.is_empty() && !is_meta_critique(candidate) {
+                    final_text = candidate.to_string();
+                    critic_succeeded = true;
+                }
             }
         }
+
+        if !critic_succeeded {
+            let trimmed = clean_critic.trim();
+            if !trimmed.is_empty() && !is_meta_critique(trimmed) {
+                final_text = trimmed.to_string();
+                critic_succeeded = true;
+            }
+        }
+
+        // Safe fallback if critic output was a meta-critique, empty, or malformed.
+        // NEVER leak a raw chain-of-thought to the user: if every candidate is
+        // meta-commentary, fail loudly instead of sending the reasoning text.
+        if !critic_succeeded {
+            tracing::warn!(
+                "Critic output was meta-critique or malformed. Falling back to generator draft."
+            );
+            let clean_a = super::providers::clean_model_output(&draft_a);
+            let clean_b = super::providers::clean_model_output(&draft_b);
+            let usable_a = !clean_a.trim().is_empty() && !is_meta_critique(&clean_a);
+            let usable_b = !clean_b.trim().is_empty() && !is_meta_critique(&clean_b);
+            if usable_a {
+                final_text = clean_a.trim().to_string();
+            } else if usable_b {
+                final_text = clean_b.trim().to_string();
+            } else {
+                return Err(anyhow::anyhow!(
+                    "All model outputs were meta-commentary or empty — refusing to send raw reasoning. Please try again."
+                ));
+            }
+        }
+
         if append_footer {
             let fmt = |alias: &str| -> String {
                 let provs = super::pools::providers_for_alias(alias);
@@ -226,14 +274,76 @@ pub async fn call_with_critic(
             } else {
                 format!("{} + {}", fmt(&gen_a), fmt(&gen_b))
             };
-            return Ok(format!(
-                "{final_text}\n\n_Gen: {gen_label} → Critic: {}_",
-                fmt(&critic_model)
-            ));
+            let critic_label = if critic_succeeded {
+                format!(" → Critic: {}", fmt(&critic_model))
+            } else {
+                String::new()
+            };
+            return Ok(format!("{final_text}\n\n_Gen: {gen_label}{critic_label}_"));
         } else {
-            return Ok(final_text.to_string());
+            return Ok(final_text);
         }
     }
+}
+
+pub fn is_meta_critique(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let meta_indicators = [
+        "draft a",
+        "draft b",
+        "draft 1",
+        "draft 2",
+        "looking at draft",
+        "evaluating both drafts",
+        "evaluating the drafts",
+        "comparing drafts",
+        "checking for hallucinations",
+        "check for hallucinations",
+        "in terms of hallucinations",
+        "the user wants me to evaluate",
+        "the user is asking me to evaluate",
+        "okay, let's tackle this",
+        "let me start by",
+        "i'll start by",
+        "i will start by",
+        "first, let me",
+        "let me analyze",
+        "let me think",
+        "let me consider",
+        "let me check",
+        "let me review",
+        "let me look at",
+        "let me break down",
+        "let's break this down",
+        "i need to analyze",
+        "i need to check",
+        "i need to verify",
+        "i need to evaluate",
+        "let's analyze the request",
+        "хорошо, я должен проанализировать",
+        "я должен проанализировать",
+        "я должен проверить",
+        "я должен оценить",
+        "мне нужно проанализировать",
+        "мне нужно проверить",
+        "мне нужно оценить",
+        "начну с проверки",
+        "я должен оценить два черновика",
+        "черновик а",
+        "черновик б",
+        "черновика а",
+        "черновика б",
+        "оцениваю черновики",
+        "проверка черновиков",
+    ];
+
+    for ind in &meta_indicators {
+        if lower.contains(ind) {
+            return true;
+        }
+    }
+
+    false
 }
 
 pub async fn race_dynamic_generators(
@@ -266,15 +376,24 @@ pub async fn race_dynamic_generators(
             let budget2 = budget.clone();
             tasks.push(tokio::spawn(async move {
                 let model_clone = model.clone();
-                let res = super::providers::call_any_model_with_search(
-                    &c,
-                    &k,
-                    &model,
-                    &p,
-                    Some(db2),
-                    Some(&budget2),
+                let res = tokio::time::timeout(
+                    std::time::Duration::from_secs(60),
+                    super::providers::call_any_model_with_search(
+                        &c,
+                        &k,
+                        &model,
+                        &p,
+                        Some(db2),
+                        Some(&budget2),
+                    ),
                 )
-                .await;
+                .await
+                .unwrap_or_else(|_| {
+                    Err(anyhow::anyhow!(
+                        "Generator {} timed out after 60s",
+                        model_clone
+                    ))
+                });
                 (model_clone, res)
             }));
         }
@@ -309,15 +428,24 @@ pub async fn race_dynamic_generators(
                     let budget3 = budget.clone();
                     tasks.push(tokio::spawn(async move {
                         let next_model_clone = next_model.clone();
-                        let res = super::providers::call_any_model_with_search(
-                            &c,
-                            &k,
-                            &next_model,
-                            &p,
-                            Some(db3),
-                            Some(&budget3),
+                        let res = tokio::time::timeout(
+                            std::time::Duration::from_secs(60),
+                            super::providers::call_any_model_with_search(
+                                &c,
+                                &k,
+                                &next_model,
+                                &p,
+                                Some(db3),
+                                Some(&budget3),
+                            ),
                         )
-                        .await;
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(anyhow::anyhow!(
+                                "Generator {} timed out after 60s",
+                                next_model_clone
+                            ))
+                        });
                         (next_model_clone, res)
                     }));
                 }
@@ -339,30 +467,20 @@ pub async fn race_dynamic_generators(
         ));
     }
 
-    // Last resort: direct, unfiltered Gemini call so the pipeline degrades gracefully
-    // instead of hard-failing when health marks / rate limits exhaust the model pool.
-    tracing::warn!("All generators failed. Trying last-resort fallback gemini-2.5-flash...");
-    let fallback_body = serde_json::json!({
-        "contents": [{"parts": [{"text": prompt}]}]
-    });
-    match super::providers::call_gemini_model(
-        &client,
-        &gemini_key,
-        "gemini-2.5-flash",
-        &fallback_body,
-    )
-    .await
-    {
-        Ok(res) => {
-            super::pools::record_successful_model("gemini-2.5-flash");
+    // Last resort: try several independent providers so a single outage (e.g.
+    // Gemini quota) can't hard-fail the pipeline when the pool is exhausted.
+    tracing::warn!("All generators failed. Trying last-resort fallback...");
+    match super::providers::call_last_resort(&client, &gemini_key, &prompt).await {
+        Ok((label, res)) => {
+            super::pools::record_successful_model(&label);
             return Ok((
                 res.clone(),
                 String::from("(single fallback draft)"),
-                "gemini-2.5-flash".to_string(),
-                "gemini-2.5-flash".to_string(),
+                label.clone(),
+                label,
             ));
         }
-        Err(e) => tracing::warn!("Last-resort fallback gemini-2.5-flash failed: {}", e),
+        Err(e) => tracing::warn!("Last-resort fallback failed: {}", e),
     }
 
     Err(anyhow::anyhow!("Failed to generate any successful drafts"))
@@ -391,17 +509,20 @@ pub async fn run_dynamic_critic(
         if std::env::var("CRYPTOGRAPH_DEBUG_PROMPTS").unwrap_or_default() == "1" {
             println!(">> [AI Model Call] Critic {}", critic);
         }
-        match super::providers::call_any_model_with_search(
-            &client,
-            &gemini_key,
-            &critic,
-            &critic_prompt,
-            Some(db.clone()),
-            Some(&budget),
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(25),
+            super::providers::call_any_model_with_search(
+                &client,
+                &gemini_key,
+                &critic,
+                &critic_prompt,
+                Some(db.clone()),
+                Some(&budget),
+            ),
         )
         .await
         {
-            Ok(res) => {
+            Ok(Ok(res)) => {
                 tracing::info!("Critic {} finished successfully!", critic);
                 if std::env::var("CRYPTOGRAPH_DEBUG_PROMPTS").unwrap_or_default() == "1" {
                     println!("\n=== CRITIC {critic} OUTPUT ===\n{res}\n=== END CRITIC ===");
@@ -409,7 +530,7 @@ pub async fn run_dynamic_critic(
                 super::pools::record_successful_model(&critic);
                 return Ok((critic, res));
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!("Critic {} failed: {}", critic, e);
                 if std::env::var("CRYPTOGRAPH_DEBUG_PROMPTS").unwrap_or_default() == "1" {
                     println!("   ❌ [FAILED] Critic {}: {}", critic, e);
@@ -417,29 +538,93 @@ pub async fn run_dynamic_critic(
                 last_err = e;
                 continue;
             }
+            Err(_) => {
+                tracing::warn!("Critic {} timed out after 25s", critic);
+                last_err = anyhow::anyhow!("Critic {} timed out after 25s", critic);
+                continue;
+            }
         }
     }
 
-    // Last resort: direct, unfiltered Gemini call so the critic stage degrades
-    // gracefully instead of hard-failing when the whole pool is dead/skipped.
-    tracing::warn!("All critics failed. Trying last-resort fallback gemini-2.5-flash...");
-    let fallback_body = serde_json::json!({
-        "contents": [{"parts": [{"text": critic_prompt}]}]
-    });
-    match super::providers::call_gemini_model(
-        &client,
-        &gemini_key,
-        "gemini-2.5-flash",
-        &fallback_body,
-    )
-    .await
-    {
-        Ok(res) => {
-            super::pools::record_successful_model("gemini-2.5-flash");
-            return Ok(("gemini-2.5-flash".to_string(), res));
+    // Last resort: try several independent providers so a single outage (e.g.
+    // Gemini quota) can't hard-fail the critic stage when the pool is exhausted.
+    tracing::warn!("All critics failed. Trying last-resort fallback...");
+    match super::providers::call_last_resort(&client, &gemini_key, &critic_prompt).await {
+        Ok((label, res)) => {
+            super::pools::record_successful_model(&label);
+            return Ok((label, res));
         }
-        Err(e) => tracing::warn!("Last-resort critic gemini-2.5-flash failed: {}", e),
+        Err(e) => tracing::warn!("Last-resort critic fallback failed: {}", e),
     }
 
     Err(last_err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::ai::providers::clean_model_output;
+
+    #[test]
+    fn test_is_meta_critique_detection() {
+        assert!(is_meta_critique("Okay, let's tackle this. The user wants me to evaluate two drafts based on the original request... Looking at Draft A: ... Draft B: ... Now, checking for hallucinations."));
+        assert!(is_meta_critique("Хорошо, я должен проанализировать вопрос пользователя о том, когда криптовалюты вернутся..."));
+        assert!(is_meta_critique(
+            "In evaluating both drafts, Draft A has better numbers."
+        ));
+        assert!(!is_meta_critique("Bitcoin is currently trading at 64,000 USD. Technical indicators suggest strong support at 62,000 USD."));
+    }
+
+    #[test]
+    fn test_is_meta_critique_catches_leaked_cot() {
+        // Exact patterns observed leaking to the user on 2026-08-29 (Cohere
+        // reasoning models emitting their chain-of-thought as the answer).
+        assert!(is_meta_critique(
+            "Okay, let me start by carefully reviewing the user's question and the provided data. The user is asking when they can expect their crypto holdings to return to their average purchase prices."
+        ));
+        assert!(is_meta_critique(
+            "Хорошо, я должен проанализировать вопрос пользователя о том, когда криптовалюты вернутся к его средним ценам покупки и произойдет ли это в этом году. Начну с проверки предоставленных данных."
+        ));
+        assert!(is_meta_critique(
+            "I'll start by reviewing the portfolio data and checking the current market conditions."
+        ));
+        assert!(is_meta_critique(
+            "Let me analyze the user's question about when BTC might return to 60-63k."
+        ));
+        assert!(is_meta_critique(
+            "Мне нужно проверить текущие цены и сравнить их со средними закупочными."
+        ));
+    }
+
+    #[test]
+    fn test_is_meta_critique_does_not_flag_real_answers() {
+        // Real answers from the chat log must NOT be flagged.
+        assert!(!is_meta_critique(
+            "Здорово, братан! Вопрос отличный и очень своевременный. Давай снимем розовые очки, посмотрим на сухие цифры рынка на сегодня и разберем, реально ли увидеть твои средние закупочные цены до конца этого года."
+        ));
+        assert!(!is_meta_critique(
+            "Понимаю ваше беспокойство — цены действительно выросли. Давайте разберёмся, почему был дан тот сигнал и как действовать дальше."
+        ));
+        assert!(!is_meta_critique(
+            "BTC is trading at 78,000 USD, up 23% over 7 days. Support sits at 70,000 USD."
+        ));
+    }
+
+    #[test]
+    fn test_clean_model_output_stripping() {
+        let think_sample = "<think>Let me evaluate this carefully...\nDraft A is okay.</think>Ethereum dropped 5% over 7 days.";
+        assert_eq!(
+            clean_model_output(think_sample),
+            "Ethereum dropped 5% over 7 days."
+        );
+
+        let unclosed_think = "<think>Still thinking and cut off...";
+        assert_eq!(clean_model_output(unclosed_think), "");
+
+        let clean_text = "Standard response without tags.";
+        assert_eq!(
+            clean_model_output(clean_text),
+            "Standard response without tags."
+        );
+    }
 }

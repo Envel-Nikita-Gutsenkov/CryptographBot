@@ -66,6 +66,14 @@ pub enum Command {
     Plan(String),
     #[command(description = "Get recent crypto news: /news or /news BTC")]
     News(String),
+    #[command(
+        description = "Trading commander: /trade list | pnl | fee | allocate | constraints | rule"
+    )]
+    Trade(String),
+    #[command(
+        description = "Standing trade tasks: /tradetask list | add | pause | resume | advise"
+    )]
+    TradeTask(String),
     #[command(description = "Get Fear & Greed Index: /fng")]
     Fng,
     #[command(description = "Bot settings")]

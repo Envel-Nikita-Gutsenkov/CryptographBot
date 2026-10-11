@@ -8,10 +8,16 @@
 *.sqlite*
 *.db*
 
+# The bundled trading seed is a deliberate exception: it ships trained
+# profiles + lessons + stats so a fresh clone never starts from zero.
+!data/trading_sim_seed.db
+
 # Secrets — NEVER commit real .env
 .env
 # runtime artifacts
 model_memory.json
+models.openrouter.json
+judge_baseline.json
 
 # Dev junk / one-off scripts — never re-commit these
 /portfolio_backup.json
@@ -33,3 +39,13 @@ model_memory.json
 /test_*.rs
 /test_commands.txt
 /short_report.txt
+
+# Chat export analysis artifacts (local only)
+/chat_export.txt
+/chat_convo.txt
+/chat_aug.txt
+/nikita_msgs.txt
+/tools/extract_chat.py
+
+# uw gateway local state (never commit)
+.uw/

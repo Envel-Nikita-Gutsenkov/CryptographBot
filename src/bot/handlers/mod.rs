@@ -12,6 +12,7 @@ pub mod nlp;
 pub mod portfolio;
 pub mod price;
 pub mod settings;
+pub mod trade;
 pub mod wallet;
 
 pub use acl::{handle_acl_list, handle_allow, handle_revoke};
@@ -35,6 +36,7 @@ pub use portfolio::{
 };
 pub use price::{handle_price, handle_top};
 pub use settings::{handle_convert, handle_settings, handle_watchlist};
+pub use trade::{handle_trade_cmd, handle_tradetask_cmd};
 pub use wallet::{
     handle_wallet_add, handle_wallet_delete, handle_wallet_list, handle_wallet_refresh,
 };

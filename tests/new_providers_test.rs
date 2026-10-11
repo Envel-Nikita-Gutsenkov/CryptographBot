@@ -1,9 +1,6 @@
 use cryptograph::crypto::providers::{
-    binance::BinanceProvider,
-    bybit::BybitProvider,
-    coinbase::CoinbaseProvider,
-    coingecko::CoinGeckoProvider,
-    rss::RssProvider,
+    binance::BinanceProvider, bybit::BybitProvider, coinbase::CoinbaseProvider,
+    coingecko::CoinGeckoProvider, rss::RssProvider,
 };
 
 #[tokio::test]
@@ -31,7 +28,10 @@ async fn test_bybit_provider_real() {
 #[tokio::test]
 async fn test_coinbase_provider_real() {
     let p = CoinbaseProvider::new();
-    let res = p.get_quotes(&["BTC", "ETH"]).await.expect("Coinbase failed");
+    let res = p
+        .get_quotes(&["BTC", "ETH"])
+        .await
+        .expect("Coinbase failed");
     assert!(!res.is_empty(), "Coinbase returned empty quotes");
     for q in &res {
         println!("Coinbase: {} = ${}", q.symbol, q.price_usd);
@@ -42,11 +42,14 @@ async fn test_coinbase_provider_real() {
 #[tokio::test]
 async fn test_rss_provider_real() {
     let p = RssProvider::new();
-    
-    let ct = p.get_news_cointelegraph().await.expect("CoinTelegraph RSS failed");
+
+    let ct = p
+        .get_news_cointelegraph()
+        .await
+        .expect("CoinTelegraph RSS failed");
     assert!(!ct.is_empty(), "CoinTelegraph RSS returned 0 articles");
     println!("CoinTelegraph RSS first article: {}", ct[0].title);
-    
+
     let cd = p.get_news_coindesk().await.expect("CoinDesk RSS failed");
     assert!(!cd.is_empty(), "CoinDesk RSS returned 0 articles");
     println!("CoinDesk RSS first article: {}", cd[0].title);
@@ -63,7 +66,10 @@ async fn test_coingecko_global_real() {
             assert!(g.btc_dominance > 0.0);
         }
         Err(e) => {
-            println!("CoinGecko Global skipped/failed (likely rate limit or key required): {:?}", e);
+            println!(
+                "CoinGecko Global skipped/failed (likely rate limit or key required): {:?}",
+                e
+            );
         }
     }
 }
@@ -74,7 +80,8 @@ async fn test_coinpaprika_global_real() {
         .timeout(std::time::Duration::from_secs(8))
         .build()
         .unwrap();
-    let resp = client.get("https://api.coinpaprika.com/v1/global")
+    let resp = client
+        .get("https://api.coinpaprika.com/v1/global")
         .header("User-Agent", "CryptographBot/1.0")
         .send()
         .await;
@@ -93,4 +100,3 @@ async fn test_coinpaprika_global_real() {
         }
     }
 }
-

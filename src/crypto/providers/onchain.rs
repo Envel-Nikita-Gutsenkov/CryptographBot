@@ -1,7 +1,7 @@
-use std::time::Duration;
+use crate::models::onchain::OnChainMetrics;
 use reqwest::Client;
 use serde::Deserialize;
-use crate::models::onchain::OnChainMetrics;
+use std::time::Duration;
 
 pub struct OnChainProvider {
     http: Client,
@@ -65,7 +65,11 @@ impl OnChainProvider {
 
     pub fn new() -> Self {
         Self {
-            http: Client::builder().timeout(Duration::from_secs(10)).use_rustls_tls().build().unwrap(),
+            http: Client::builder()
+                .timeout(Duration::from_secs(10))
+                .use_rustls_tls()
+                .build()
+                .unwrap(),
         }
     }
 
@@ -107,9 +111,12 @@ impl OnChainProvider {
         for &sym in symbols {
             let sym_upper = sym.to_uppercase();
             let pair = format!("{}USDT", sym_upper);
-            
+
             // Funding Rate
-            let fr_url = format!("https://fapi.binance.com/fapi/v1/fundingRate?symbol={}&limit=1", pair);
+            let fr_url = format!(
+                "https://fapi.binance.com/fapi/v1/fundingRate?symbol={}&limit=1",
+                pair
+            );
             if let Ok(resp) = self.http.get(&fr_url).send().await {
                 if let Ok(body) = resp.json::<Vec<BinanceFundingResp>>().await {
                     if let Some(first) = body.first() {
@@ -119,9 +126,12 @@ impl OnChainProvider {
                     }
                 }
             }
-            
+
             // Open Interest
-            let oi_url = format!("https://fapi.binance.com/fapi/v1/openInterest?symbol={}", pair);
+            let oi_url = format!(
+                "https://fapi.binance.com/fapi/v1/openInterest?symbol={}",
+                pair
+            );
             if let Ok(resp) = self.http.get(&oi_url).send().await {
                 if let Ok(body) = resp.json::<BinanceOpenInterestResp>().await {
                     if let Some(metric) = metrics_map.get_mut(&sym_upper) {
@@ -184,13 +194,22 @@ impl OnChainProvider {
         });
 
         if has_ondo_products {
-            if let Ok(resp) = self.http.get("https://api.llama.fi/protocol/ondo-finance").send().await {
+            if let Ok(resp) = self
+                .http
+                .get("https://api.llama.fi/protocol/ondo-finance")
+                .send()
+                .await
+            {
                 if let Ok(body) = resp.json::<serde_json::Value>().await {
                     if let Some(tvl_array) = body.get("tvl").and_then(|t| t.as_array()) {
                         if let Some(last_tvl) = tvl_array.last() {
-                            if let Some(liquidity) = last_tvl.get("totalLiquidityUSD").and_then(|l| l.as_f64()) {
+                            if let Some(liquidity) =
+                                last_tvl.get("totalLiquidityUSD").and_then(|l| l.as_f64())
+                            {
                                 // Assign the TVL to the primary ONDO token (or create if missing)
-                                let metric = metrics_map.entry("ONDO".to_string()).or_insert_with(|| OnChainMetrics::empty("ONDO"));
+                                let metric = metrics_map
+                                    .entry("ONDO".to_string())
+                                    .or_insert_with(|| OnChainMetrics::empty("ONDO"));
                                 metric.tvl = Some(liquidity);
                             }
                         }
@@ -215,10 +234,16 @@ mod tests {
     async fn test_onchain_and_mempool() {
         let provider = OnChainProvider::new();
         let metrics = provider.get_metrics(&["BTC", "ETH"]).await;
-        assert!(!metrics.is_empty(), "Should return metrics for requested symbols");
+        assert!(
+            !metrics.is_empty(),
+            "Should return metrics for requested symbols"
+        );
         println!("OnChain metrics fetched successfully: {:?}", metrics.len());
         for m in &metrics {
-            println!("Symbol: {}, LS Ratio: {:?}, Bybit OI: {:?}", m.symbol, m.long_short_ratio, m.bybit_oi);
+            println!(
+                "Symbol: {}, LS Ratio: {:?}, Bybit OI: {:?}",
+                m.symbol, m.long_short_ratio, m.bybit_oi
+            );
         }
     }
 }

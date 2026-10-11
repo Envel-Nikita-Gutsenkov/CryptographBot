@@ -1,5 +1,5 @@
-use serde::Serialize;
 use crate::config::Config;
+use serde::Serialize;
 
 #[derive(Serialize)]
 pub struct InputRichMessage {
@@ -30,10 +30,7 @@ pub async fn send_rich_message_markdown(
         },
     };
 
-    let res = client.post(&url)
-        .json(&req)
-        .send()
-        .await?;
+    let res = client.post(&url).json(&req).send().await?;
 
     if !res.status().is_success() {
         let text = res.text().await?;

@@ -1,6 +1,6 @@
+use super::types::SearchResult;
 use reqwest::Client;
 use std::time::Duration;
-use super::types::SearchResult;
 
 pub async fn exa_search(
     client: &Client,
@@ -9,7 +9,7 @@ pub async fn exa_search(
     max_results: usize,
 ) -> anyhow::Result<Vec<SearchResult>> {
     let url = "https://api.exa.ai/search";
-    
+
     let body = serde_json::json!({
         "query": query,
         "type": "auto",
@@ -19,7 +19,8 @@ pub async fn exa_search(
         }
     });
 
-    let resp = client.post(url)
+    let resp = client
+        .post(url)
         .header("x-api-key", api_key)
         .header("Content-Type", "application/json")
         .timeout(Duration::from_secs(12))
@@ -40,7 +41,7 @@ pub async fn exa_search(
         for item in arr {
             let title = item["title"].as_str().unwrap_or("").to_string();
             let url = item["url"].as_str().unwrap_or("").to_string();
-            
+
             // Join highlights as snippet
             let mut snippet = String::new();
             if let Some(highlights_arr) = item["highlights"].as_array() {
@@ -60,7 +61,11 @@ pub async fn exa_search(
             }
 
             if snippet.len() > 500 {
-                let end = snippet.char_indices().map(|(i, _)| i).nth(500).unwrap_or(snippet.len());
+                let end = snippet
+                    .char_indices()
+                    .map(|(i, _)| i)
+                    .nth(500)
+                    .unwrap_or(snippet.len());
                 snippet = snippet[..end].to_string();
                 snippet.push_str("...");
             }

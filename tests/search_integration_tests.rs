@@ -1,9 +1,8 @@
+use cryptograph::crypto::ai::search::{
+    local::local_search, search_dispatch, BudgetManager, SearchBudget, SearchProvider,
+};
 use dotenvy::dotenv;
 use reqwest::Client;
-use cryptograph::crypto::ai::search::{
-    BudgetManager, SearchBudget, SearchProvider, search_dispatch,
-    local::local_search,
-};
 
 #[tokio::test]
 async fn test_search_budget() {
@@ -34,7 +33,7 @@ async fn test_local_search_engines() {
     let client = Client::new();
     let query = "bitcoin price prediction 2026";
     println!("Testing local search with query: {}", query);
-    
+
     match local_search(&client, query, 3).await {
         Ok(results) => {
             println!("Local search success! Found {} results.", results.len());
@@ -59,11 +58,11 @@ async fn test_dispatcher_tavily_exa() {
     let mgr = BudgetManager::new(budget);
 
     let query = "ethereum latest news";
-    
+
     // Dispatch search
     let results = search_dispatch(&client, &mgr, query, false).await;
     println!("Dispatcher returned {} results.", results.len());
-    
+
     // Even if APIs fail, local fallback should ensure we have results (unless network issue)
     for res in &results {
         assert!(!res.url.is_empty());

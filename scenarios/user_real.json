@@ -1,0 +1,12 @@
+{
+  "fear_greed": "50 (Neutral)",
+  "global": "Total Mcap: 2.9T USD | 24h Vol: 120B USD | BTC Dom: 51.0% | ETH Dom: 13.5%",
+  "quotes": {
+    "BTC": { "price": 78000.0, "chg_1h": 0.5, "chg_24h": 6.0, "chg_7d": 22.0, "chg_30d": 20.0, "chg_90d": 12.0, "ath": 126173.0 },
+    "ETH": { "price": 2450.0, "chg_1h": 0.4, "chg_24h": 4.0, "chg_7d": 28.0, "chg_30d": 26.0, "chg_90d": 15.0, "ath": 4800.0 },
+    "SOL": { "price": 95.0, "chg_1h": 0.6, "chg_24h": 5.0, "chg_7d": 26.0, "chg_30d": 25.0, "chg_90d": 18.0, "ath": 260.0 },
+    "LINK": { "price": 11.5, "chg_1h": 0.3, "chg_24h": 8.0, "chg_7d": 30.0, "chg_30d": 35.0, "chg_90d": 20.0, "ath": 53.0 }
+  },
+  "news": "August rally continues on record ETF inflows and institutional adoption. User's real portfolio: BTC avg 64254.82, ETH avg 1676.27, SOL avg 67.37, LINK avg 7.74. All assets now far above user's average entry prices.",
+  "intel": "Derivatives Sentiment: funding positive, OI elevated, long/short ratio 2.0 — bullish but crowded."
+}

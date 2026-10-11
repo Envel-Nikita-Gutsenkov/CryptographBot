@@ -1,9 +1,9 @@
-use std::time::Duration;
+use super::RawQuote;
+use crate::error::{BotError, Result};
 use moka::future::Cache;
 use reqwest::Client;
 use serde::Deserialize;
-use super::RawQuote;
-use crate::error::{BotError, Result};
+use std::time::Duration;
 
 pub struct BinanceProvider {
     http: Client,
@@ -15,8 +15,15 @@ impl BinanceProvider {
 
     pub fn new() -> Self {
         Self {
-            http: Client::builder().timeout(Duration::from_secs(8)).use_rustls_tls().build().unwrap(),
-            cache: Cache::builder().time_to_live(Duration::from_secs(30)).max_capacity(200).build(),
+            http: Client::builder()
+                .timeout(Duration::from_secs(8))
+                .use_rustls_tls()
+                .build()
+                .unwrap(),
+            cache: Cache::builder()
+                .time_to_live(Duration::from_secs(30))
+                .max_capacity(200)
+                .build(),
         }
     }
 
@@ -36,14 +43,19 @@ impl BinanceProvider {
 
         // Map symbols to Binance USDT pairs, e.g. BTC -> BTCUSDT
         let pairs: Vec<String> = fetch.iter().map(|s| format!("{}USDT", s)).collect();
-        
+
         // Serialize to JSON array for request
         let symbols_json = match serde_json::to_string(&pairs) {
             Ok(j) => j,
-            Err(e) => return Err(BotError::CmcApi(format!("Binance json serialize error: {e}"))),
+            Err(e) => {
+                return Err(BotError::CmcApi(format!(
+                    "Binance json serialize error: {e}"
+                )))
+            }
         };
 
-        let resp = self.http
+        let resp = self
+            .http
             .get("https://api.binance.com/api/v3/ticker/24hr")
             .query(&[("symbols", &symbols_json)])
             .send()
@@ -58,11 +70,18 @@ impl BinanceProvider {
             return Err(BotError::CmcApi(format!("Binance API error: {}", err_text)));
         }
 
-        let tickers: Vec<BinanceTicker> = resp.json().await.map_err(|e| BotError::CmcApi(format!("Binance parse: {e}")))?;
+        let tickers: Vec<BinanceTicker> = resp
+            .json()
+            .await
+            .map_err(|e| BotError::CmcApi(format!("Binance parse: {e}")))?;
 
         for t in tickers {
             // Convert symbol back to original base symbol, e.g. BTCUSDT -> BTC
-            let base_symbol = t.symbol.strip_suffix("USDT").unwrap_or(&t.symbol).to_uppercase();
+            let base_symbol = t
+                .symbol
+                .strip_suffix("USDT")
+                .unwrap_or(&t.symbol)
+                .to_uppercase();
             let price_usd: f64 = t.last_price.parse().unwrap_or(0.0);
             let volume_24h: Option<f64> = t.quote_volume.parse().ok();
             let change_24h: Option<f64> = t.price_change_percent.parse().ok();
@@ -104,7 +123,7 @@ impl BinanceProvider {
 
     pub async fn get_history(&self, symbol: &str, days: u32) -> Result<Vec<(i64, f64)>> {
         let pair = format!("{}USDT", symbol.to_uppercase());
-        
+
         let (interval, limit) = match days {
             1 => ("5m", 288),
             7 => ("1h", 168),
@@ -112,13 +131,14 @@ impl BinanceProvider {
             90 => ("12h", 180),
             _ => ("1d", days),
         };
-        
-        let resp = self.http
+
+        let resp = self
+            .http
             .get("https://api.binance.com/api/v3/klines")
             .query(&[
                 ("symbol", pair.as_str()),
                 ("interval", interval),
-                ("limit", limit.to_string().as_str())
+                ("limit", limit.to_string().as_str()),
             ])
             .send()
             .await?;
@@ -132,7 +152,10 @@ impl BinanceProvider {
             return Err(BotError::CmcApi(format!("Binance API error: {}", err_text)));
         }
 
-        let klines: Vec<serde_json::Value> = resp.json().await.map_err(|e| BotError::CmcApi(format!("Binance parse: {e}")))?;
+        let klines: Vec<serde_json::Value> = resp
+            .json()
+            .await
+            .map_err(|e| BotError::CmcApi(format!("Binance parse: {e}")))?;
 
         let mut history = Vec::new();
         for k in klines {
@@ -143,7 +166,7 @@ impl BinanceProvider {
                 }
             }
         }
-        
+
         if history.is_empty() {
             return Err(BotError::CmcApi("Empty history from Binance".into()));
         }

@@ -1,0 +1,12 @@
+{
+  "fear_greed": "45 (Neutral)",
+  "global": "Total Mcap: 2.6T USD | 24h Vol: 90B USD | BTC Dom: 53.0% | ETH Dom: 13.0%",
+  "quotes": {
+    "BTC": { "price": 68000.0, "chg_1h": 0.1, "chg_24h": -0.8, "chg_7d": -2.0, "chg_30d": -1.0, "chg_90d": 5.0, "ath": 126173.0 },
+    "ETH": { "price": 1900.0, "chg_1h": 0.2, "chg_24h": -1.0, "chg_7d": -2.5, "chg_30d": 2.0, "chg_90d": 8.0, "ath": 4800.0 },
+    "SOL": { "price": 78.0, "chg_1h": 0.3, "chg_24h": -1.2, "chg_7d": -3.0, "chg_30d": 1.0, "chg_90d": 10.0, "ath": 260.0 },
+    "LINK": { "price": 9.5, "chg_1h": 0.2, "chg_24h": -1.5, "chg_7d": -2.0, "chg_30d": 4.0, "chg_90d": 12.0, "ath": 53.0 }
+  },
+  "news": "Quiet week — no major catalysts. Range-bound trading, low volume. Institutional accumulation continues steadily. Options expiry passed without drama.",
+  "intel": "Derivatives Sentiment: funding neutral, OI stable, long/short ratio ~1.0 — balanced positioning, no extreme leverage."
+}

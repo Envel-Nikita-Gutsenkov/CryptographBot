@@ -28,7 +28,6 @@ use crate::crypto::providers::defillama::DefiLlamaProvider;
 use crate::crypto::providers::dexscreener::DexScreenerProvider;
 use crate::crypto::providers::geckoterminal::GeckoTerminalProvider;
 use crate::crypto::providers::mempool::MempoolProvider;
-use crate::crypto::providers::pyth::PythProvider;
 use crate::crypto::providers::yfinance::YFinanceProvider;
 use crate::{
     db::SqliteStore,
@@ -37,7 +36,8 @@ use crate::{
 };
 
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(6);
-const L1_TTL: Duration = Duration::from_secs(60);
+const HISTORY_TIMEOUT: Duration = Duration::from_secs(30);
+const L1_TTL: Duration = Duration::from_secs(180);
 const TOP_TTL: Duration = Duration::from_secs(300);
 const BYN_TTL: Duration = Duration::from_secs(86_400);
 
@@ -56,7 +56,6 @@ struct CryptoClientInner {
     geckoterminal: GeckoTerminalProvider,
     onchain: crate::crypto::providers::onchain::OnChainProvider,
     yfinance: YFinanceProvider,
-    pyth: PythProvider,
     rss: RssProvider,
     mempool: MempoolProvider,
     #[allow(dead_code)] // Reserved for future risk-scoring integration in Market Intel Worker
@@ -98,7 +97,6 @@ impl CryptoClient {
             DexScreenerProvider::NAME,
             GeckoTerminalProvider::NAME,
             RssProvider::NAME,
-            PythProvider::NAME,
         ]));
         let cache: Cache<String, CmcQuote> = Cache::builder()
             .time_to_live(L1_TTL)
@@ -124,7 +122,6 @@ impl CryptoClient {
             geckoterminal: GeckoTerminalProvider::new(),
             onchain: crate::crypto::providers::onchain::OnChainProvider::new(),
             yfinance: YFinanceProvider::new(),
-            pyth: PythProvider::new(),
             rss: RssProvider::new(),
             mempool: MempoolProvider::new(),
             coinstats: CoinStatsProvider::new(),
@@ -181,7 +178,21 @@ impl CryptoClient {
         }
 
         let missing_refs: Vec<&str> = missing.iter().map(|s| s.as_str()).collect();
-        let new_metrics = self.inner.onchain.get_metrics(&missing_refs).await;
+        // Bound the whole on-chain fetch: it makes sequential per-symbol HTTP
+        // calls (CoinMetrics + 2× Binance each) that can stack to minutes when
+        // providers are slow/blocked — the /ask pipeline awaits this.
+        let new_metrics = match tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            self.inner.onchain.get_metrics(&missing_refs),
+        )
+        .await
+        {
+            Ok(m) => m,
+            Err(_) => {
+                tracing::warn!("on-chain metrics fetch timed out after 20s");
+                Vec::new()
+            }
+        };
 
         for m in new_metrics {
             self.inner
@@ -245,18 +256,11 @@ impl CryptoClient {
         }
 
         if missing.is_empty() {
-            let inner_clone = Arc::clone(&self.inner);
-            let symbols_owned: Vec<String> = symbols.iter().map(|s| s.to_string()).collect();
-            tokio::spawn(async move {
-                let refs: Vec<&str> = symbols_owned.iter().map(|s| s.as_str()).collect();
-                let (consensus_quotes, needs_refresh) = inner_clone.fetch_consensus(&refs).await;
-                for q in &consensus_quotes {
-                    inner_clone.cache.insert(q.symbol.clone(), q.clone()).await;
-                }
-                for (sym, price) in needs_refresh {
-                    inner_clone.spawn_milestone_refresh(sym, price);
-                }
-            });
+            // Full cache hit: no network fan-out. Price freshness is maintained
+            // by the scheduled workers (price-prefetch / alert-engine) and by
+            // the Binance WS stream, which rewrites cache entries on every
+            // tick. Spawning a background consensus here caused a ~6x
+            // amplification of provider fan-out (~1300 sched/day).
             return Ok(out);
         }
 
@@ -264,14 +268,16 @@ impl CryptoClient {
         let (mut consensus_quotes, needs_refresh) = self.inner.fetch_consensus(&missing_refs).await;
 
         if !needs_refresh.is_empty() {
-            let mut tasks = Vec::new();
+            // Milestone refresh fetches 730d history per symbol — expensive and
+            // unbounded (provider fallback chain). Run it detached so the caller
+            // (e.g. the /ask pipeline) never blocks on it; the SQLite backfill
+            // below just uses whatever milestones already exist.
             for (sym, price) in needs_refresh {
                 let inner = Arc::clone(&self.inner);
-                tasks.push(tokio::spawn(async move {
+                tokio::spawn(async move {
                     inner.refresh_price_milestones(&sym, price).await;
-                }));
+                });
             }
-            futures::future::join_all(tasks).await;
 
             for quote in &mut consensus_quotes {
                 let sym = &quote.symbol;
@@ -356,11 +362,8 @@ impl CryptoClient {
 
     pub async fn get_top(&self, limit: u32) -> Result<Vec<CmcQuote>> {
         if let Some(c) = self.inner.cache_top.get(&limit).await {
-            // Cache hit! Spawn background update and return immediately.
-            let inner_clone = Arc::clone(&self.inner);
-            tokio::spawn(async move {
-                let _ = inner_clone.fetch_top_direct(limit).await;
-            });
+            // Serve from cache; the scheduled price-prefetch worker refreshes
+            // this on its own cadence, so no background spawn-on-hit is needed.
             return Ok(c);
         }
         self.inner.fetch_top_direct(limit).await
@@ -605,6 +608,19 @@ impl CryptoClientInner {
     }
 
     pub async fn get_history(&self, symbol: &str, period: &str) -> Result<Vec<(i64, f64)>> {
+        // Global bound: the provider fallback chain (3 parallel + DefiLlama +
+        // GeckoTerminal + SQLite) is sequential and was previously unbounded,
+        // which let a slow provider hang callers like the /ask pipeline.
+        match tokio::time::timeout(HISTORY_TIMEOUT, self.get_history_inner(symbol, period)).await {
+            Ok(r) => r,
+            Err(_) => Err(BotError::CmcApi(format!(
+                "history fetch for {symbol} timed out after {}s",
+                HISTORY_TIMEOUT.as_secs()
+            ))),
+        }
+    }
+
+    async fn get_history_inner(&self, symbol: &str, period: &str) -> Result<Vec<(i64, f64)>> {
         let days = match period {
             "1d" | "1" => 1,
             "7d" | "7" => 7,
@@ -786,7 +802,7 @@ impl CryptoClientInner {
     }
 
     async fn fetch_consensus(&self, symbols: &[&str]) -> (Vec<CmcQuote>, Vec<(String, f64)>) {
-        let (r_cmc, r_cg, r_cc, r_cp, r_alt, r_ccp, r_bi, r_by, r_cb, r_dl, r_ds, r_gt, r_pyth) = tokio::join!(
+        let (r_cmc, r_cg, r_cc, r_cp, r_alt, r_ccp, r_bi, r_by, r_cb, r_dl, r_ds, r_gt) = tokio::join!(
             self.fetch_from_cmc(symbols),
             self.fetch_from_cg(symbols),
             self.fetch_from_cc(symbols),
@@ -799,13 +815,12 @@ impl CryptoClientInner {
             self.fetch_from_dl(symbols),
             self.fetch_from_ds(symbols),
             self.fetch_from_gt(symbols),
-            self.fetch_from_pyth(symbols),
         );
 
         let mut by_sym: std::collections::HashMap<String, Vec<RawQuote>> =
             std::collections::HashMap::new();
         for batch in [
-            r_cmc, r_cg, r_cc, r_cp, r_alt, r_ccp, r_bi, r_by, r_cb, r_dl, r_ds, r_gt, r_pyth,
+            r_cmc, r_cg, r_cc, r_cp, r_alt, r_ccp, r_bi, r_by, r_cb, r_dl, r_ds, r_gt,
         ]
         .into_iter()
         .flatten()
@@ -1295,25 +1310,6 @@ impl CryptoClientInner {
     async fn fetch_from_gt(&self, _symbols: &[&str]) -> Option<Vec<RawQuote>> {
         // GeckoTerminal doesn't do batched get_quotes right now, used only for history
         None
-    }
-
-    async fn fetch_from_pyth(&self, symbols: &[&str]) -> Option<Vec<RawQuote>> {
-        if !self.health.should_probe(PythProvider::NAME) {
-            return None;
-        }
-        match timeout(PROVIDER_TIMEOUT, self.pyth.get_quotes(symbols)).await {
-            Ok(Ok(q)) if !q.is_empty() => Some(q),
-            Ok(Ok(_)) => None,
-            Ok(Err(e)) => {
-                let err: BotError = e;
-                self.health.record_err(PythProvider::NAME, &err.to_string());
-                None
-            }
-            Err(_) => {
-                self.health.record_err(PythProvider::NAME, "timeout");
-                None
-            }
-        }
     }
 }
 

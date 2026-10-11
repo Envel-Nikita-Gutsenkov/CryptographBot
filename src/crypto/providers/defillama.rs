@@ -1,10 +1,10 @@
-use std::time::Duration;
 use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::time::Duration;
 
-use crate::error::{BotError, Result};
 use super::RawQuote;
+use crate::error::{BotError, Result};
 
 pub struct DefiLlamaProvider {
     http: Client,
@@ -63,13 +63,16 @@ impl DefiLlamaProvider {
             .join(",");
 
         let url = format!("https://coins.llama.fi/prices/current/{}", coins_param);
-        
+
         let resp = self.http.get(&url).send().await?;
         if resp.status() == 429 {
             return Err(BotError::RateLimited);
         }
 
-        let body: DlPriceResp = resp.json().await.map_err(|e| BotError::CmcApi(e.to_string()))?;
+        let body: DlPriceResp = resp
+            .json()
+            .await
+            .map_err(|e| BotError::CmcApi(e.to_string()))?;
 
         let mut out = Vec::new();
         for (symbol, id) in symbol_id_pairs {
@@ -104,20 +107,33 @@ impl DefiLlamaProvider {
 
     /// Queries `https://coins.llama.fi/chart/{coingecko:id}?start={timestamp}&span={days}`
     pub async fn get_history(&self, cg_id: &str, days: &str) -> Result<Vec<(i64, f64)>> {
-        let days_num = days.strip_suffix('d').unwrap_or("30").parse::<i64>().unwrap_or(30);
+        let days_num = days
+            .strip_suffix('d')
+            .unwrap_or("30")
+            .parse::<i64>()
+            .unwrap_or(30);
         let start_ts = chrono::Utc::now().timestamp() - (days_num * 86400);
 
-        let url = format!("https://coins.llama.fi/chart/coingecko:{}?start={}&span={}d&period=1h", cg_id, start_ts, days_num);
-        
+        let url = format!(
+            "https://coins.llama.fi/chart/coingecko:{}?start={}&span={}d&period=1h",
+            cg_id, start_ts, days_num
+        );
+
         let resp = self.http.get(&url).send().await?;
         if resp.status() == 429 {
             return Err(BotError::RateLimited);
         }
 
-        let body: DlChartResp = resp.json().await.map_err(|e| BotError::CmcApi(e.to_string()))?;
-        
+        let body: DlChartResp = resp
+            .json()
+            .await
+            .map_err(|e| BotError::CmcApi(e.to_string()))?;
+
         let key = format!("coingecko:{}", cg_id);
-        let data = body.coins.get(&key).ok_or_else(|| BotError::SymbolNotFound(cg_id.to_string()))?;
+        let data = body
+            .coins
+            .get(&key)
+            .ok_or_else(|| BotError::SymbolNotFound(cg_id.to_string()))?;
 
         let mut points = Vec::new();
         for pt in &data.prices {
@@ -137,10 +153,19 @@ impl DefiLlamaProvider {
         let mut dex_volume = None;
 
         // 1. Fetch Stablecoin Market Cap
-        if let Ok(resp) = self.http.get("https://stablecoins.llama.fi/stablecoincharts/all").send().await {
+        if let Ok(resp) = self
+            .http
+            .get("https://stablecoins.llama.fi/stablecoincharts/all")
+            .send()
+            .await
+        {
             if let Ok(mut body) = resp.json::<Vec<serde_json::Value>>().await {
                 if let Some(last) = body.pop() {
-                    if let Some(circulating) = last.get("totalCirculatingUSD").and_then(|t| t.get("peggedUSD")).and_then(|v| v.as_f64()) {
+                    if let Some(circulating) = last
+                        .get("totalCirculatingUSD")
+                        .and_then(|t| t.get("peggedUSD"))
+                        .and_then(|v| v.as_f64())
+                    {
                         stablecoin_mcap = Some(circulating);
                     }
                 }

@@ -66,12 +66,13 @@ parking_lot = { version = "0.12", default-features = false }
 hex     = { version = "0.4", default-features = false, features = ["alloc"] }
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 base64  = "0.21"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.31", features = ["bundled", "backup"] }
 tokio-tungstenite = { version = "0.21", features = ["rustls-tls-native-roots"] }
 futures-util = "0.3"
 urlencoding = "2.1"
 percent-encoding = "2.3"
 html-escape = "0.2"
+rss = "2.0"
 
 
 [dev-dependencies]
@@ -83,17 +84,17 @@ tempfile    = "3.10"
 opt-level   = 0
 debug       = false
 incremental = true
-codegen-units = 16
+codegen-units = 4
 
 [profile.test]
 opt-level   = 0
 debug       = false
 incremental = true
-codegen-units = 16
+codegen-units = 4
 
 [profile.release]
 opt-level     = 3
 lto           = "thin"
-codegen-units = 1
+codegen-units = 4
 panic         = "abort"
 strip         = true

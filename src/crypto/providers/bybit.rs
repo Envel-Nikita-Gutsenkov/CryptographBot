@@ -1,9 +1,9 @@
-use std::time::Duration;
+use super::RawQuote;
+use crate::error::{BotError, Result};
 use moka::future::Cache;
 use reqwest::Client;
 use serde::Deserialize;
-use super::RawQuote;
-use crate::error::{BotError, Result};
+use std::time::Duration;
 
 pub struct BybitProvider {
     http: Client,
@@ -15,8 +15,15 @@ impl BybitProvider {
 
     pub fn new() -> Self {
         Self {
-            http: Client::builder().timeout(Duration::from_secs(8)).use_rustls_tls().build().unwrap(),
-            cache: Cache::builder().time_to_live(Duration::from_secs(30)).max_capacity(200).build(),
+            http: Client::builder()
+                .timeout(Duration::from_secs(8))
+                .use_rustls_tls()
+                .build()
+                .unwrap(),
+            cache: Cache::builder()
+                .time_to_live(Duration::from_secs(30))
+                .max_capacity(200)
+                .build(),
         }
     }
 
@@ -50,7 +57,8 @@ impl BybitProvider {
 
     async fn fetch_one(&self, symbol: &str) -> Result<Option<RawQuote>> {
         let pair = format!("{}USDT", symbol);
-        let resp = self.http
+        let resp = self
+            .http
             .get("https://api.bybit.com/v5/market/tickers")
             .query(&[("category", "spot"), ("symbol", &pair)])
             .send()
@@ -64,7 +72,10 @@ impl BybitProvider {
             return Ok(None);
         }
 
-        let body: BybitResp = resp.json().await.map_err(|e| BotError::CmcApi(format!("Bybit parse: {e}")))?;
+        let body: BybitResp = resp
+            .json()
+            .await
+            .map_err(|e| BotError::CmcApi(format!("Bybit parse: {e}")))?;
         if body.ret_code != 0 || body.result.list.is_empty() {
             return Ok(None);
         }

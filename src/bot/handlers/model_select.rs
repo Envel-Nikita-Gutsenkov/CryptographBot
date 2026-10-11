@@ -1,6 +1,6 @@
+use crate::{config::Config, crypto::ai::providers::available_models, db::Store};
 use std::sync::Arc;
 use teloxide::{prelude::*, types::ParseMode};
-use crate::{config::Config, db::Store, crypto::ai::providers::available_models};
 
 pub async fn handle_model_cmd(
     bot: Bot,
@@ -35,16 +35,24 @@ async fn show_model_list(bot: &Bot, chat_id: ChatId) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn set_model(bot: &Bot, chat_id: ChatId, store: Arc<Store>, input: &str) -> anyhow::Result<()> {
+async fn set_model(
+    bot: &Bot,
+    chat_id: ChatId,
+    store: Arc<Store>,
+    input: &str,
+) -> anyhow::Result<()> {
     let user_id = chat_id.0 as u64;
     let models = available_models();
 
     if input == "default" || input == "reset" {
         store.write(user_id, |p| p.settings.ai_model_override = None);
         crate::bot::handlers::portfolio::auto_backup(bot, &store, user_id).await;
-        bot.send_message(chat_id, "✅ AI model reset to default chain \\(Gemini Pro → Flash → Mistral\\)\\.")
-            .parse_mode(ParseMode::MarkdownV2)
-            .await?;
+        bot.send_message(
+            chat_id,
+            "✅ AI model reset to default chain \\(Gemini Pro → Flash → Mistral\\)\\.",
+        )
+        .parse_mode(ParseMode::MarkdownV2)
+        .await?;
         return Ok(());
     }
 
@@ -57,16 +65,24 @@ async fn set_model(bot: &Bot, chat_id: ChatId, store: Arc<Store>, input: &str) -
 
     match model {
         Some(m) => {
-            store.write(user_id, |p| p.settings.ai_model_override = Some(m.id.to_string()));
+            store.write(user_id, |p| {
+                p.settings.ai_model_override = Some(m.id.to_string())
+            });
             crate::bot::handlers::portfolio::auto_backup(bot, &store, user_id).await;
-            bot.send_message(chat_id, format!("✅ AI model set to *{}* \\(`{}`\\)\\.", m.display, m.id))
-                .parse_mode(ParseMode::MarkdownV2)
-                .await?;
+            bot.send_message(
+                chat_id,
+                format!("✅ AI model set to *{}* \\(`{}`\\)\\.", m.display, m.id),
+            )
+            .parse_mode(ParseMode::MarkdownV2)
+            .await?;
         }
         None => {
-            bot.send_message(chat_id, format!("❌ Unknown model `{input}`\\. Use `/model list` to see options\\."))
-                .parse_mode(ParseMode::MarkdownV2)
-                .await?;
+            bot.send_message(
+                chat_id,
+                format!("❌ Unknown model `{input}`\\. Use `/model list` to see options\\."),
+            )
+            .parse_mode(ParseMode::MarkdownV2)
+            .await?;
         }
     }
     Ok(())

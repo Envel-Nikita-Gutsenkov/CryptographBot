@@ -1,6 +1,6 @@
+use crate::{crypto::CryptoClient, format};
 use std::sync::Arc;
 use teloxide::prelude::*;
-use crate::{crypto::CryptoClient, format};
 
 pub async fn handle_fng_cmd(
     bot: Bot,

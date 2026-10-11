@@ -1,9 +1,9 @@
-use std::time::Duration;
+use super::RawQuote;
+use crate::error::Result;
 use moka::future::Cache;
 use reqwest::Client;
 use serde::Deserialize;
-use super::RawQuote;
-use crate::error::Result;
+use std::time::Duration;
 
 pub struct DexScreenerProvider {
     http: Client,
@@ -29,16 +29,17 @@ impl DexScreenerProvider {
 
     pub async fn get_quotes(&self, symbols: &[&str]) -> Result<Vec<RawQuote>> {
         let mut out = Vec::new();
-        
+
         for &sym in symbols {
             let sym_upper = sym.to_uppercase();
-            
+
             if let Some(q) = self.cache.get(&sym_upper).await {
                 out.push(q);
                 continue;
             }
 
-            let resp = self.http
+            let resp = self
+                .http
                 .get("https://api.dexscreener.com/latest/dex/search")
                 .query(&[("q", sym)])
                 .send()
@@ -70,7 +71,11 @@ impl DexScreenerProvider {
             }
 
             if let Some(pair) = best_pair {
-                let price_usd = pair.price_usd.unwrap_or("0".to_string()).parse::<f64>().unwrap_or(0.0);
+                let price_usd = pair
+                    .price_usd
+                    .unwrap_or("0".to_string())
+                    .parse::<f64>()
+                    .unwrap_or(0.0);
                 if price_usd > 0.0 {
                     let q = RawQuote {
                         symbol: pair.base_token.symbol.to_uppercase(),
@@ -98,7 +103,7 @@ impl DexScreenerProvider {
                 }
             }
         }
-        
+
         Ok(out)
     }
 }

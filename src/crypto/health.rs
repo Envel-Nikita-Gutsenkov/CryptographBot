@@ -1,7 +1,7 @@
 #![allow(dead_code)]
-use std::collections::HashMap;
-use parking_lot::RwLock;
 use chrono::{DateTime, Utc};
+use parking_lot::RwLock;
+use std::collections::HashMap;
 use tracing::warn;
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,7 +24,11 @@ pub struct SourceHealth {
 
 impl SourceHealth {
     fn new(name: &'static str) -> Self {
-        Self { name, is_healthy: true, ..Default::default() }
+        Self {
+            name,
+            is_healthy: true,
+            ..Default::default()
+        }
     }
 
     pub fn record_ok(&mut self, deviation_pct: f64) {
@@ -41,14 +45,19 @@ impl SourceHealth {
         self.total_err.fetch_add(1, Ordering::Relaxed);
         self.last_err = Some(Utc::now());
         if self.consecutive_failures >= MAX_FAILURES {
-            warn!("Source {} marked UNHEALTHY after {} failures: {}", self.name, self.consecutive_failures, reason);
+            warn!(
+                "Source {} marked UNHEALTHY after {} failures: {}",
+                self.name, self.consecutive_failures, reason
+            );
             self.is_healthy = false;
         }
     }
 
     /// Allow re-probe after recovery window.
     pub fn should_probe(&self) -> bool {
-        if self.is_healthy { return true; }
+        if self.is_healthy {
+            return true;
+        }
         match self.last_err {
             None => true,
             Some(t) => (Utc::now() - t).num_minutes() >= RECOVERY_MINS,
@@ -56,7 +65,11 @@ impl SourceHealth {
     }
 
     pub fn status_emoji(&self) -> &'static str {
-        if self.is_healthy { "🟢" } else { "🔴" }
+        if self.is_healthy {
+            "🟢"
+        } else {
+            "🔴"
+        }
     }
 }
 
@@ -70,23 +83,41 @@ impl HealthTracker {
         for &name in source_names {
             map.insert(name, SourceHealth::new(name));
         }
-        Self { sources: RwLock::new(map) }
+        Self {
+            sources: RwLock::new(map),
+        }
     }
 
     pub fn record_ok(&self, source: &'static str, deviation_pct: f64) {
-        self.sources.write().entry(source).or_insert_with(|| SourceHealth::new(source)).record_ok(deviation_pct);
+        self.sources
+            .write()
+            .entry(source)
+            .or_insert_with(|| SourceHealth::new(source))
+            .record_ok(deviation_pct);
     }
 
     pub fn record_err(&self, source: &'static str, reason: &str) {
-        self.sources.write().entry(source).or_insert_with(|| SourceHealth::new(source)).record_err(reason);
+        self.sources
+            .write()
+            .entry(source)
+            .or_insert_with(|| SourceHealth::new(source))
+            .record_err(reason);
     }
 
     pub fn is_healthy(&self, source: &'static str) -> bool {
-        self.sources.read().get(source).map(|s| s.is_healthy).unwrap_or(true)
+        self.sources
+            .read()
+            .get(source)
+            .map(|s| s.is_healthy)
+            .unwrap_or(true)
     }
 
     pub fn should_probe(&self, source: &'static str) -> bool {
-        self.sources.read().get(source).map(|s| s.should_probe()).unwrap_or(true)
+        self.sources
+            .read()
+            .get(source)
+            .map(|s| s.should_probe())
+            .unwrap_or(true)
     }
 
     pub fn take_deltas(&self) -> Vec<crate::models::MetricDelta> {

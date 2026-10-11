@@ -1,7 +1,7 @@
-use tracing::info;
-use std::sync::OnceLock;
-use parking_lot::Mutex;
 use chrono::{DateTime, Utc};
+use parking_lot::Mutex;
+use std::sync::OnceLock;
+use tracing::info;
 
 struct NewsCache {
     rss_body: String,
@@ -10,10 +10,14 @@ struct NewsCache {
 
 static NEWS_CACHE: OnceLock<Mutex<Option<NewsCache>>> = OnceLock::new();
 
-pub async fn fetch_news_for_symbol(symbol: &str, coin_name: &str, limit: usize) -> anyhow::Result<String> {
+pub async fn fetch_news_for_symbol(
+    symbol: &str,
+    coin_name: &str,
+    limit: usize,
+) -> anyhow::Result<String> {
     let now = Utc::now();
     let cache_cell = NEWS_CACHE.get_or_init(|| Mutex::new(None));
-    
+
     // Copy cache value out of the lock scope
     let cached_body = {
         let guard = cache_cell.lock();
@@ -23,22 +27,22 @@ pub async fn fetch_news_for_symbol(symbol: &str, coin_name: &str, limit: usize) 
             None
         }
     };
-    
+
     let mut body = String::new();
-    
+
     // Check if cache is fresh
     if let Some((cached_text, fetched_at)) = &cached_body {
         if now.signed_duration_since(*fetched_at).num_minutes() < 30 {
             body = cached_text.clone();
         }
     }
-    
+
     if body.is_empty() {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
             .use_rustls_tls()
             .build()?;
-            
+
         match client.get("https://cointelegraph.com/rss").send().await {
             Ok(res) => {
                 if let Ok(text) = res.text().await {
@@ -54,7 +58,7 @@ pub async fn fetch_news_for_symbol(symbol: &str, coin_name: &str, limit: usize) 
                 info!("RSS fetch failed: {}", e);
             }
         }
-        
+
         // Fallback: serve stale cache if network fails
         if body.is_empty() {
             if let Some((cached_text, _)) = cached_body {
@@ -64,7 +68,7 @@ pub async fn fetch_news_for_symbol(symbol: &str, coin_name: &str, limit: usize) 
             }
         }
     }
-    
+
     let mut articles = Vec::new();
     let mut rest = body.as_str();
     let sym_lower = symbol.to_lowercase();
@@ -86,11 +90,11 @@ pub async fn fetch_news_for_symbol(symbol: &str, coin_name: &str, limit: usize) 
         let title_lower = title.to_lowercase();
         let desc_lower = description.to_lowercase();
 
-        let matches = title_lower.contains(&sym_lower) || 
-                      desc_lower.contains(&sym_lower) ||
-                      title_lower.contains(&name_lower) ||
-                      desc_lower.contains(&name_lower);
-        
+        let matches = title_lower.contains(&sym_lower)
+            || desc_lower.contains(&sym_lower)
+            || title_lower.contains(&name_lower)
+            || desc_lower.contains(&name_lower);
+
         if matches {
             articles.push((title, description, link));
             if articles.len() >= limit {
@@ -126,7 +130,12 @@ pub async fn fetch_news_for_symbol(symbol: &str, coin_name: &str, limit: usize) 
     for (i, (title, desc, _link)) in articles.iter().enumerate() {
         let clean_title = strip_html_tags(title);
         let clean_desc = strip_html_tags(desc);
-        summary.push_str(&format!("{}. {}\n   Summary: {}\n\n", i + 1, clean_title, clean_desc));
+        summary.push_str(&format!(
+            "{}. {}\n   Summary: {}\n\n",
+            i + 1,
+            clean_title,
+            clean_desc
+        ));
     }
     Ok(summary)
 }
@@ -145,7 +154,12 @@ fn strip_html_tags(input: &str) -> String {
             }
         }
     }
-    result.replace("\n", " ").replace("\r", "").split_whitespace().collect::<Vec<_>>().join(" ")
+    result
+        .replace("\n", " ")
+        .replace("\r", "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
@@ -154,8 +168,10 @@ fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
     let start_idx = xml.find(&open_tag)?;
     let start = start_idx + open_tag.len();
     let end = xml.find(&close_tag)?;
-    if start >= end { return None; }
-    
+    if start >= end {
+        return None;
+    }
+
     let content = xml[start..end].trim();
     let content = if content.starts_with("<![CDATA[") && content.ends_with("]]>") {
         &content[9..content.len() - 3]
@@ -211,9 +227,9 @@ mod tests {
             let body_lower = art.body.to_lowercase();
             let cat_upper = art.categories.to_uppercase();
 
-            let matches_symbol = cat_upper.split('|').any(|c| c == sym_upper) || 
-                                 title_lower.contains(&sym_upper.to_lowercase()) || 
-                                 body_lower.contains(&sym_upper.to_lowercase());
+            let matches_symbol = cat_upper.split('|').any(|c| c == sym_upper)
+                || title_lower.contains(&sym_upper.to_lowercase())
+                || body_lower.contains(&sym_upper.to_lowercase());
 
             let matches_name = title_lower.contains(name_lower) || body_lower.contains(name_lower);
 

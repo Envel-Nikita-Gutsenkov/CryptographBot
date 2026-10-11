@@ -1,7 +1,7 @@
-use std::time::Duration;
 use futures_util::StreamExt;
 use moka::future::Cache;
 use serde::Deserialize;
+use std::time::Duration;
 use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{error, info, warn};
@@ -39,12 +39,15 @@ pub async fn start_binance_ws(cache: Cache<String, CmcQuote>) {
                                         continue;
                                     }
                                     let base_sym = &t.symbol[..t.symbol.len() - 4]; // remove USDT
-                                    
+
                                     let price_usd = t.last_price.parse::<f64>().unwrap_or(0.0);
-                                    let change_24h = t.price_change_percent.parse::<f64>().unwrap_or(0.0);
+                                    let change_24h =
+                                        t.price_change_percent.parse::<f64>().unwrap_or(0.0);
                                     let volume_24h = t.quote_volume.parse::<f64>().unwrap_or(0.0);
-                                    
-                                    if price_usd <= 0.0 { continue; }
+
+                                    if price_usd <= 0.0 {
+                                        continue;
+                                    }
 
                                     if let Some(mut q) = cache.get(base_sym).await {
                                         q.price_usd = price_usd;

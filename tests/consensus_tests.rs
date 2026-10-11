@@ -4,17 +4,28 @@ fn median(values: &[f64]) -> f64 {
     let mut s = values.to_vec();
     s.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = s.len();
-    if n % 2 == 0 { (s[n/2-1] + s[n/2]) / 2.0 } else { s[n/2] }
+    if n % 2 == 0 {
+        (s[n / 2 - 1] + s[n / 2]) / 2.0
+    } else {
+        s[n / 2]
+    }
 }
 
 fn consensus(prices: &[f64], threshold_pct: f64) -> f64 {
-    if prices.is_empty() { return 0.0; }
+    if prices.is_empty() {
+        return 0.0;
+    }
     let m = median(prices);
-    let valid: Vec<f64> = prices.iter()
+    let valid: Vec<f64> = prices
+        .iter()
         .filter(|&&p| (p - m).abs() / m * 100.0 <= threshold_pct)
         .copied()
         .collect();
-    if valid.is_empty() { m } else { valid.iter().sum::<f64>() / valid.len() as f64 }
+    if valid.is_empty() {
+        m
+    } else {
+        valid.iter().sum::<f64>() / valid.len() as f64
+    }
 }
 
 #[test]
@@ -90,7 +101,7 @@ fn cooldown_respected() {
     let cooldown_hours = 12u64;
     assert!(last_fired_secs_ago < cooldown_hours as usize * 3600);
     // Should NOT fire — cooldown not expired
-    
+
     let last_fired_secs_ago2 = 13 * 3600; // 13h ago
     assert!(last_fired_secs_ago2 >= cooldown_hours as usize * 3600);
     // Should fire — cooldown expired

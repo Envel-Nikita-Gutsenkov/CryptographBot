@@ -64,6 +64,13 @@ pub mod cb {
         format!("confirm:{token}")
     }
 
+    pub fn goal_confirm(id: u64) -> String {
+        format!("goal:confirm:{id}")
+    }
+    pub fn goal_keep(id: u64) -> String {
+        format!("goal:keep:{id}")
+    }
+
     pub fn patch_confirm(token: &str) -> String {
         format!("patch:confirm:{token}")
     }
@@ -281,6 +288,16 @@ pub fn confirm_cancel(confirm_token: &str) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new([vec![
         btn("✅ Confirm", &cb::confirm(confirm_token)),
         btn("❌ Cancel", cb::CANCEL),
+    ]])
+}
+
+/// Keyboard for an AI proposal to reconsider a goal: the user either confirms
+/// deactivation or keeps the goal active. The AI can never deactivate a goal
+/// without the user pressing Confirm.
+pub fn goal_propose_keyboard(goal_id: u64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new([vec![
+        btn("✅ Confirm (deactivate)", &cb::goal_confirm(goal_id)),
+        btn("🔒 Keep active", &cb::goal_keep(goal_id)),
     ]])
 }
 

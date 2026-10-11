@@ -2,17 +2,11 @@ use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info, warn};
 
-use crate::{
-    crypto::CryptoClient,
-    db::SqliteStore,
-};
+use crate::{crypto::CryptoClient, db::SqliteStore};
 
 /// Runs a background worker that periodically fetches global macro history
 /// and runs it through a lightweight AI agent to cache the current macro state.
-pub async fn run_macro_worker(
-    sqlite: Arc<SqliteStore>,
-    crypto: Arc<CryptoClient>,
-) {
+pub async fn run_macro_worker(sqlite: Arc<SqliteStore>, crypto: Arc<CryptoClient>) {
     info!("Starting AI Macro Worker");
 
     loop {
@@ -41,8 +35,12 @@ pub async fn run_macro_worker(
                         let current = hist.last().unwrap().1;
                         let max = hist.iter().map(|(_, p)| *p).fold(0.0, f64::max);
                         let min = hist.iter().map(|(_, p)| *p).fold(f64::MAX, f64::min);
-                        let ath_drop = if max > 0.0 { (current - max) / max * 100.0 } else { 0.0 };
-                        
+                        let ath_drop = if max > 0.0 {
+                            (current - max) / max * 100.0
+                        } else {
+                            0.0
+                        };
+
                         history_context.push_str(&format!(
                             "\n{} 1-Year Range: Min ${:.2} - Max ${:.2} (Current: ${:.2}, {:.2}% from peak)",
                             sym, min, max, current, ath_drop
@@ -66,7 +64,15 @@ pub async fn run_macro_worker(
         );
 
         // 4. Run through single-pass lightweight LLM (borrowing the summarize_news_single_pass logic)
-        let verified_summary = match crate::crypto::ai::pipeline::summarize_news_single_pass("GLOBAL", "", &prompt_base, None, sqlite.clone()).await {
+        let verified_summary = match crate::crypto::ai::pipeline::summarize_news_single_pass(
+            "GLOBAL",
+            "",
+            &prompt_base,
+            None,
+            sqlite.clone(),
+        )
+        .await
+        {
             Ok(s) => s,
             Err(e) => {
                 error!("Macro pipeline failed: {}", e);
@@ -87,7 +93,9 @@ pub async fn run_macro_worker(
             });
             if is_volatile {
                 sleep_secs = 4 * 3600; // 4 hours in volatile markets
-                info!("Macro Worker: Volatile market detected! Sleep interval shortened to 4 hours.");
+                info!(
+                    "Macro Worker: Volatile market detected! Sleep interval shortened to 4 hours."
+                );
             }
         }
         sleep(Duration::from_secs(sleep_secs)).await;
@@ -106,25 +114,39 @@ mod tests {
         let cg_key = std::env::var("COINGECKO_API_KEY").unwrap_or_default();
         let cc_key = std::env::var("COINCAP_API_KEY").unwrap_or_default();
         let cryptocompare_key = std::env::var("CRYPTOCOMPARE_API_KEY").unwrap_or_default();
-        
+
         if cmc_key.is_empty() || cg_key.is_empty() {
             println!("Skipping test: Missing API keys (CMC/CoinGecko needed)");
             return;
         }
-        if std::env::var("GEMINI_API_KEY").unwrap_or_default().is_empty() && std::env::var("GROQ_API_KEY").unwrap_or_default().is_empty() {
+        if std::env::var("GEMINI_API_KEY")
+            .unwrap_or_default()
+            .is_empty()
+            && std::env::var("GROQ_API_KEY").unwrap_or_default().is_empty()
+        {
             println!("Skipping test: Missing API keys for AI Models");
             return;
         }
 
         println!("Initializing CryptoClient...");
-        let crypto = Arc::new(CryptoClient::new(&cmc_key, &cg_key, &cc_key, &cryptocompare_key, None));
+        let crypto = Arc::new(CryptoClient::new(
+            &cmc_key,
+            &cg_key,
+            &cc_key,
+            &cryptocompare_key,
+            None,
+        ));
 
         println!("Fetching Global Metrics...");
         let m_data = crypto.get_global_metrics().await;
-        let global_str = m_data.map(|m| format!(
+        let global_str = m_data
+            .map(|m| {
+                format!(
             "Total Market Cap: ${:.0}\n24h Volume: ${:.0}\nBTC Dom: {:.2}%\nETH Dom: {:.2}%",
             m.total_market_cap, m.total_volume_24h, m.btc_dominance, m.eth_dominance
-        )).unwrap_or_else(|_| "Global Market Context: Unavailable".into());
+        )
+            })
+            .unwrap_or_else(|_| "Global Market Context: Unavailable".into());
         println!("{}\n", global_str);
 
         println!("Fetching 1-year history for BTC and ETH...");
@@ -136,8 +158,12 @@ mod tests {
                         let current = hist.last().unwrap().1;
                         let max = hist.iter().map(|(_, p)| *p).fold(0.0, f64::max);
                         let min = hist.iter().map(|(_, p)| *p).fold(f64::MAX, f64::min);
-                        let ath_drop = if max > 0.0 { (current - max) / max * 100.0 } else { 0.0 };
-                        
+                        let ath_drop = if max > 0.0 {
+                            (current - max) / max * 100.0
+                        } else {
+                            0.0
+                        };
+
                         history_context.push_str(&format!(
                             "{} 1-Year Range: Min ${:.2} - Max ${:.2} (Current: ${:.2}, {:.2}% from peak)\n",
                             sym, min, max, current, ath_drop
@@ -159,9 +185,20 @@ mod tests {
         );
 
         println!("--- RUNNING AI MACRO PIPELINE ---");
-        let test_db = std::sync::Arc::new(crate::db::sqlite::SqliteStore::new("test_macro.db").unwrap());
-        let verified_summary = crate::crypto::ai::pipeline::summarize_news_single_pass("GLOBAL", "", &prompt_base, None, test_db).await.expect("AI pipeline failed");
-        println!("\n=== FINAL MACRO SUMMARY ===\n{}\n=============================\n", verified_summary);
+        let test_db =
+            std::sync::Arc::new(crate::db::sqlite::SqliteStore::new("test_macro.db").unwrap());
+        let verified_summary = crate::crypto::ai::pipeline::summarize_news_single_pass(
+            "GLOBAL",
+            "",
+            &prompt_base,
+            None,
+            test_db,
+        )
+        .await
+        .expect("AI pipeline failed");
+        println!(
+            "\n=== FINAL MACRO SUMMARY ===\n{}\n=============================\n",
+            verified_summary
+        );
     }
 }
-

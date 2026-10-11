@@ -53,7 +53,10 @@ fn bit_flip_rejected() {
     let mut enc = c.encrypt(b"secret data").unwrap();
     let len = enc.len();
     enc[len - 1] ^= 1; // flip last byte of ciphertext
-    assert!(c.decrypt(&enc).is_err(), "tampered ciphertext should be rejected");
+    assert!(
+        c.decrypt(&enc).is_err(),
+        "tampered ciphertext should be rejected"
+    );
 }
 
 #[test]
@@ -76,7 +79,11 @@ fn backup_round_trip_standalone() {
 fn backup_each_has_unique_embedded_key() {
     let a = encrypt_backup(b"data").unwrap();
     let b = encrypt_backup(b"data").unwrap();
-    assert_ne!(&a[5..37], &b[5..37], "each backup must embed a fresh random key");
+    assert_ne!(
+        &a[5..37],
+        &b[5..37],
+        "each backup must embed a fresh random key"
+    );
 }
 
 #[test]

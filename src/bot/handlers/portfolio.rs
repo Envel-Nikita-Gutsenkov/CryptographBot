@@ -44,11 +44,17 @@ pub async fn handle_add(
     let symbol = parts[0].to_uppercase();
     let amount: f64 = match parts[1].parse() {
         Ok(v) => v,
-        Err(_) => { bot.send_message(msg.chat.id, "Invalid amount").await?; return Ok(()); }
+        Err(_) => {
+            bot.send_message(msg.chat.id, "Invalid amount").await?;
+            return Ok(());
+        }
     };
     let cost_usd: f64 = match parts[2].parse() {
         Ok(v) => v,
-        Err(_) => { bot.send_message(msg.chat.id, "Invalid cost").await?; return Ok(()); }
+        Err(_) => {
+            bot.send_message(msg.chat.id, "Invalid cost").await?;
+            return Ok(());
+        }
     };
 
     // Optional wallet designation
@@ -156,7 +162,10 @@ pub async fn handle_move(
     let symbol = parts[0].to_uppercase();
     let amount_sent: f64 = match parts[1].parse() {
         Ok(v) => v,
-        Err(_) => { bot.send_message(msg.chat.id, "Invalid amount").await?; return Ok(()); }
+        Err(_) => {
+            bot.send_message(msg.chat.id, "Invalid amount").await?;
+            return Ok(());
+        }
     };
 
     let mut from_name: Option<String> = None;
@@ -165,15 +174,21 @@ pub async fn handle_move(
     let mut fee_usd: Option<f64> = None;
 
     for part in &parts[2..] {
-        if let Some(v) = part.strip_prefix("from:") { from_name = Some(v.to_string()); }
-        else if let Some(v) = part.strip_prefix("to:") { to_name = Some(v.to_string()); }
-        else if let Some(v) = part.strip_prefix("fee:") { fee = v.parse().unwrap_or(0.0); }
-        else if let Some(v) = part.strip_prefix("fee_usd:") { fee_usd = v.parse().ok(); }
+        if let Some(v) = part.strip_prefix("from:") {
+            from_name = Some(v.to_string());
+        } else if let Some(v) = part.strip_prefix("to:") {
+            to_name = Some(v.to_string());
+        } else if let Some(v) = part.strip_prefix("fee:") {
+            fee = v.parse().unwrap_or(0.0);
+        } else if let Some(v) = part.strip_prefix("fee_usd:") {
+            fee_usd = v.parse().ok();
+        }
     }
 
     let amount_received = amount_sent - fee;
     if amount_received < 0.0 {
-        bot.send_message(msg.chat.id, "Fee cannot exceed amount sent").await?;
+        bot.send_message(msg.chat.id, "Fee cannot exceed amount sent")
+            .await?;
         return Ok(());
     }
 
@@ -181,37 +196,58 @@ pub async fn handle_move(
 
     let result: Result<(u64, String), String> = store.write(user_id, |p| {
         let from_id = from_name.as_deref().and_then(|n| {
-            p.wallets.iter().find(|w| w.name.eq_ignore_ascii_case(n)).map(|w| w.id)
+            p.wallets
+                .iter()
+                .find(|w| w.name.eq_ignore_ascii_case(n))
+                .map(|w| w.id)
         });
         let to_id = to_name.as_deref().and_then(|n| {
-            p.wallets.iter().find(|w| w.name.eq_ignore_ascii_case(n)).map(|w| w.id)
+            p.wallets
+                .iter()
+                .find(|w| w.name.eq_ignore_ascii_case(n))
+                .map(|w| w.id)
         });
 
         if from_name.is_some() && from_id.is_none() {
-            return Err(format!("Wallet '{}' not found", from_name.as_deref().unwrap()));
+            return Err(format!(
+                "Wallet '{}' not found",
+                from_name.as_deref().unwrap()
+            ));
         }
         if to_name.is_some() && to_id.is_none() {
-            return Err(format!("Wallet '{}' not found", to_name.as_deref().unwrap()));
+            return Err(format!(
+                "Wallet '{}' not found",
+                to_name.as_deref().unwrap()
+            ));
         }
 
         let tid = p.alloc_transfer_id();
         let transfer = Transfer::new(
-            tid, from_id, to_id,
-            symbol.clone(), amount_sent, amount_received,
-            fee_usd, None, Utc::now(), None, None,
+            tid,
+            from_id,
+            to_id,
+            symbol.clone(),
+            amount_sent,
+            amount_received,
+            fee_usd,
+            None,
+            Utc::now(),
+            None,
+            None,
         );
         p.apply_transfer(&transfer);
 
         let summary = format!(
             "#{tid}: {} {} → {} (fee: {})",
-            amount_sent, symbol,
-            amount_received, fee,
+            amount_sent, symbol, amount_received, fee,
         );
         Ok((tid, summary))
     });
 
     match result {
-        Err(e) => { bot.send_message(msg.chat.id, format!("❌ {e}")).await?; }
+        Err(e) => {
+            bot.send_message(msg.chat.id, format!("❌ {e}")).await?;
+        }
         Ok((tid, _summary)) => {
             let fee_info = fee_usd
                 .map(|u| format!("\nFee \\(USD\\): *{}*", fmt_price(u)))
@@ -223,10 +259,14 @@ pub async fn handle_move(
                  Sent: *{}*   Received: *{}*\n\
                  Network fee: *{}* {}{}\n\n\
                  💡 Cost basis unchanged — only holdings updated\\.",
-                tid, symbol_emoji(&symbol), symbol,
+                tid,
+                symbol_emoji(&symbol),
+                symbol,
                 fmt_crypto(amount_sent, &symbol),
                 fmt_crypto(amount_received, &symbol),
-                fmt_crypto(fee, &symbol), symbol, fee_info,
+                fmt_crypto(fee, &symbol),
+                symbol,
+                fee_info,
             );
 
             bot.send_message(msg.chat.id, reply)
@@ -268,7 +308,8 @@ pub async fn handle_portfolio(
         return Ok(());
     }
 
-    bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing).await?;
+    bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
+        .await?;
 
     let sym_refs: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
     let quotes = cmc.get_quotes(&sym_refs).await.unwrap_or_default();
@@ -324,9 +365,15 @@ pub async fn handle_portfolio(
         (format!("{}{}", header, body), total_val)
     });
 
-    if let Err(e) = bot.send_message(msg.chat.id, &html_msg).parse_mode(teloxide::types::ParseMode::Html).await {
+    if let Err(e) = bot
+        .send_message(msg.chat.id, &html_msg)
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await
+    {
         tracing::error!("Failed to send HTML message: {}", e);
-        let _ = bot.send_message(msg.chat.id, "Failed to render portfolio.").await;
+        let _ = bot
+            .send_message(msg.chat.id, "Failed to render portfolio.")
+            .await;
     }
 
     bot.send_message(msg.chat.id, "Options:")
@@ -350,16 +397,16 @@ pub async fn handle_portfolio_chart(
     }
 
     let user_id = msg.chat.id.0 as u64;
-    let symbols: Vec<String> = store.read(user_id, |p| {
-        p.holdings_by_symbol().into_keys().collect()
-    });
+    let symbols: Vec<String> =
+        store.read(user_id, |p| p.holdings_by_symbol().into_keys().collect());
 
     if symbols.is_empty() {
         bot.send_message(msg.chat.id, "Portfolio is empty").await?;
         return Ok(());
     }
 
-    bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::UploadPhoto).await?;
+    bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::UploadPhoto)
+        .await?;
 
     let sym_refs: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
     let quotes = cmc.get_quotes(&sym_refs).await.unwrap_or_default();
@@ -371,7 +418,7 @@ pub async fn handle_portfolio_chart(
     let (_portfolio_clone, chart) = store.read(user_id, |p| {
         let port = p.clone();
         let chart = futures::executor::block_on(
-            crate::crypto::charts::ChartRenderer::portfolio_overview(&port, &prices)
+            crate::crypto::charts::ChartRenderer::portfolio_overview(&port, &prices),
         );
         (port, chart)
     });
@@ -383,7 +430,8 @@ pub async fn handle_portfolio_chart(
                 .await?;
         }
         Err(e) => {
-            bot.send_message(msg.chat.id, format!("Chart error: {e}")).await?;
+            bot.send_message(msg.chat.id, format!("Chart error: {e}"))
+                .await?;
         }
     }
     Ok(())
@@ -416,7 +464,10 @@ pub async fn handle_correct(
 
     let id: u64 = match parts[0].trim_start_matches('#').parse() {
         Ok(v) => v,
-        Err(_) => { bot.send_message(msg.chat.id, "Invalid ID").await?; return Ok(()); }
+        Err(_) => {
+            bot.send_message(msg.chat.id, "Invalid ID").await?;
+            return Ok(());
+        }
     };
     let field = parts[1];
     let new_value = parts[2];
@@ -424,18 +475,25 @@ pub async fn handle_correct(
 
     let user_id = msg.chat.id.0 as u64;
     let result: Result<String, String> = store.write(user_id, |p| {
-        let purchase = p.purchases.iter_mut().find(|x| x.id == id)
+        let purchase = p
+            .purchases
+            .iter_mut()
+            .find(|x| x.id == id)
             .ok_or_else(|| format!("Purchase #{id} not found"))?;
 
         let old_value = match field {
             "amount" => {
                 let old = purchase.amount.to_string();
-                purchase.amount = new_value.parse().map_err(|_| "Invalid number".to_string())?;
+                purchase.amount = new_value
+                    .parse()
+                    .map_err(|_| "Invalid number".to_string())?;
                 old
             }
             "cost_usd" => {
                 let old = purchase.cost_usd.to_string();
-                purchase.cost_usd = new_value.parse().map_err(|_| "Invalid number".to_string())?;
+                purchase.cost_usd = new_value
+                    .parse()
+                    .map_err(|_| "Invalid number".to_string())?;
                 purchase.paid_amount = purchase.cost_usd;
                 old
             }
@@ -464,7 +522,9 @@ pub async fn handle_correct(
     });
 
     match result {
-        Err(e) => { bot.send_message(msg.chat.id, format!("❌ {e}")).await?; }
+        Err(e) => {
+            bot.send_message(msg.chat.id, format!("❌ {e}")).await?;
+        }
         Ok(old) => {
             bot.send_message(
                 msg.chat.id,
@@ -506,13 +566,18 @@ pub async fn handle_adjust(
     let symbol = parts[1].to_uppercase();
     let new_amount: f64 = match parts[2].parse() {
         Ok(v) => v,
-        Err(_) => { bot.send_message(msg.chat.id, "Invalid amount").await?; return Ok(()); }
+        Err(_) => {
+            bot.send_message(msg.chat.id, "Invalid amount").await?;
+            return Ok(());
+        }
     };
     let reason = parts.get(3).copied().unwrap_or("manual adjustment");
 
     let user_id = msg.chat.id.0 as u64;
     let result: Result<f64, String> = store.write(user_id, |p| {
-        let wallet_id = p.wallets.iter()
+        let wallet_id = p
+            .wallets
+            .iter()
             .find(|w| w.name.eq_ignore_ascii_case(wallet_spec))
             .map(|w| w.id)
             .ok_or_else(|| format!("Wallet '{wallet_spec}' not found"))?;
@@ -531,7 +596,9 @@ pub async fn handle_adjust(
     });
 
     match result {
-        Err(e) => { bot.send_message(msg.chat.id, format!("❌ {e}")).await?; }
+        Err(e) => {
+            bot.send_message(msg.chat.id, format!("❌ {e}")).await?;
+        }
         Ok(old) => {
             bot.send_message(
                 msg.chat.id,
@@ -581,15 +648,22 @@ pub async fn handle_invested_cmd(
         });
         bot.send_message(
             msg.chat.id,
-            format!("✅ Manual cost basis cleared for {}. Now using purchase history.", symbol),
-        ).await?;
+            format!(
+                "✅ Manual cost basis cleared for {}. Now using purchase history.",
+                symbol
+            ),
+        )
+        .await?;
         auto_backup(&bot, &store, user_id).await;
         return Ok(());
     }
 
     let amount: f64 = match val_str.parse() {
         Ok(v) => v,
-        Err(_) => { bot.send_message(msg.chat.id, "Invalid amount").await?; return Ok(()); }
+        Err(_) => {
+            bot.send_message(msg.chat.id, "Invalid amount").await?;
+            return Ok(());
+        }
     };
 
     store.write(user_id, |p| {
@@ -598,8 +672,12 @@ pub async fn handle_invested_cmd(
 
     bot.send_message(
         msg.chat.id,
-        format!("✅ Total invested amount for {} manually set to ${}", symbol, amount),
-    ).await?;
+        format!(
+            "✅ Total invested amount for {} manually set to ${}",
+            symbol, amount
+        ),
+    )
+    .await?;
     auto_backup(&bot, &store, user_id).await;
     Ok(())
 }
@@ -639,7 +717,9 @@ fn ensure_wallet(p: &mut Portfolio, name: &str, kind: WalletKind, _symbol: &str)
 
 pub async fn auto_backup(bot: &Bot, store: &Store, user_id: u64) {
     let should_backup = store.read(user_id, |p| p.settings.backup_on_change);
-    if !should_backup { return; }
+    if !should_backup {
+        return;
+    }
 
     match store.export_backup(user_id) {
         Ok(data) => {
@@ -659,7 +739,9 @@ pub async fn auto_backup(bot: &Bot, store: &Store, user_id: u64) {
 pub async fn auto_backup_silent(bot: &Bot, store: &Store, user_id: u64) {
     let _ = bot; // reserved for future encrypted send
     let should_backup = store.read(user_id, |p| p.settings.backup_on_change);
-    if !should_backup { return; }
+    if !should_backup {
+        return;
+    }
     match store.export_backup(user_id) {
         Ok(_) => tracing::info!("Silent auto-backup completed for user {user_id}"),
         Err(e) => tracing::warn!("Silent auto-backup failed: {e}"),
@@ -679,7 +761,8 @@ pub async fn handle_advice(
     }
 
     let user_id = msg.chat.id.0 as u64;
-    bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing).await?;
+    bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
+        .await?;
 
     let (symbols, watchlist, avg_prices) = store.read(user_id, |p| {
         let syms: Vec<String> = p.holdings_by_symbol().into_keys().collect();
@@ -696,14 +779,19 @@ pub async fn handle_advice(
     });
 
     let mut all_syms = std::collections::HashSet::new();
-    for s in &symbols { all_syms.insert(s.clone()); }
-    for s in &watchlist { all_syms.insert(s.clone()); }
+    for s in &symbols {
+        all_syms.insert(s.clone());
+    }
+    for s in &watchlist {
+        all_syms.insert(s.clone());
+    }
     all_syms.insert("BTC".to_string());
     all_syms.insert("ETH".to_string());
 
     let sym_refs: Vec<&str> = all_syms.iter().map(|s| s.as_str()).collect();
     let quotes = cmc.get_quotes(&sym_refs).await.unwrap_or_default();
-    let prices: std::collections::HashMap<String, &crate::models::CmcQuote> = quotes.iter().map(|q| (q.symbol.clone(), q)).collect();
+    let prices: std::collections::HashMap<String, &crate::models::CmcQuote> =
+        quotes.iter().map(|q| (q.symbol.clone(), q)).collect();
 
     // Algorithmic Sentiment Index Calculation
     let mut avg_24h_change: f64 = 0.0;
@@ -754,7 +842,10 @@ pub async fn handle_advice(
         }
     }
     if !holding_advice.is_empty() {
-        lines.push(format!("💼 *Portfolio Position Advice:*\n{}", holding_advice.join("\n")));
+        lines.push(format!(
+            "💼 *Portfolio Position Advice:*\n{}",
+            holding_advice.join("\n")
+        ));
     }
 
     let mut dips = Vec::new();
@@ -767,13 +858,19 @@ pub async fn handle_advice(
         }
     }
     if !dips.is_empty() {
-        lines.push(format!("📉 *Dip Buying Opportunities:*\n{}", dips.join("\n")));
+        lines.push(format!(
+            "📉 *Dip Buying Opportunities:*\n{}",
+            dips.join("\n")
+        ));
     } else {
         lines.push("📉 *Dip Buying Opportunities:*\nNo major watchlist dips \\(>10% drop in 7d\\) detected right now\\. Stay patient\\.".to_string());
     }
 
-    let reply = format!("💡 *Long\\-Term Investment Intelligence*\n\n{}", lines.join("\n\n"));
-    
+    let reply = format!(
+        "💡 *Long\\-Term Investment Intelligence*\n\n{}",
+        lines.join("\n\n")
+    );
+
     bot.send_message(msg.chat.id, reply)
         .parse_mode(ParseMode::MarkdownV2)
         .await?;
@@ -794,16 +891,16 @@ pub async fn handle_pnl_chart(
     }
 
     let user_id = msg.chat.id.0 as u64;
-    let symbols: Vec<String> = store.read(user_id, |p| {
-        p.holdings_by_symbol().into_keys().collect()
-    });
+    let symbols: Vec<String> =
+        store.read(user_id, |p| p.holdings_by_symbol().into_keys().collect());
 
     if symbols.is_empty() {
         bot.send_message(msg.chat.id, "Portfolio is empty").await?;
         return Ok(());
     }
 
-    bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::UploadPhoto).await?;
+    bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::UploadPhoto)
+        .await?;
 
     let sym_refs: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
     let quotes = cmc.get_quotes(&sym_refs).await.unwrap_or_default();
@@ -814,9 +911,9 @@ pub async fn handle_pnl_chart(
 
     let chart = store.read(user_id, |p| {
         let port = p.clone();
-        futures::executor::block_on(
-            crate::crypto::charts::ChartRenderer::pnl_breakdown(&port, &prices)
-        )
+        futures::executor::block_on(crate::crypto::charts::ChartRenderer::pnl_breakdown(
+            &port, &prices,
+        ))
     });
 
     match chart {
@@ -826,7 +923,8 @@ pub async fn handle_pnl_chart(
                 .await?;
         }
         Err(e) => {
-            bot.send_message(msg.chat.id, format!("Chart error: {e}")).await?;
+            bot.send_message(msg.chat.id, format!("Chart error: {e}"))
+                .await?;
         }
     }
     Ok(())
@@ -873,9 +971,18 @@ pub async fn handle_purchase_history(
         lines.join("\n")
     });
 
-    if let Err(e) = bot.send_message(msg.chat.id, &html_msg).parse_mode(teloxide::types::ParseMode::Html).await {
+    if let Err(e) = bot
+        .send_message(msg.chat.id, &html_msg)
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await
+    {
         tracing::error!("HTML message failed: {}", e);
-        let _ = bot.send_message(msg.chat.id, "Failed to render purchase history. Check logs.").await;
+        let _ = bot
+            .send_message(
+                msg.chat.id,
+                "Failed to render purchase history. Check logs.",
+            )
+            .await;
     }
 
     Ok(())

@@ -1,9 +1,9 @@
-use std::time::Duration;
+use super::RawQuote;
+use crate::error::{BotError, Result};
 use moka::future::Cache;
 use reqwest::Client;
 use serde::Deserialize;
-use super::RawQuote;
-use crate::error::{BotError, Result};
+use std::time::Duration;
 
 pub struct AlternativeMeProvider {
     http: Client,
@@ -30,14 +30,14 @@ impl AlternativeMeProvider {
     pub async fn get_quotes(&self, symbols: &[&str]) -> Result<Vec<RawQuote>> {
         let all_quotes = self.get_all_tickers().await?;
         let mut out = Vec::new();
-        
+
         for &sym in symbols {
             let sym_upper = sym.to_uppercase();
             if let Some(q) = all_quotes.iter().find(|q| q.symbol == sym_upper) {
                 out.push(q.clone());
             }
         }
-        
+
         Ok(out)
     }
 
@@ -46,18 +46,28 @@ impl AlternativeMeProvider {
             return Ok(cached);
         }
 
-        let resp = self.http.get("https://api.alternative.me/v2/ticker/?limit=0")
+        let resp = self
+            .http
+            .get("https://api.alternative.me/v2/ticker/?limit=0")
             .header("User-Agent", "CryptographBot/1.0")
-            .send().await?;
-        if resp.status() == 429 { return Err(BotError::RateLimited); }
-        
-        let body: AltResp = resp.json().await.map_err(|e| BotError::CmcApi(e.to_string()))?;
-        
+            .send()
+            .await?;
+        if resp.status() == 429 {
+            return Err(BotError::RateLimited);
+        }
+
+        let body: AltResp = resp
+            .json()
+            .await
+            .map_err(|e| BotError::CmcApi(e.to_string()))?;
+
         let mut quotes = Vec::with_capacity(body.data.len());
         for (_, t) in body.data {
             let price = t.quotes.usd.price.unwrap_or(0.0);
-            if price == 0.0 { continue; } // filter out dead data
-            
+            if price == 0.0 {
+                continue;
+            } // filter out dead data
+
             quotes.push(RawQuote {
                 symbol: t.symbol.to_uppercase(),
                 name: t.name,
@@ -80,20 +90,31 @@ impl AlternativeMeProvider {
                 source: Self::NAME,
             });
         }
-        
+
         self.cache.insert((), quotes.clone()).await;
         Ok(quotes)
     }
 
     /// Fetches the latest Fear and Greed Index
     pub async fn get_fng(&self) -> Result<FearAndGreed> {
-        let resp = self.http.get("https://api.alternative.me/fng/?limit=1")
+        let resp = self
+            .http
+            .get("https://api.alternative.me/fng/?limit=1")
             .header("User-Agent", "CryptographBot/1.0")
-            .send().await?;
-        if resp.status() == 429 { return Err(BotError::RateLimited); }
-        
-        let body: FngResp = resp.json().await.map_err(|e| BotError::CmcApi(e.to_string()))?;
-        body.data.into_iter().next().ok_or_else(|| BotError::CmcApi("Empty FNG data".to_string()))
+            .send()
+            .await?;
+        if resp.status() == 429 {
+            return Err(BotError::RateLimited);
+        }
+
+        let body: FngResp = resp
+            .json()
+            .await
+            .map_err(|e| BotError::CmcApi(e.to_string()))?;
+        body.data
+            .into_iter()
+            .next()
+            .ok_or_else(|| BotError::CmcApi("Empty FNG data".to_string()))
     }
 }
 

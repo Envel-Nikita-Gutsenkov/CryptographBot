@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{Timelike, Utc};
 use teloxide::{prelude::*, types::ChatId};
 use tokio::time::{interval, Duration};
 use tracing::{debug, error, warn};
@@ -134,19 +134,28 @@ async fn process_user(
         }
         combined_msg.push_str(&detail_escaped);
 
-        prompt_context.push_str(&format!(
-            "- {}: crossed {} ({})\n",
-            rule.symbol, rule.threshold, rule.condition
-        ));
+        prompt_context.push_str(&format!("- {}\n", plain_detail(rule, quote)));
     }
 
-    // Request AI summary for ALL alerts combined
+    // Request AI advice for ALL alerts combined — enriched with the user's
+    // portfolio and standing instructions so the model gives a concrete,
+    // actionable recommendation instead of a generic market description.
     let ai = crate::crypto::ai::GeminiClient::new(&config.gemini_api_key);
     if ai.is_configured() {
         let req_client = reqwest::Client::new();
+        let (portfolio_context, memory_context) = build_user_context(store, user_id);
         let prompt = format!(
-            "The following crypto alerts just triggered simultaneously:\n{}\n\nProvide a very short, combined summary of the overall market situation. Max 2-3 sentences. Do not use asterisks or markdown, just plain text.",
-            prompt_context
+            "The following crypto price alerts just triggered for the user:\n\n{}\n\n\
+             The user's current portfolio:\n{}\n\n\
+             The user's standing instructions and active goals:\n{}\n\n\
+             Give VERY short, ACTIONABLE advice (max 3-4 sentences, plain text, no markdown, no asterisks):\n\
+             1. What does this mean for the user's positions right now?\n\
+             2. A concrete recommendation: BUY / HOLD / WAIT / TAKE PROFIT — and at what specific price level.\n\
+             3. Tie it to the user's average entry prices and goals. If the current price is still far above \
+             their average entry, say explicitly that this is NOT yet a buy signal for them.\n\
+             4. If no action is needed, say \"No action needed\" explicitly and explain why.\n\
+             Never answer with only a market description — always end with a concrete recommendation.",
+            prompt_context, portfolio_context, memory_context
         );
         if let Ok(comment) = crate::crypto::ai::pipeline::call_with_critic(
             &req_client,
@@ -162,7 +171,7 @@ async fn process_user(
             if !comment.is_empty() {
                 let escaped_comment = html_escape(&comment.trim().to_string());
                 combined_msg.push_str(&format!(
-                    "\n\n🤖 <b>AI Market Summary:</b> <i>{}</i>",
+                    "\n\n🤖 <b>AI Advice:</b> <i>{}</i>",
                     escaped_comment
                 ));
             }
@@ -213,11 +222,11 @@ fn is_quiet_hour(store: &Store, user_id: u64) -> bool {
             (Some(s), Some(e)) => (s, e),
             _ => return false,
         };
-        let hour = Utc::now()
-            .format("%H")
-            .to_string()
-            .parse::<u8>()
-            .unwrap_or(0);
+        // Quiet hours are set in the user's LOCAL time (the settings UI shows
+        // plain hours like 22-8). The proactive worker already uses Local; the
+        // alert engine must agree with it, otherwise quiet hours apply at
+        // different times depending on which worker fires.
+        let hour = chrono::Local::now().hour() as u8;
         if start <= end {
             hour >= start && hour < end
         } else {
@@ -279,6 +288,128 @@ fn build_alert_message(rule: &crate::models::AlertRule, quote: &crate::models::C
         label,
         detail
     )
+}
+
+/// Plain-text, HTML-free version of `build_alert_message` — used as the
+/// prompt context for the AI advice call so the model sees clean facts
+/// (e.g. `ETH dropped 5.02% over 7d (threshold: 5%), current price: $2395.94`).
+fn plain_detail(rule: &crate::models::AlertRule, quote: &crate::models::CmcQuote) -> String {
+    use crate::models::AlertCondition;
+
+    let period = rule
+        .period
+        .as_ref()
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "24h".to_string());
+
+    let detail = match rule.condition {
+        AlertCondition::PriceBelow => format!(
+            "{} price dropped below {} (current: {})",
+            rule.symbol,
+            fmt_price(rule.threshold),
+            fmt_price(quote.price_usd)
+        ),
+        AlertCondition::PriceAbove => format!(
+            "{} price rose above {} (current: {})",
+            rule.symbol,
+            fmt_price(rule.threshold),
+            fmt_price(quote.price_usd)
+        ),
+        AlertCondition::DropPercent => {
+            let actual = rules::period_change(quote, rule.period.as_ref()).abs();
+            format!(
+                "{} dropped {:.2}% over {} (threshold: {}%), current price: {}",
+                rule.symbol,
+                actual,
+                period,
+                rule.threshold,
+                fmt_price(quote.price_usd)
+            )
+        }
+        AlertCondition::RisePercent => {
+            let actual = rules::period_change(quote, rule.period.as_ref()).abs();
+            format!(
+                "{} rose {:.2}% over {} (threshold: {}%), current price: {}",
+                rule.symbol,
+                actual,
+                period,
+                rule.threshold,
+                fmt_price(quote.price_usd)
+            )
+        }
+    };
+
+    let label = rule
+        .label
+        .as_deref()
+        .map(|l| format!(" ({})", l))
+        .unwrap_or_default();
+
+    format!("Alert #{} — {}{}: {}", rule.id, rule.symbol, label, detail)
+}
+
+/// Builds the (portfolio, memory) context pair for the AI advice prompt:
+/// the user's current holdings with average entry prices, plus their standing
+/// memos and active goals — so the model can tie the alert to the user's
+/// actual positions instead of describing the market in a vacuum.
+pub(crate) fn build_user_context(store: &Store, user_id: u64) -> (String, String) {
+    let portfolio_context = store.read(user_id, |p| {
+        if p.holdings.is_empty() && p.purchases.is_empty() {
+            return "Portfolio is empty.".to_string();
+        }
+        let holdings_by_sym = p.holdings_by_symbol();
+        let mut lines = vec![format!("Total invested: ${:.2}", p.total_invested_usd())];
+        for (sym, amt) in &holdings_by_sym {
+            let avg = p
+                .avg_buy_price(sym)
+                .map(|a| format!("avg buy: ${:.2}", a))
+                .unwrap_or_default();
+            lines.push(format!("• {sym}: {amt:.6} ({avg})"));
+        }
+        lines.join("\n")
+    });
+
+    let memory_context = store.read(user_id, |p| {
+        let memos = p
+            .memos
+            .iter()
+            .map(|m| format!("- USER INSTRUCTION (binding): {}", m.text))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let goals = p
+            .goals
+            .iter()
+            .filter(|g| g.active && !g.done)
+            .map(|g| {
+                format!(
+                    "- ACTIVE GOAL #{}: {} (set {})",
+                    g.id,
+                    g.text,
+                    g.created_at.format("%Y-%m-%d")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut parts = Vec::new();
+        if !memos.is_empty() {
+            parts.push(format!(
+                "USER'S OWN DECISIONS AND INSTRUCTIONS (binding — always follow them):\n{}",
+                memos
+            ));
+        }
+        if !goals.is_empty() {
+            parts.push(format!("USER'S ACTIVE GOALS:\n{}", goals));
+        }
+        parts.push(
+            "IMPORTANT: AI's own past recommendations are NOT user decisions. Only the memos and \
+             goals above reflect the user's actual choices. Never claim the user decided something \
+             unless it is written here."
+                .to_string(),
+        );
+        parts.join("\n\n")
+    });
+
+    (portfolio_context, memory_context)
 }
 
 fn html_escape(s: &str) -> String {

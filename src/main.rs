@@ -9,6 +9,7 @@ mod format;
 mod models;
 mod security;
 mod supervisor;
+mod trading;
 mod watchdog;
 
 use std::sync::Arc;
@@ -63,6 +64,7 @@ fn demo_portfolio() -> crate::models::Portfolio {
             expires_at: Some(end_of_month),
             active: true,
             last_alert_at: None,
+            last_declined_at: None,
             alert_count: 0,
             done: false,
             progress_notes: vec![crate::models::ProgressNote {
@@ -81,6 +83,7 @@ fn demo_portfolio() -> crate::models::Portfolio {
             expires_at: None,
             active: true,
             last_alert_at: None,
+            last_declined_at: None,
             alert_count: 0,
             done: false,
             progress_notes: Vec::new(),
@@ -94,6 +97,7 @@ fn demo_portfolio() -> crate::models::Portfolio {
             expires_at: None,
             active: true,
             last_alert_at: None,
+            last_declined_at: None,
             alert_count: 0,
             done: false,
             progress_notes: Vec::new(),
@@ -135,12 +139,20 @@ async fn main_inner() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 2 && (args[1] == "analyze" || args[1] == "--analyze") {
         let config = Arc::new(config::Config::from_env()?);
+        if let Some(parent) = std::path::Path::new(&config.sqlite_db).parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        db::SqliteStore::initialize_schema(&config.sqlite_db)?;
+        let sqlite = Arc::new(db::SqliteStore::new(&config.sqlite_db)?);
+        crate::crypto::ai::deepseek_budget::DeepSeekBudget::instance().init(Some(sqlite.clone()));
         let cmc = Arc::new(crypto::CryptoClient::new(
             &config.cmc_api_key,
             &config.coingecko_api_key,
             &config.coincap_api_key,
             &config.cryptocompare_api_key,
-            None,
+            Some(sqlite.clone()),
         ));
         let symbol = args[2].to_uppercase();
         bot::handlers::run_cli_analysis(&symbol, cmc, config).await?;
@@ -222,6 +234,136 @@ async fn main_inner() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // `cargo run -- trade <subcommand> ...` — the trading module CLI (1:1 with
+    // the Telegram /trade commands). See docs/trading/TRADING_MODULE_PLAN.md §6.
+    if args.len() > 1 && (args[1] == "trade" || args[1] == "--trade") {
+        return trading::cli::run(&args[2..]);
+    }
+
+    // `cargo run -- models <refresh|list|rank|stats|calibrate> ...` — generalized
+    // lazy model ranking across all providers (OpenRouter free-tier discovery +
+    // AI-judged benchmarking + per-model statistics). See src/crypto/ai/model_rank.rs.
+    if args.len() > 2 && (args[1] == "models" || args[1] == "--models") {
+        let config = Arc::new(config::Config::from_env()?);
+        if let Some(parent) = std::path::Path::new(&config.sqlite_db).parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        db::SqliteStore::initialize_schema(&config.sqlite_db)?;
+        let sqlite = Arc::new(db::SqliteStore::new(&config.sqlite_db)?);
+        crate::crypto::ai::deepseek_budget::DeepSeekBudget::instance().init(Some(sqlite.clone()));
+        crate::crypto::ai::openrouter_budget::OpenRouterBudget::instance()
+            .init(Some(sqlite.clone()));
+
+        let sub = args[2].to_lowercase();
+        let client = reqwest::Client::new();
+        match sub.as_str() {
+            "refresh" => {
+                let report = crate::crypto::ai::model_rank::discover(&client, &sqlite).await?;
+                println!(
+                    "Model registry refreshed: {} total, {} new",
+                    report.total, report.new
+                );
+                for (provider, id, _alias, display, ctx, fp, tested, tfp, bc) in
+                    sqlite.get_model_registry()?
+                {
+                    let tested_s = tested.unwrap_or_else(|| "never".to_string());
+                    println!(
+                        "  [{provider}] {id}  |  {display}  |  ctx {ctx}  |  bench {bc}  |  tested {tested_s}  |  fp {fp}{}",
+                        if tfp.is_empty() { String::new() } else { format!(" (tested {tfp})") }
+                    );
+                }
+            }
+            "list" => {
+                let rows = sqlite.get_model_registry()?;
+                if rows.is_empty() {
+                    println!("No discovered models. Run `cargo run -- models refresh` first.");
+                }
+                for (provider, id, alias, display, ctx, _fp, tested, _tfp, bc) in rows {
+                    let tested_s = tested.unwrap_or_else(|| "never".to_string());
+                    println!(
+                        "  [{provider}] {id}  |  alias {alias}  |  {display}  |  ctx {ctx}  |  bench {bc}  |  tested {tested_s}"
+                    );
+                }
+            }
+            "rank" => {
+                let report = crate::crypto::ai::model_rank::rank(&client, &sqlite).await?;
+                println!(
+                    "Ranked {} models ({} skipped: rate-limit/cooldown/budget)",
+                    report.tested.len(),
+                    report.skipped_tested
+                );
+                for r in &report.tested {
+                    let status = if r.ok { "OK " } else { "ERR" };
+                    let rate = if r.skipped_rate_limit {
+                        " (rate-limited, retry later)"
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "  [{status}] {}/{} role={} q={:.1} latency={}ms (reason: {}) {}{}",
+                        r.provider,
+                        r.model_id,
+                        r.role,
+                        r.quality,
+                        r.latency_ms,
+                        r.reason,
+                        r.error.as_deref().unwrap_or(""),
+                        rate
+                    );
+                }
+                println!(
+                    "Judge baseline: {:.1} (reliable: {})",
+                    report.judge_baseline, report.judge_reliable
+                );
+                println!(
+                    "OpenRouter budget remaining: {} (bench stops below {} reserve)",
+                    report.budget_remaining,
+                    crate::crypto::ai::model_rank::MIN_OPENROUTER_RESERVE
+                );
+                println!(
+                    "\nAssigned roles (written to {}):",
+                    crate::crypto::ai::model_rank::RANK_FILE
+                );
+                for m in &report.assigned {
+                    println!("  prio {} {} roles={:?}", m.priority, m.id, m.roles);
+                }
+            }
+            "stats" => {
+                let days: u32 = args.get(3).and_then(|d| d.parse().ok()).unwrap_or(14);
+                let rows = crate::crypto::ai::model_rank::stats(&sqlite, days)?;
+                if rows.is_empty() {
+                    println!("No stats yet for the last {days} days.");
+                }
+                println!("Model stats (last {days} days):");
+                for (provider, model, calls, errors, avg_lat, avg_q) in rows {
+                    let err_pct = if calls > 0 {
+                        errors as f64 * 100.0 / calls as f64
+                    } else {
+                        0.0
+                    };
+                    println!(
+                        "  [{provider}] {model}  calls={calls} err={err_pct:.0}% avg_latency={avg_lat}ms avg_quality={avg_q:.1}"
+                    );
+                }
+            }
+            "calibrate" => {
+                let baseline = crate::crypto::ai::model_rank::calibrate(&client, &sqlite).await;
+                println!(
+                    "Judge baseline: {baseline:.1} (min reliable: {})",
+                    crate::crypto::ai::model_rank::JUDGE_MIN_BASELINE
+                );
+            }
+            other => {
+                anyhow::bail!(
+                    "Unknown models subcommand '{other}'. Use: refresh | list | rank | stats [days] | calibrate"
+                );
+            }
+        }
+        return Ok(());
+    }
+
     // `cargo run -- wipe-knowledge` — reset the bot's knowledge base: wipes
     // news/macro/milestone/health/stats caches but keeps users, goals, memos
     // and the paid-usage budget. Use after poisoned-data incidents.
@@ -241,6 +383,176 @@ async fn main_inner() -> anyhow::Result<()> {
     if args.len() > 2 && (args[1] == "search" || args[1] == "--search") {
         let query = args[2..].join(" ");
         bot::handlers::ask::run_search_cli(&query).await?;
+        return Ok(());
+    }
+
+    // `cargo run -- scenario <file.json> ["question"]` — deterministic
+    // what-if test: activate a synthetic market state (crash / pump / euphoria)
+    // and replay BOTH the /ask pipeline and the proactive goal scan against the
+    // REAL pipeline code, without touching live market APIs. The scenario file
+    // replaces market data, news and macro intel inside the prompts.
+    if args.len() > 2 && (args[1] == "scenario" || args[1] == "--scenario") {
+        let path = &args[2];
+        // `--fast`: force cheap watcher-tier models so scenario runs complete in
+        // seconds. The deterministic strategy layer still applies (no-FOMO,
+        // no-panic rules), so the what-if verdict stays meaningful.
+        if args.iter().any(|a| a == "--fast") {
+            std::env::set_var("CRYPTOGRAPH_FAST_MODELS", "1");
+        }
+        let scenario = crate::crypto::ai::scenario::ScenarioMarket::load(path)
+            .ok_or_else(|| anyhow::anyhow!("Failed to load scenario from {path}"))?;
+        let question = if args.len() > 3 {
+            args[3..].join(" ")
+        } else {
+            "Стоит ли покупать крипту сейчас?".to_string()
+        };
+
+        let config = Arc::new(config::Config::from_env()?);
+        if let Some(parent) = std::path::Path::new(&config.sqlite_db).parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        db::SqliteStore::initialize_schema(&config.sqlite_db)?;
+        let sqlite = Arc::new(db::SqliteStore::new(&config.sqlite_db)?);
+        crate::crypto::ai::deepseek_budget::DeepSeekBudget::instance().init(Some(sqlite.clone()));
+
+        let store = demo_store();
+        let cmc = Arc::new(crypto::CryptoClient::new(
+            &config.cmc_api_key,
+            &config.coingecko_api_key,
+            &config.coincap_api_key,
+            &config.cryptocompare_api_key,
+            Some(sqlite.clone()),
+        ));
+
+        scenario.activate();
+        println!("\n=== SCENARIO: {path} ===");
+        println!("Market override active — live price/news APIs are bypassed.\n");
+
+        bot::handlers::ask::run_cli_ask(
+            DEMO_USER_ID,
+            &question,
+            store.clone(),
+            cmc.clone(),
+            config.clone(),
+            sqlite.clone(),
+        )
+        .await?;
+        crypto::ai::proactive_worker::run_cli_scan(DEMO_USER_ID, store, cmc, sqlite, true, false)
+            .await?;
+        return Ok(());
+    }
+
+    // `cargo run -- news <summary|history|articles|cleanup> ...` — inspect the
+    // news layer: current verified summary, summary history, raw stored
+    // articles (extended results) and the retention sweep. The AI prompt only
+    // ever sees the summarized form; these commands expose the full store.
+    if args.len() > 2 && (args[1] == "news" || args[1] == "--news") {
+        let config = Arc::new(config::Config::from_env()?);
+        if let Some(parent) = std::path::Path::new(&config.sqlite_db).parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        db::SqliteStore::initialize_schema(&config.sqlite_db)?;
+        let sqlite = Arc::new(db::SqliteStore::new(&config.sqlite_db)?);
+
+        let sub = args[2].to_lowercase();
+        match sub.as_str() {
+            "summary" => {
+                let sym = args.get(3).map(|s| s.as_str()).unwrap_or("general");
+                match sqlite.get_news_summary_with_ts(sym).await? {
+                    Some((summary, ts)) => {
+                        let fresh = db::SqliteStore::news_summary_is_fresh(&ts, 24);
+                        println!("=== {sym} summary (updated {ts}, fresh={fresh}) ===\n{summary}");
+                    }
+                    None => println!("No cached summary for {sym}."),
+                }
+            }
+            "history" => {
+                let sym = args.get(3).map(|s| s.as_str()).unwrap_or("general");
+                let limit = args.get(4).and_then(|s| s.parse::<i64>().ok()).unwrap_or(5);
+                let rows = sqlite.list_news_summary_history(sym, limit).await?;
+                if rows.is_empty() {
+                    println!("No summary history for {sym}.");
+                }
+                for (i, (summary, ts)) in rows.iter().enumerate() {
+                    let head: String = summary.chars().take(200).collect();
+                    println!(
+                        "--- [{i}] {ts} ---\n{head}{}",
+                        if summary.len() > 200 { "..." } else { "" }
+                    );
+                }
+            }
+            "articles" => {
+                let sym = args.get(3).map(|s| s.as_str()).unwrap_or("general");
+                let days = args.get(4).and_then(|s| s.parse::<i64>().ok()).unwrap_or(3);
+                let rows = sqlite.get_news_articles(sym, days).await?;
+                if rows.is_empty() {
+                    println!("No raw articles for {sym} in the last {days} days.");
+                }
+                for (source, title, body, url, ts) in &rows {
+                    let head: String = body.chars().take(160).collect();
+                    println!("[{ts}] ({source}) {title}\n  {head}{url}\n");
+                }
+            }
+            "cleanup" => {
+                let deleted = sqlite.cleanup_news(7, 30).await?;
+                println!("Retention sweep deleted {deleted} rows (articles >7d, history >30d).");
+            }
+            "run-once" => {
+                // One full news cycle without the bot loop: fetch + summarize +
+                // persist for every watched symbol, then the retention sweep.
+                crate::crypto::ai::deepseek_budget::DeepSeekBudget::instance()
+                    .init(Some(sqlite.clone()));
+                let store = Arc::new(db::Store::new());
+                for (uid, data) in
+                    db::SqliteStore::load_all_users(&config.sqlite_db).unwrap_or_default()
+                {
+                    if let Ok(p) = store.decode_backup(&data) {
+                        store.restore(uid, p);
+                    }
+                }
+                for (uid, list) in
+                    db::SqliteStore::load_user_memos(&config.sqlite_db).unwrap_or_default()
+                {
+                    store.write(uid, |p| p.memos = list);
+                }
+                for (uid, list) in
+                    db::SqliteStore::load_user_goals(&config.sqlite_db).unwrap_or_default()
+                {
+                    store.write(uid, |p| p.goals = list);
+                }
+                let crypto = Arc::new(crypto::CryptoClient::new(
+                    &config.cmc_api_key,
+                    &config.coingecko_api_key,
+                    &config.coincap_api_key,
+                    &config.cryptocompare_api_key,
+                    Some(sqlite.clone()),
+                ));
+                let symbols =
+                    crate::crypto::ai::news_worker::run_news_cycle(store, sqlite.clone(), crypto)
+                        .await;
+                println!(
+                    "News cycle done: {} symbols processed (BTC, ETH, SOL, LINK, GENERAL...).",
+                    symbols.len()
+                );
+                for s in &symbols {
+                    match sqlite.get_news_summary_with_ts(s).await? {
+                        Some((summary, ts)) => {
+                            let fresh = db::SqliteStore::news_summary_is_fresh(&ts, 24);
+                            let head: String = summary.chars().take(120).collect();
+                            println!("  {s}: updated {ts}, fresh={fresh} — {head}...");
+                        }
+                        None => println!("  {s}: no summary (no news found)"),
+                    }
+                }
+            }
+            other => anyhow::bail!(
+                "unknown news subcommand '{other}' (summary|history|articles|cleanup|run-once)"
+            ),
+        }
         return Ok(());
     }
 
@@ -377,6 +689,9 @@ async fn main_inner() -> anyhow::Result<()> {
     // Wire the paid DeepSeek budget to SQLite (falls back to RAM-only on DB failure).
     crate::crypto::ai::deepseek_budget::DeepSeekBudget::instance().init(Some(sqlite.clone()));
 
+    // Wire the OpenRouter daily budget (300 requests/day free tier) to SQLite.
+    crate::crypto::ai::openrouter_budget::OpenRouterBudget::instance().init(Some(sqlite.clone()));
+
     let acl = Arc::new(access::AccessControl::new(config.allowed_admin_ids.clone()));
 
     let cmc = Arc::new(crypto::CryptoClient::new(
@@ -506,6 +821,39 @@ async fn main_inner() -> anyhow::Result<()> {
         }
     });
 
+    // 9) Model ranker — refreshes the registry (all providers + OpenRouter free
+    //    tier) and runs ONE lazy benchmark batch per day: at most 3 models, one
+    //    role each, 30-day cooldown, fingerprint change detection, and a hard
+    //    stop when the OpenRouter budget drops below the reserve. Writes
+    //    models.openrouter.json (merged into the pools by load_all_models).
+    let sqlite_rank = Arc::clone(&sqlite);
+    supervisor::spawn_infallible("model-ranker", move || {
+        let sq = Arc::clone(&sqlite_rank);
+        async move {
+            let client = reqwest::Client::new();
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(86_400));
+            loop {
+                ticker.tick().await;
+                match crate::crypto::ai::model_rank::discover(&client, &sq).await {
+                    Ok(r) => {
+                        tracing::info!("Model registry refresh: {} total, {} new", r.total, r.new)
+                    }
+                    Err(e) => tracing::warn!("Model registry refresh failed: {}", e),
+                }
+                match crate::crypto::ai::model_rank::rank(&client, &sq).await {
+                    Ok(r) => tracing::info!(
+                        "Model ranker: tested {}, skipped {}, assigned {}, judge baseline {:.1}",
+                        r.tested.len(),
+                        r.skipped_tested,
+                        r.assigned.len(),
+                        r.judge_baseline
+                    ),
+                    Err(e) => tracing::warn!("Model ranker failed: {}", e),
+                }
+            }
+        }
+    });
+
     // Periodic price pre-fetch — supervised: auto-restarts on panic or error
     {
         let store2 = Arc::clone(&store);
@@ -517,6 +865,11 @@ async fn main_inner() -> anyhow::Result<()> {
             let sq = Arc::clone(&sqlite_prefetch);
             async move {
                 let mut ticker = tokio::time::interval(std::time::Duration::from_secs(600));
+                // Daily OHLC accumulator: open = first sample of the UTC day,
+                // high/low = running extremes, close = latest sample. Feeds the
+                // local OHLCV table so chart indicators see real candles.
+                let mut daily_ohlc: std::collections::HashMap<String, (String, f64, f64, f64)> =
+                    std::collections::HashMap::new();
                 loop {
                     ticker.tick().await;
                     tracing::info!("Starting periodic crypto price pre-fetch...");
@@ -549,7 +902,30 @@ async fn main_inner() -> anyhow::Result<()> {
                                         }
                                     }
                                     if ok {
-                                        sq.log_price(&quote.symbol, quote.price_usd).await;
+                                        let today =
+                                            chrono::Utc::now().format("%Y-%m-%d").to_string();
+                                        let e = daily_ohlc
+                                            .entry(quote.symbol.clone())
+                                            .or_insert_with(|| {
+                                                (
+                                                    today.clone(),
+                                                    quote.price_usd,
+                                                    quote.price_usd,
+                                                    quote.price_usd,
+                                                )
+                                            });
+                                        if e.0 != today {
+                                            *e = (
+                                                today.clone(),
+                                                quote.price_usd,
+                                                quote.price_usd,
+                                                quote.price_usd,
+                                            );
+                                        }
+                                        e.2 = e.2.max(quote.price_usd); // high
+                                        e.3 = e.3.min(quote.price_usd); // low
+                                        sq.log_ohlcv(&quote.symbol, quote.price_usd, e.1, e.2, e.3)
+                                            .await;
                                     }
                                 }
                             }

@@ -1,10 +1,7 @@
 use dashmap::DashMap;
 use parking_lot::RwLock;
 
-use crate::{
-    error::Result,
-    models::Portfolio,
-};
+use crate::{error::Result, models::Portfolio};
 
 use super::migration;
 
@@ -14,7 +11,9 @@ pub struct Store {
 
 impl Default for Store {
     fn default() -> Self {
-        Self { data: DashMap::new() }
+        Self {
+            data: DashMap::new(),
+        }
     }
 }
 
@@ -27,7 +26,8 @@ impl Store {
     where
         F: FnOnce(&Portfolio) -> T,
     {
-        let entry = self.data
+        let entry = self
+            .data
             .entry(user_id)
             .or_insert_with(|| RwLock::new(Portfolio::default()));
         let guard = entry.read();
@@ -38,7 +38,8 @@ impl Store {
     where
         F: FnOnce(&mut Portfolio) -> T,
     {
-        let entry = self.data
+        let entry = self
+            .data
             .entry(user_id)
             .or_insert_with(|| RwLock::new(Portfolio::default()));
         let mut guard = entry.write();
@@ -102,7 +103,9 @@ mod tests {
     #[test]
     fn backup_is_valid_json() {
         let store = Store::new();
-        store.write(1, |p| { p.settings.alert_quiet_hours_start = Some(10); });
+        store.write(1, |p| {
+            p.settings.alert_quiet_hours_start = Some(10);
+        });
         let bytes = store.export_backup(1).unwrap();
         // Must be valid JSON
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -112,7 +115,9 @@ mod tests {
     #[test]
     fn backup_roundtrip() {
         let store = Store::new();
-        store.write(1, |p| { p.settings.alert_quiet_hours_start = Some(8); });
+        store.write(1, |p| {
+            p.settings.alert_quiet_hours_start = Some(8);
+        });
         let bytes = store.export_backup(1).unwrap();
         let p = store.decode_backup(&bytes).unwrap();
         assert_eq!(p.settings.alert_quiet_hours_start, Some(8));

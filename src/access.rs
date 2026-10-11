@@ -19,7 +19,10 @@ pub struct AccessControl {
 
 impl AccessControl {
     pub fn new(admin_ids: Vec<u64>) -> Self {
-        Self { admin_ids, approved: DashMap::new() }
+        Self {
+            admin_ids,
+            approved: DashMap::new(),
+        }
     }
 
     /// Returns true if the user is allowed to use the bot.
@@ -33,12 +36,15 @@ impl AccessControl {
 
     /// Grant access. Only admins can call this.
     pub fn approve(&self, user_id: u64, username: Option<String>, approved_by: u64) {
-        self.approved.insert(user_id, ApprovedUser {
-            id: user_id,
-            username,
-            approved_by,
-            approved_at: Utc::now(),
-        });
+        self.approved.insert(
+            user_id,
+            ApprovedUser {
+                id: user_id,
+                username,
+                approved_by,
+                approved_at: Utc::now(),
+            },
+        );
     }
 
     /// Revoke access. Returns true if the user existed.
@@ -49,7 +55,8 @@ impl AccessControl {
     /// Find approved user by @username (case-insensitive).
     pub fn find_by_username(&self, username: &str) -> Option<u64> {
         let needle = username.trim_start_matches('@').to_lowercase();
-        self.approved.iter()
+        self.approved
+            .iter()
             .find(|e| e.username.as_deref().map(|u| u.to_lowercase()) == Some(needle.clone()))
             .map(|e| *e.key())
     }

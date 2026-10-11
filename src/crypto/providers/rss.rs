@@ -1,8 +1,7 @@
-use std::time::Duration;
-use reqwest::Client;
-use serde::Deserialize;
 use super::cryptocompare::NewsArticle;
 use crate::error::{BotError, Result};
+use reqwest::Client;
+use std::time::Duration;
 
 pub struct RssProvider {
     http: Client,
@@ -29,11 +28,16 @@ impl RssProvider {
     }
 
     pub async fn get_news_cointelegraph(&self) -> Result<Vec<NewsArticle>> {
-        self.fetch_rss("https://cointelegraph.com/rss", "CoinTelegraph").await
+        self.fetch_rss("https://cointelegraph.com/rss", "CoinTelegraph")
+            .await
     }
 
     pub async fn get_news_coindesk(&self) -> Result<Vec<NewsArticle>> {
-        self.fetch_rss("https://www.coindesk.com/arc/outboundfeeds/rss/", "CoinDesk").await
+        self.fetch_rss(
+            "https://www.coindesk.com/arc/outboundfeeds/rss/",
+            "CoinDesk",
+        )
+        .await
     }
 
     pub async fn get_news_decrypt(&self) -> Result<Vec<NewsArticle>> {
@@ -41,32 +45,51 @@ impl RssProvider {
     }
 
     pub async fn get_news_blockworks(&self) -> Result<Vec<NewsArticle>> {
-        self.fetch_rss("https://blockworks.co/feed", "Blockworks").await
+        self.fetch_rss("https://blockworks.co/feed", "Blockworks")
+            .await
     }
 
     pub async fn get_news_theblock(&self) -> Result<Vec<NewsArticle>> {
-        self.fetch_rss("https://www.theblock.co/rss.xml", "TheBlock").await
+        self.fetch_rss("https://www.theblock.co/rss.xml", "TheBlock")
+            .await
     }
 
     pub async fn get_news_bitcoinmagazine(&self) -> Result<Vec<NewsArticle>> {
-        self.fetch_rss("https://bitcoinmagazine.com/.rss/full/", "BitcoinMagazine").await
+        self.fetch_rss("https://bitcoinmagazine.com/.rss/full/", "BitcoinMagazine")
+            .await
     }
 
-    async fn fetch_rss(&self, feed_url: &str, source_name: &'static str) -> Result<Vec<NewsArticle>> {
-        let url = format!("https://api.rss2json.com/v1/api.json?rss_url={}", feed_url);
-        let resp = self.http.get(&url).send().await?;
+    /// Fetches the feed XML directly and parses it with the `rss` crate.
+    ///
+    /// Previously this proxied through api.rss2json.com, whose free tier is
+    /// rate-limited and requires an API key — a single point of failure for
+    /// the whole news fallback chain. Direct parsing removes that dependency.
+    async fn fetch_rss(
+        &self,
+        feed_url: &str,
+        source_name: &'static str,
+    ) -> Result<Vec<NewsArticle>> {
+        let resp = self.http.get(feed_url).send().await?;
         if !resp.status().is_success() {
-            return Err(BotError::CmcApi(format!("RSS fetch status failed: {}", resp.status())));
+            return Err(BotError::CmcApi(format!(
+                "RSS fetch status failed: {}",
+                resp.status()
+            )));
         }
 
-        let body: Rss2JsonResp = resp.json().await.map_err(|e| BotError::CmcApi(e.to_string()))?;
-        if body.status != "ok" {
-            return Err(BotError::CmcApi("RSS2JSON returned non-ok status".to_string()));
-        }
+        let xml = resp
+            .text()
+            .await
+            .map_err(|e| BotError::CmcApi(e.to_string()))?;
+        let channel = rss::Channel::read_from(xml.as_bytes())
+            .map_err(|e| BotError::CmcApi(format!("RSS parse failed: {e}")))?;
 
         let mut articles = Vec::new();
-        for item in body.items.into_iter().take(30) {
-            let mut body_text = item.content.unwrap_or_else(|| item.description.unwrap_or_default());
+        for item in channel.items().iter().take(30) {
+            let mut body_text = item
+                .content()
+                .map(str::to_string)
+                .unwrap_or_else(|| item.description().unwrap_or_default().to_string());
             body_text = strip_html(&body_text);
             if body_text.chars().count() > 800 {
                 body_text = body_text.chars().take(797).collect::<String>();
@@ -74,28 +97,14 @@ impl RssProvider {
             }
 
             articles.push(NewsArticle {
-                title: item.title.trim().to_string(),
+                title: item.title().unwrap_or_default().trim().to_string(),
                 source: source_name.to_string(),
                 body: body_text.trim().to_string(),
-                url: item.link.unwrap_or_default(),
+                url: item.link().unwrap_or_default().to_string(),
             });
         }
         Ok(articles)
     }
-}
-
-#[derive(Deserialize)]
-struct Rss2JsonResp {
-    status: String,
-    items: Vec<Rss2JsonItem>,
-}
-
-#[derive(Deserialize)]
-struct Rss2JsonItem {
-    title: String,
-    description: Option<String>,
-    content: Option<String>,
-    link: Option<String>,
 }
 
 fn strip_html(s: &str) -> String {

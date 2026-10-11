@@ -1,8 +1,8 @@
-use std::time::Duration;
+use crate::models::market_intel::BtcNetworkMetrics;
 use moka::future::Cache;
 use reqwest::Client;
 use serde::Deserialize;
-use crate::models::market_intel::BtcNetworkMetrics;
+use std::time::Duration;
 
 pub struct MempoolProvider {
     http: Client,

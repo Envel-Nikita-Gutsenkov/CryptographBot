@@ -1,13 +1,16 @@
-use std::sync::Arc;
 use dashmap::DashMap;
+use std::sync::Arc;
 use teloxide::{prelude::*, types::ParseMode};
 
 use crate::{
-    config::Config,
-    crypto::{CryptoClient, ai::prompts::{build_patch_generator_prompt, build_patch_critic_prompt}},
-    db::Store,
-    models::{Portfolio, PortfolioPatch, PendingPatch, Purchase, PaidCurrency},
     bot::keyboards,
+    config::Config,
+    crypto::{
+        ai::prompts::{build_patch_critic_prompt, build_patch_generator_prompt},
+        CryptoClient,
+    },
+    db::Store,
+    models::{PaidCurrency, PendingPatch, Portfolio, PortfolioPatch, Purchase},
 };
 
 /// In-memory store for pending patches awaiting user approval.
@@ -65,39 +68,58 @@ fn generate_token() -> String {
 
 /// Builds a compact JSON snapshot of the portfolio for the AI to parse.
 fn build_portfolio_snapshot(portfolio: &Portfolio) -> String {
-    let purchases: Vec<serde_json::Value> = portfolio.purchases.iter().map(|p| serde_json::json!({
-        "id": p.id,
-        "symbol": p.symbol,
-        "amount": p.amount,
-        "cost_usd": p.cost_usd,
-        "source": p.source,
-        "notes": p.notes,
-    })).collect();
-
-    let holdings: Vec<serde_json::Value> = portfolio.holdings.iter().map(|h| {
-        let wallet_name = portfolio.wallets.iter()
-            .find(|w| w.id == h.wallet_id)
-            .map(|w| w.name.clone())
-            .unwrap_or_else(|| format!("wallet#{}", h.wallet_id));
-        serde_json::json!({
-            "symbol": h.symbol,
-            "amount": h.amount,
-            "wallet": wallet_name,
-            "wallet_id": h.wallet_id,
+    let purchases: Vec<serde_json::Value> = portfolio
+        .purchases
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "id": p.id,
+                "symbol": p.symbol,
+                "amount": p.amount,
+                "cost_usd": p.cost_usd,
+                "source": p.source,
+                "notes": p.notes,
+            })
         })
-    }).collect();
+        .collect();
 
-    let wallets: Vec<serde_json::Value> = portfolio.wallets.iter().map(|w| serde_json::json!({
-        "id": w.id,
-        "name": w.name,
-        "kind": format!("{:?}", w.kind),
-    })).collect();
+    let holdings: Vec<serde_json::Value> = portfolio
+        .holdings
+        .iter()
+        .map(|h| {
+            let wallet_name = portfolio
+                .wallets
+                .iter()
+                .find(|w| w.id == h.wallet_id)
+                .map(|w| w.name.clone())
+                .unwrap_or_else(|| format!("wallet#{}", h.wallet_id));
+            serde_json::json!({
+                "symbol": h.symbol,
+                "amount": h.amount,
+                "wallet": wallet_name,
+                "wallet_id": h.wallet_id,
+            })
+        })
+        .collect();
+
+    let wallets: Vec<serde_json::Value> = portfolio
+        .wallets
+        .iter()
+        .map(|w| {
+            serde_json::json!({
+                "id": w.id,
+                "name": w.name,
+                "kind": format!("{:?}", w.kind),
+            })
+        })
+        .collect();
 
     serde_json::json!({
         "purchases": purchases,
         "holdings": holdings,
         "wallets": wallets,
-    }).to_string()
+    })
+    .to_string()
 }
 
 /// Formats a patch into a human-readable Telegram HTML summary.
@@ -114,7 +136,9 @@ fn format_patch_summary(patch: &PortfolioPatch, portfolio: &Portfolio) -> String
     }
 
     for id in &patch.remove_purchase_ids {
-        let info = portfolio.purchases.iter()
+        let info = portfolio
+            .purchases
+            .iter()
             .find(|p| p.id == *id)
             .map(|p| format!("{} {:.6} @ ${:.2}", p.symbol, p.amount, p.cost_usd))
             .unwrap_or_else(|| format!("ID #{id}"));
@@ -131,10 +155,20 @@ fn format_patch_summary(patch: &PortfolioPatch, portfolio: &Portfolio) -> String
 
     for m in &patch.modify_purchases {
         let mut changes = Vec::new();
-        if let Some(a) = m.new_amount    { changes.push(format!("amount={:.6}", a)); }
-        if let Some(c) = m.new_cost_usd { changes.push(format!("cost=${:.2}", c)); }
-        if let Some(ref s) = m.new_source { changes.push(format!("source={}", s)); }
-        lines.push(format!("🔧 <b>Modify purchase</b> #{}: {}", m.purchase_id, changes.join(", ")));
+        if let Some(a) = m.new_amount {
+            changes.push(format!("amount={:.6}", a));
+        }
+        if let Some(c) = m.new_cost_usd {
+            changes.push(format!("cost=${:.2}", c));
+        }
+        if let Some(ref s) = m.new_source {
+            changes.push(format!("source={}", s));
+        }
+        lines.push(format!(
+            "🔧 <b>Modify purchase</b> #{}: {}",
+            m.purchase_id,
+            changes.join(", ")
+        ));
     }
 
     format!(
@@ -153,23 +187,39 @@ fn parse_date(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
             chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
                 .ok()
                 .and_then(|d| d.and_hms_opt(0, 0, 0))
-                .map(|dt| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc))
+                .map(|dt| {
+                    chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc)
+                })
         })
 }
 
 /// Applies an approved patch to the portfolio.
 fn apply_patch(portfolio: &mut Portfolio, patch: &PortfolioPatch) {
     // 1. Remove purchases
-    portfolio.purchases.retain(|p| !patch.remove_purchase_ids.contains(&p.id));
+    portfolio
+        .purchases
+        .retain(|p| !patch.remove_purchase_ids.contains(&p.id));
 
     // 2. Modify purchases
     for modify in &patch.modify_purchases {
-        if let Some(p) = portfolio.purchases.iter_mut().find(|p| p.id == modify.purchase_id) {
-            if let Some(a) = modify.new_amount    { p.amount = a; }
-            if let Some(c) = modify.new_cost_usd  { p.cost_usd = c; }
-            if let Some(ref s) = modify.new_source { p.source = s.clone(); }
-            if let Some(ref n) = modify.new_notes  { p.notes = Some(n.clone()); }
-            if let Some(ref d) = modify.new_date   {
+        if let Some(p) = portfolio
+            .purchases
+            .iter_mut()
+            .find(|p| p.id == modify.purchase_id)
+        {
+            if let Some(a) = modify.new_amount {
+                p.amount = a;
+            }
+            if let Some(c) = modify.new_cost_usd {
+                p.cost_usd = c;
+            }
+            if let Some(ref s) = modify.new_source {
+                p.source = s.clone();
+            }
+            if let Some(ref n) = modify.new_notes {
+                p.notes = Some(n.clone());
+            }
+            if let Some(ref d) = modify.new_date {
                 if let Some(dt) = parse_date(d) {
                     p.date = dt;
                 }
@@ -180,8 +230,15 @@ fn apply_patch(portfolio: &mut Portfolio, patch: &PortfolioPatch) {
     // 3. Add purchases + holdings
     for new_p in &patch.add_purchases {
         let id = portfolio.alloc_purchase_id();
-        let wallet_id = new_p.wallet_name.as_deref()
-            .and_then(|name| portfolio.wallets.iter().find(|w| w.name.eq_ignore_ascii_case(name)))
+        let wallet_id = new_p
+            .wallet_name
+            .as_deref()
+            .and_then(|name| {
+                portfolio
+                    .wallets
+                    .iter()
+                    .find(|w| w.name.eq_ignore_ascii_case(name))
+            })
             .map(|w| w.id)
             .unwrap_or_else(|| portfolio.wallets.first().map(|w| w.id).unwrap_or(1));
 
@@ -192,8 +249,15 @@ fn apply_patch(portfolio: &mut Portfolio, patch: &PortfolioPatch) {
             cost_usd: new_p.cost_usd,
             paid_amount: new_p.cost_usd,
             paid_currency: PaidCurrency::Usd,
-            date: new_p.date.as_deref().and_then(parse_date).unwrap_or_else(chrono::Utc::now),
-            source: new_p.source.clone().unwrap_or_else(|| "AI Patch".to_string()),
+            date: new_p
+                .date
+                .as_deref()
+                .and_then(parse_date)
+                .unwrap_or_else(chrono::Utc::now),
+            source: new_p
+                .source
+                .clone()
+                .unwrap_or_else(|| "AI Patch".to_string()),
             notes: new_p.notes.clone(),
             created_at: chrono::Utc::now(),
             corrections: Vec::new(),
@@ -205,11 +269,20 @@ fn apply_patch(portfolio: &mut Portfolio, patch: &PortfolioPatch) {
 
     // 4. Adjust holdings
     for adj in &patch.adjust_holdings {
-        let wallet_id = adj.wallet_name.as_deref()
-            .and_then(|name| portfolio.wallets.iter().find(|w| w.name.eq_ignore_ascii_case(name)))
+        let wallet_id = adj
+            .wallet_name
+            .as_deref()
+            .and_then(|name| {
+                portfolio
+                    .wallets
+                    .iter()
+                    .find(|w| w.name.eq_ignore_ascii_case(name))
+            })
             .map(|w| w.id)
             .or_else(|| {
-                portfolio.holdings.iter()
+                portfolio
+                    .holdings
+                    .iter()
                     .find(|h| h.symbol.eq_ignore_ascii_case(&adj.symbol))
                     .map(|h| h.wallet_id)
             })
@@ -234,31 +307,35 @@ pub async fn handle_patch_cmd(
     let user_request = args.trim().to_string();
 
     if user_request.is_empty() {
-        bot.send_message(msg.chat.id,
+        bot.send_message(
+            msg.chat.id,
             "🔄 <b>AI Portfolio Corrector</b>\n\n\
              Describe what to change in your portfolio in any language. Examples:\n\
              • <code>/patch I have 0.1 BTC not 0.5, fix it</code>\n\
              • <code>/patch here is my exchange balance: BTC 0.3, ETH 2.1, SOL 15</code>\n\
-             • <code>/patch delete purchase #5 and add BTC 0.05 for $5000</code>")
-            .parse_mode(ParseMode::Html)
-            .await?;
+             • <code>/patch delete purchase #5 and add BTC 0.05 for $5000</code>",
+        )
+        .parse_mode(ParseMode::Html)
+        .await?;
         return Ok(());
     }
 
     let user_id = msg.from().map(|u| u.id.0).unwrap_or(msg.chat.id.0 as u64);
 
-    let (portfolio_snapshot, portfolio_clone) = store.read(user_id, |p| {
-        (build_portfolio_snapshot(p), p.clone())
-    });
+    let (portfolio_snapshot, portfolio_clone) =
+        store.read(user_id, |p| (build_portfolio_snapshot(p), p.clone()));
 
     if portfolio_clone.purchases.is_empty() && portfolio_clone.holdings.is_empty() {
-        bot.send_message(msg.chat.id,
-            "❌ Your portfolio is empty. Add assets first with /add.")
-            .await?;
+        bot.send_message(
+            msg.chat.id,
+            "❌ Your portfolio is empty. Add assets first with /add.",
+        )
+        .await?;
         return Ok(());
     }
 
-    let loading = bot.send_message(msg.chat.id, "🧠 Analyzing your request…")
+    let loading = bot
+        .send_message(msg.chat.id, "🧠 Analyzing your request…")
         .parse_mode(ParseMode::Html)
         .await?;
 
@@ -268,8 +345,6 @@ pub async fn handle_patch_cmd(
         .timeout(std::time::Duration::from_secs(60))
         .use_rustls_tls()
         .build()?;
-
-
 
     // We will try up to 3 times to get a valid, approved patch
     let mut draft = String::new();
@@ -293,24 +368,37 @@ pub async fn handle_patch_cmd(
         };
 
         // Writer: generate the patch
-        draft = match call_fallback_models(&client, &config, &gen_prompt, preferred_model.as_deref()).await {
-            Ok(d) => d,
-            Err(e) => {
-                last_error = e.to_string();
-                continue;
-            }
-        };
+        draft =
+            match call_fallback_models(&client, &config, &gen_prompt, preferred_model.as_deref())
+                .await
+            {
+                Ok(d) => d,
+                Err(e) => {
+                    last_error = e.to_string();
+                    continue;
+                }
+            };
 
         // Critic: validate the patch against the portfolio
         let critic_prompt = build_patch_critic_prompt(&user_request, &portfolio_snapshot, &draft);
-        let validated = match call_fallback_models(&client, &config, &critic_prompt, preferred_model.as_deref()).await {
+        let validated = match call_fallback_models(
+            &client,
+            &config,
+            &critic_prompt,
+            preferred_model.as_deref(),
+        )
+        .await
+        {
             Ok(v) => v,
             Err(_) => draft.clone(), // fallback to Writer draft if Critic fails
         };
 
         // Extract the JSON object reliably by finding the first '{' and last '}'
         let start_idx = validated.find('{').unwrap_or(0);
-        let end_idx = validated.rfind('}').map(|i| i + 1).unwrap_or(validated.len());
+        let end_idx = validated
+            .rfind('}')
+            .map(|i| i + 1)
+            .unwrap_or(validated.len());
         let clean = if start_idx < end_idx {
             &validated[start_idx..end_idx]
         } else {
@@ -326,7 +414,8 @@ pub async fn handle_patch_cmd(
                     if imp.is_string() {
                         final_patch = imp.as_str().unwrap_or("{}").to_string();
                     } else {
-                        final_patch = serde_json::to_string(imp).unwrap_or_else(|_| "{}".to_string());
+                        final_patch =
+                            serde_json::to_string(imp).unwrap_or_else(|_| "{}".to_string());
                     }
                 } else {
                     final_patch = clean.to_string();
@@ -334,8 +423,15 @@ pub async fn handle_patch_cmd(
                 approved = true;
                 break;
             } else {
-                last_error = v["critique"].as_str().unwrap_or("Critic rejected the draft without explanation.").to_string();
-                tracing::info!("Patch attempt {} rejected by Critic: {}", attempt, last_error);
+                last_error = v["critique"]
+                    .as_str()
+                    .unwrap_or("Critic rejected the draft without explanation.")
+                    .to_string();
+                tracing::info!(
+                    "Patch attempt {} rejected by Critic: {}",
+                    attempt,
+                    last_error
+                );
             }
         } else {
             last_error = "Failed to parse the JSON output correctly. Make sure you return ONLY valid JSON without markdown formatting.".to_string();
@@ -347,10 +443,13 @@ pub async fn handle_patch_cmd(
         // Fallback to the last draft if all attempts failed
         final_patch = draft;
     }
-    
+
     // Extract the final JSON object one last time in case the fallback draft has markdown
     let start_idx = final_patch.find('{').unwrap_or(0);
-    let end_idx = final_patch.rfind('}').map(|i| i + 1).unwrap_or(final_patch.len());
+    let end_idx = final_patch
+        .rfind('}')
+        .map(|i| i + 1)
+        .unwrap_or(final_patch.len());
     let clean = if start_idx < end_idx {
         &final_patch[start_idx..end_idx]
     } else {
@@ -362,9 +461,11 @@ pub async fn handle_patch_cmd(
             // Check if it's the Critic audit format: {"approved":..., "improved_text":...}
             if let Some(imp) = v.get("improved_text") {
                 if imp.is_string() {
-                    serde_json::from_str(imp.as_str().unwrap_or("{}")).unwrap_or_else(|_| serde_json::from_value(v.clone()).unwrap_or_default())
+                    serde_json::from_str(imp.as_str().unwrap_or("{}"))
+                        .unwrap_or_else(|_| serde_json::from_value(v.clone()).unwrap_or_default())
                 } else {
-                    serde_json::from_value(imp.clone()).unwrap_or_else(|_| serde_json::from_value(v.clone()).unwrap_or_default())
+                    serde_json::from_value(imp.clone())
+                        .unwrap_or_else(|_| serde_json::from_value(v.clone()).unwrap_or_default())
                 }
             } else {
                 serde_json::from_value(v).unwrap_or_default()
@@ -373,19 +474,26 @@ pub async fn handle_patch_cmd(
         Err(e) => {
             let _ = bot.delete_message(msg.chat.id, loading.id).await;
             tracing::warn!("Failed to parse Critic outer JSON: {e}\nRaw: {clean}");
-            bot.send_message(msg.chat.id,
-                "❌ AI returned an invalid patch structure. Try rephrasing your request.")
-                .await?;
+            bot.send_message(
+                msg.chat.id,
+                "❌ AI returned an invalid patch structure. Try rephrasing your request.",
+            )
+            .await?;
             return Ok(());
         }
     };
 
     if patch.is_empty() {
         let _ = bot.delete_message(msg.chat.id, loading.id).await;
-        bot.send_message(msg.chat.id,
-            format!("ℹ️ AI found nothing to change.\n\n<i>\"{}\"</i>", patch.description))
-            .parse_mode(ParseMode::Html)
-            .await?;
+        bot.send_message(
+            msg.chat.id,
+            format!(
+                "ℹ️ AI found nothing to change.\n\n<i>\"{}\"</i>",
+                patch.description
+            ),
+        )
+        .parse_mode(ParseMode::Html)
+        .await?;
         return Ok(());
     }
 
@@ -414,19 +522,24 @@ pub async fn handle_patch_confirm(
     let pending = match patch_store.remove(token) {
         Some((_, p)) => p,
         None => {
-            bot.send_message(chat_id, "⏰ Patch expired or already applied (10-minute timeout).")
-                .await?;
+            bot.send_message(
+                chat_id,
+                "⏰ Patch expired or already applied (10-minute timeout).",
+            )
+            .await?;
             return Ok(());
         }
     };
 
     if pending.user_id != user_id {
-        bot.send_message(chat_id, "⛔ This patch belongs to another user.").await?;
+        bot.send_message(chat_id, "⛔ This patch belongs to another user.")
+            .await?;
         return Ok(());
     }
 
     if pending.is_expired() {
-        bot.send_message(chat_id, "⏰ Patch expired (10-minute timeout).").await?;
+        bot.send_message(chat_id, "⏰ Patch expired (10-minute timeout).")
+            .await?;
         return Ok(());
     }
 
@@ -436,12 +549,16 @@ pub async fn handle_patch_confirm(
     // Trigger backup
     crate::bot::handlers::portfolio::auto_backup_silent(&bot, &store, user_id).await;
 
-    bot.send_message(chat_id,
-        format!("✅ Patch applied: <b>{count}</b> change(s) written to your portfolio.\n\
-                 Backup updated automatically."))
-        .parse_mode(ParseMode::Html)
-        .reply_markup(keyboards::main_menu())
-        .await?;
+    bot.send_message(
+        chat_id,
+        format!(
+            "✅ Patch applied: <b>{count}</b> change(s) written to your portfolio.\n\
+                 Backup updated automatically."
+        ),
+    )
+    .parse_mode(ParseMode::Html)
+    .reply_markup(keyboards::main_menu())
+    .await?;
 
     Ok(())
 }
@@ -458,5 +575,3 @@ pub async fn handle_patch_cancel(
         .await?;
     Ok(())
 }
-
-

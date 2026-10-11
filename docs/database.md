@@ -1,67 +1,153 @@
 # Database & Data Models Architecture
 
-Cryptograph takes a unique **memory-first, zero-trust** approach to database management. It combines a highly secure, encrypted in-memory state for sensitive user portfolio data, and a fast SQLite cache for public market data.
+Cryptograph is **SQLite-first**: a single `crypto.db` (WAL mode) is the source
+of truth for user data, caches, budgets, and model telemetry. A small in-memory
+`Store` holds the hot portfolio state for speed and is persisted to SQLite as
+versioned JSON on every mutation. The trading module uses its own pair of
+SQLite files (`trading_sim.db` / `trading_live.db`) with a shared schema.
 
 ---
 
-## 1. The Core Portfolio Store (`src/db/store.rs`)
+## 1. The Core Store (`src/db/store.rs`)
 
-The `Store` is the central brain of Cryptograph. It holds all user portfolios, alerts, purchases, and settings completely in RAM while the bot is running.
+The `Store` is the central brain of Cryptograph. It holds user portfolios,
+alerts, purchases, memos, goals, and settings in RAM while the bot is running.
 
 ### Why In-Memory?
-- **Zero-Trust Security**: No sensitive financial data (like how much Bitcoin a user holds, or what their hardware wallet addresses are) is ever written to disk in plain text.
-- **Speed**: Evaluating hundreds of price alerts every minute across thousands of assets is instant because there are no disk I/O bottlenecks.
+- **Speed**: evaluating hundreds of price alerts every minute across thousands
+  of assets is instant because there are no disk I/O bottlenecks.
+- **Ephemeral session key**: a random 32-byte session key is generated per
+  process (no `MASTER_KEY` env var anymore); it is zeroized on drop.
 
-### Versioned JSON Backups
-Because data lives in RAM, it must be persisted to survive restarts.
-- Every time a user mutates their portfolio (e.g., adds a purchase, creates a wallet), the `Store` automatically serializes their portfolio into versioned JSON via `serde_json` (`src/db/migration.rs` — the `BackupEnvelope` schema tag).
-- `/backup` exports the portfolio as `cryptograph_backup.json`; `/restore` re-imports it. Legacy `.cgrp` files are still accepted for backward compatibility, but the format is plain JSON — **not encrypted**, so treat backup files as sensitive.
-- The same JSON is stored in the SQLite `users` table for crash recovery.
+### Persistence
+- Every mutation serializes the portfolio into versioned JSON
+  (`BackupEnvelope`) and writes it into the SQLite `users` table for crash
+  recovery.
+- `/backup` exports the portfolio as `cryptograph_backup.json`; `/restore`
+  re-imports it. Legacy `.cgrp` files are still accepted. The format is plain
+  JSON — **not encrypted**, so treat backup files as sensitive.
+- Memos and goals live in **dedicated tables** (`user_memos`, `user_goals`), so
+  they survive even if the `users` table is ever rebuilt.
 
 ---
 
 ## 2. The Data Models (`src/models/`)
 
-The internal state is composed of strict Rust structs. The modular design separates different domain concerns into their own files to prevent monolithic "spaghetti" code.
-
 ### `portfolio.rs`
-The aggregate root. Contains:
-- `user_id`: Links the portfolio to the Telegram user.
-- `purchases`: Vector of all spot purchases.
-- `wallets`: Registered wallets (hot, cold, exchange).
-- `alerts`: Active price alerts.
-- `transfers`: Immutable ledger of asset movements between wallets.
-- `settings`: The user's specific settings (AI preferences, currency, etc.).
+The aggregate root: `user_id`, `purchases`, `wallets`, `alerts`, `transfers`,
+`settings`, `memos`, `goals`.
 
 ### `purchase.rs`
-Records the acquisition of an asset. 
-- **Immutability**: The `cost_usd` (cost basis) is considered the ground truth.
-- **Audit Trails**: If a user corrects a mistake via the `/correct` command, the original data is preserved, and a `CorrectionEntry` is appended to the `corrections` vector. This ensures a perfect audit trail of all manual edits.
+Records the acquisition of an asset. `cost_usd` (cost basis) is the ground
+truth; `/correct` appends a `CorrectionEntry` instead of mutating history,
+preserving a perfect audit trail.
 
 ### `holding.rs`
-A dynamic calculation. Holdings are not strictly saved as static balances but are derived in real-time from `Purchases`, `Transfers`, and blockchain synchronizations to ensure absolute accuracy.
+Holdings are not stored as static balances — they are derived in real time from
+`Purchases`, `Transfers`, and blockchain synchronizations.
 
 ### `wallet.rs`
-Supports `Cold` (Hardware), `Hot` (Software), and `Exchange` (CEX) definitions.
-- Includes fields for on-chain tracking (`address`, `network`).
-- Stores a `last_balance` hashmap to compute deltas when the `BlockchainClient` runs its polling loops.
+Supports `Cold`, `Hot`, and `Exchange` wallets, with optional on-chain tracking
+(`address`, `network`) and a `last_balance` map for delta notifications.
 
 ### `alert.rs`
-Defines robust alerting conditions:
-- `PriceAbove` / `PriceBelow` (e.g., BTC > 100,000)
-- `DropPercent` / `RisePercent` (e.g., BTC drops more than 10% in 4 hours)
-- Features a `cooldown` mechanism to prevent notification spam during high volatility.
+Robust alert conditions: `PriceAbove` / `PriceBelow` / `DropPercent` /
+`RisePercent`, with a `cooldown` mechanism to prevent spam.
 
 ---
 
-## 3. The SQLite Cache (`src/db/sqlite.rs`)
+## 3. SQLite Schema (`src/db/sqlite.rs`)
 
-While the primary portfolio is in-memory, Cryptograph uses a local SQLite database (`cryptograph_cache.db`) for storing **non-sensitive, public data**.
+The schema self-migrates on every boot: `CREATE TABLE IF NOT EXISTS` for new
+tables and guarded `ALTER TABLE ... ADD COLUMN` for new columns. WAL mode gives
+fast concurrent reads.
 
-### What goes into SQLite?
-- **AI News Summaries**: The 2-hour dual-agent news worker fetches raw news, synthesizes it into 3 bullet points, and caches it in SQLite. When the 6-hour Watcher runs, it simply reads the pre-validated text from SQLite, saving immense API costs and context limits.
-- **Historical Snapshots**: Price snapshots used for calculating precise percentage drops over custom timeframes (e.g., exactly 4 hours ago).
+### Core tables
 
-### Why SQLite?
-- It is lightweight, requires no separate server (unlike PostgreSQL or Redis), and is perfectly suited for ephemeral caching. 
-- If the SQLite file is deleted, the bot simply rebuilds the cache from external APIs. No user data is lost.
+| Table | Purpose |
+|---|---|
+| `users` | `id`, `portfolio_data` (versioned JSON backup), `last_updated` |
+| `events` | Audit log of user-triggered events |
+| `price_history` | Historical price points (symbol, price, timestamp) — the trajectory memory fed into AI snapshots; gained OHLC columns, 90-day retention |
+| `news_summaries` | Latest AI-verified news digest per symbol |
+| `news_articles` | Raw articles per symbol, dedup by URL, 7-day retention (on-demand "extended results") |
+| `news_summary_history` | Append-only per-symbol summary history, 30-day retention ("what changed over time") |
+| `quote_meta_cache` | Non-real-time token metadata (rank, supply, 1h/24h/7d/30d/90d changes) |
+| `model_health` | Provider health status (up/down, error, last checked) |
+| `macro_cache` | Latest macro context summary |
+| `price_milestones` | Recorded ATH / milestone prices per symbol |
+| `user_memos` | Per-user memos (hard rules the AI must respect) |
+| `user_goals` | Per-user goals with progress, verdicts, and cooldowns |
+| `proactive_cache` | Last proactive scan snapshot + analysis per user |
+
+### Budget & usage tables
+
+| Table | Purpose |
+|---|---|
+| `monthly_usage` | Monthly token/request totals per category (DeepSeek budget) |
+| `paid_usage` | Per-model daily paid usage (DeepSeek) |
+| `daily_usage` | Per-category daily totals (OpenRouter 300/day budget) |
+| `ai_stats` | Legacy per-model ok/err counters |
+| `daily_metrics` | Per-category daily ok/err counters |
+
+### Model ranking tables
+
+| Table | Purpose |
+|---|---|
+| `model_registry` | Discovered models: provider, model_id, alias, display, context_length, fingerprint (OpenRouter `updated`), first/last seen, last tested, tested fingerprint, bench count |
+| `model_stats` | Per-model daily calls, errors, total latency, quality score, and `bench_calls` (benchmark-only counter so production traffic cannot dilute judge quality) |
+
+`model_registry` is fed by `models refresh` (models.json + OpenRouter free
+models) and consumed by the lazy ranker; `model_stats` drives
+underperformance detection and role assignment.
+
+---
+
+## 4. Trading Module Schema (`src/trading/store.rs`)
+
+The trading module keeps a **separate SQLite file per engine mode**
+(`trading_sim.db` for simulation, `trading_live.db` for live) with an identical
+schema, so paper trading is a 1:1 rehearsal of live behavior.
+
+| Table | Purpose |
+|---|---|
+| `operator_constraints` | NLP/CLI-set limits: `MAX_PRICE_CEILING`, `MIN_PRICE_FLOOR`, `MAX_DRAWDOWN_STEP`, `PAUSE_BUY`, `PAUSE_SELL` (per mode + asset, with expiry) |
+| `strategy_allocations` | Capital pools: asset, total/deployed/available budget, profit reserve, cumulative profit, status (ACTIVE/PAUSED/COMPLETED) |
+| `trade_lots` | Specific-lot accounting: entry price, amount, fee paid, cost basis, target exit price, status (OPEN / COLD_HOLD / CLOSED) |
+| `agent_debates` | Bull vs Bear vs Arbiter audit trail per lot (market context, rationales, verdict, action BUY/PASS/DEFER) |
+| `trade_executions` | Every executed fill: side, price, amount, fee, net USD |
+| `backtest_runs` | Recorded backtests: symbol, window, capital, final capital, trades, wins/losses, PnL, max drawdown |
+| `strategy_lessons` | Lessons the AI learned from closed trades / backtests |
+| `engine_configs` | Versioned engine configs (min profit margin, fee rate, tranche count, spread cap, crash guard, ATH guard, profit mode) with rationale + source |
+| `strategy_profiles` | Strategy catalog: builtin / trained / manual profiles with engine config + default constraints + score |
+| `training_stats` | Per-config training results from `strategy train` sweeps (score, avg PnL, max DD, win rate, profitable-window ratio, cold-lot ratio) — injected into AI context as the trained-strategy block |
+| `trade_recommendations` | Commander-mode advice lifecycle: PENDING → EXECUTED / REJECTED / EXPIRED, with guardrails re-checked at the actual fill price |
+| `trade_tasks` | Standing trade tasks (advisor mode): monthly budget, alerts/day cap, tranches, margin, execution mode |
+| `exchange_fees` | Per-mode exchange fee config (buy/sell %) used by the no-loss invariant and advisor sizing |
+
+### Key invariants (enforced in `src/trading/engine.rs`)
+- **No-loss exit**: a lot may only be sold when
+  `amount * exit * (1 - fee_rate) >= cost_basis * (1 + min_profit_margin)`.
+  Underwater lots transition to `COLD_HOLD` and are never liquidated at a loss.
+- **ATH guard**: a buy is skipped when the price is within
+  `max_buy_from_high_pct` of the highest close over `ath_lookback_days` — cash
+  stays parked instead of chasing tops.
+- **Capital boundary**: allocations cannot exceed their dedicated budget pool.
+- **Profit routing**: `REINVEST` / `SEPARATE` / `PARTIAL(f)` decide where
+  realized profit goes; `total_profit_usd` is tracked cumulatively.
+
+### Seed DB
+`data/trading_sim_seed.db` is a bundled, read-only-at-runtime artifact: on first
+run `TradingStore::open` copies it into place (pre-loading trained profiles,
+lessons, and stats), so the bot never starts from zero. Refresh it after
+retraining with `trade seed`. It ships as a data file next to the binary — not
+`include_bytes!` — so it can be updated without rebuilding.
+
+---
+
+## 5. Why SQLite?
+- Lightweight, no separate server, perfectly suited for a self-hosted bot.
+- If cache tables are deleted, the bot rebuilds them from external APIs; user
+  data (users, goals, memos) is never lost because it is restored on boot.
+- `PRAGMA integrity_check` on startup; on corruption the file is renamed to
+  `crypto.db.corrupt.<timestamp>` and a fresh DB is booted to avoid downtime.

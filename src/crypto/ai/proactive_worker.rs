@@ -39,6 +39,10 @@ const MIN_SCAN_HOURS: f64 = 2.0;
 /// Default minimum gap between proactive alerts for the same goal
 /// (overridable via `PROACTIVE_ALERT_COOLDOWN_HOURS`).
 const GOAL_ALERT_COOLDOWN_HOURS: i64 = 24;
+/// How long to suppress re-proposing a goal after the user explicitly declined
+/// ("keep active"). Much longer than the normal alert cooldown so the bot
+/// doesn't nag the same goal every day.
+const GOAL_DECLINE_SUPPRESS_HOURS: i64 = 24 * 7;
 /// How many previously sent alert messages to feed back into the prompt.
 const MAX_ALERT_MEMORY: usize = 5;
 /// Max symbols included in the market snapshot (token/API economy).
@@ -149,6 +153,23 @@ async fn scan_user(
             warn!("Proactive alert send failed for user {}: {}", user_id, e);
         }
     }
+
+    // Proposals require explicit user confirmation — each is sent as its own
+    // message with a Confirm/Keep inline keyboard. The AI can never deactivate
+    // a goal without the user pressing Confirm.
+    for (goal_id, msg) in &outcome.proposals {
+        let chat_id = teloxide::types::ChatId(user_id as i64);
+        if let Err(e) = crate::bot::handlers::ai::send_rich_message_via_api_with_markup(
+            bot,
+            chat_id,
+            msg.clone(),
+            crate::bot::keyboards::goal_propose_keyboard(*goal_id),
+        )
+        .await
+        {
+            warn!("Proactive proposal send failed for user {}: {}", user_id, e);
+        }
+    }
     Ok(())
 }
 
@@ -184,6 +205,9 @@ pub struct ScanOutcome {
     pub actions: Vec<GoalAction>,
     /// Notifications that should be delivered to the user.
     pub messages: Vec<String>,
+    /// (goal_id, message) proposals that need user confirmation (Confirm/Keep
+    /// inline keyboard). Sent separately from plain alerts.
+    pub proposals: Vec<(u64, String)>,
     /// (goal_id, goal_text, new_status) for goals whose state changed.
     pub changed: Vec<(u64, String, String)>,
     /// Full pipeline trace (kept for debugging; the CLI prints stages live).
@@ -332,6 +356,7 @@ pub async fn run_scan_with<F: Fn(&str, &str)>(
             current_date,
             actions: vec![],
             messages: vec![],
+            proposals: vec![],
             changed: vec![],
             trace,
         });
@@ -340,6 +365,7 @@ pub async fn run_scan_with<F: Fn(&str, &str)>(
     // ── 3. Apply actions ─────────────────────────────────────────────────────
     let now = Utc::now();
     let mut messages: Vec<String> = Vec::new();
+    let mut proposals: Vec<(u64, String)> = Vec::new();
     let mut changed: Vec<(u64, String, String)> = Vec::new();
 
     if apply {
@@ -352,7 +378,13 @@ pub async fn run_scan_with<F: Fn(&str, &str)>(
                 apply_action(goal, action, now).map(|(msg, status)| (text, msg, status))
             });
             if let Some((text, msg, status)) = applied {
-                messages.push(msg);
+                if status == "propose" {
+                    // Proposals need user confirmation — delivered separately
+                    // with a Confirm/Keep keyboard, not as a plain alert.
+                    proposals.push((action.goal_id, msg));
+                } else {
+                    messages.push(msg);
+                }
                 changed.push((action.goal_id, text, status));
             }
         }
@@ -407,6 +439,7 @@ pub async fn run_scan_with<F: Fn(&str, &str)>(
         current_date,
         actions,
         messages,
+        proposals,
         changed,
         trace,
     })
@@ -421,18 +454,7 @@ fn apply_action(
 ) -> Option<(String, String)> {
     match action.action.as_str() {
         "alert" => {
-            // Per-goal cooldown: don't re-alert the same goal too often (env
-            // PROACTIVE_ALERT_COOLDOWN_HOURS overrides the 24h default).
-            let cooldown = std::env::var("PROACTIVE_ALERT_COOLDOWN_HOURS")
-                .ok()
-                .and_then(|v| v.parse::<i64>().ok())
-                .filter(|h| *h >= 1)
-                .unwrap_or(GOAL_ALERT_COOLDOWN_HOURS);
-            let cooled = goal
-                .last_alert_at
-                .map(|t| now.signed_duration_since(t).num_hours() >= cooldown)
-                .unwrap_or(true);
-            if !cooled {
+            if !cooldown_ok(goal, now) {
                 return None;
             }
             goal.last_alert_at = Some(now);
@@ -442,14 +464,7 @@ fn apply_action(
                 None
             } else {
                 // Remember what we said so the next scan doesn't repeat it.
-                goal.sent_alerts.push(crate::models::SentAlert {
-                    at: now,
-                    text: msg.to_string(),
-                });
-                if goal.sent_alerts.len() > MAX_ALERT_MEMORY {
-                    let excess = goal.sent_alerts.len() - MAX_ALERT_MEMORY;
-                    goal.sent_alerts.drain(..excess);
-                }
+                remember_alert(goal, now, msg);
                 Some((
                     format!("🎯 Goal #{}: {}", goal.id, msg),
                     "active".to_string(),
@@ -466,18 +481,66 @@ fn apply_action(
             goal.sent_alerts.clear();
             action_message(goal, action).map(|m| (m, "done".to_string()))
         }
-        "stale" => {
-            if !goal.active {
+        "propose" => {
+            // Same cooldown discipline as alerts: don't re-propose the same
+            // goal every scan. "Keep active" resets last_alert_at so the AI
+            // knows the user already declined.
+            if !cooldown_ok(goal, now) || decline_suppressed(goal, now) {
                 return None;
             }
-            goal.active = false;
-            // Clean up temporal memory of inactive goals.
-            goal.ai_summary = None;
-            goal.progress_notes.clear();
-            goal.sent_alerts.clear();
-            action_message(goal, action).map(|m| (m, "inactive".to_string()))
+            goal.last_alert_at = Some(now);
+            goal.alert_count += 1;
+            let note = pick_note(action, "the goal may no longer be relevant.");
+            remember_alert(goal, now, &note);
+            Some((
+                format!("💡 Goal #{}: {}", goal.id, note),
+                "propose".to_string(),
+            ))
+        }
+        "stale" => {
+            // Guardrail: AI is never allowed to unilaterally deactivate user goals.
+            // If the model still returns "stale", log a warning and treat it as a no-op / wait.
+            warn!(
+                "AI returned 'stale' for goal #{} ({}) — suppressed by guardrail (goals cannot be auto-deactivated)",
+                goal.id, goal.text
+            );
+            None
         }
         _ => None, // "wait"
+    }
+}
+
+/// True when the per-goal alert/propose cooldown (env
+/// `PROACTIVE_ALERT_COOLDOWN_HOURS`, default 24h) has elapsed.
+fn cooldown_ok(goal: &Goal, now: DateTime<Utc>) -> bool {
+    let cooldown = std::env::var("PROACTIVE_ALERT_COOLDOWN_HOURS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|h| *h >= 1)
+        .unwrap_or(GOAL_ALERT_COOLDOWN_HOURS);
+    goal.last_alert_at
+        .map(|t| now.signed_duration_since(t).num_hours() >= cooldown)
+        .unwrap_or(true)
+}
+
+/// True when the user recently declined an AI proposal to deactivate this goal
+/// ("keep active"). Suppresses re-proposing the same goal for a week so the bot
+/// doesn't nag the user every day about a goal they already said to keep.
+fn decline_suppressed(goal: &Goal, now: DateTime<Utc>) -> bool {
+    goal.last_declined_at
+        .map(|t| now.signed_duration_since(t).num_hours() < GOAL_DECLINE_SUPPRESS_HOURS)
+        .unwrap_or(false)
+}
+
+/// Push a sent message into the goal's alert memory (capped at MAX_ALERT_MEMORY).
+fn remember_alert(goal: &mut Goal, now: DateTime<Utc>, msg: &str) {
+    goal.sent_alerts.push(crate::models::SentAlert {
+        at: now,
+        text: msg.to_string(),
+    });
+    if goal.sent_alerts.len() > MAX_ALERT_MEMORY {
+        let excess = goal.sent_alerts.len() - MAX_ALERT_MEMORY;
+        goal.sent_alerts.drain(..excess);
     }
 }
 
@@ -500,10 +563,10 @@ fn action_message(goal: &Goal, action: &GoalAction) -> Option<String> {
                 goal.id, goal.text, note
             ))
         }
-        "stale" => {
-            let note = pick_note(action, "goal is no longer relevant.");
+        "propose" => {
+            let note = pick_note(action, "the goal may no longer be relevant.");
             Some(format!(
-                "⏸ Goal #{} \"{}\" — removed from tracking.\n{}",
+                "💡 Goal #{} \"{}\" — AI suggests reconsidering.\n{}\n\nConfirm to deactivate, or keep it active.",
                 goal.id, goal.text, note
             ))
         }
@@ -669,6 +732,27 @@ async fn run_goal_pipeline_traced_with<F: Fn(&str, &str)>(
     }
     on_stage("critic", &format!("[{}]\n{}", critic_model, final_res));
 
+    // Stage 4: agentic reflection — a cheap reviewer re-checks the critic's
+    // JSON verdict (goal coverage, no stale, numbers vs snapshot, no FOMO,
+    // complete sentences) before it is finalized. Bounded to one call; on any
+    // failure the critic's output is kept unchanged.
+    on_stage(
+        "progress",
+        "Stage 4/4: cheap reflection reviewer re-checking the verdict (pool: watcher, 30s/call)...",
+    );
+    if let Some(reflected) = reflect_verdict(&client, &gemini_key, prompt, &final_res).await {
+        on_stage(
+            "reflection",
+            &format!("[reflection reviewer]\n{}", reflected),
+        );
+        final_res = reflected;
+    } else {
+        on_stage(
+            "reflection",
+            "(reflection skipped or failed — keeping critic verdict)",
+        );
+    }
+
     Ok(PipelineTrace {
         prompt: prompt.to_string(),
         gen_a_model: gen_a,
@@ -680,6 +764,80 @@ async fn run_goal_pipeline_traced_with<F: Fn(&str, &str)>(
         critic_model,
         critic_output: final_res,
     })
+}
+
+/// Phase D — agentic reflection for the goal scan. Runs ONE cheap watcher-tier
+/// call that re-checks the critic's JSON verdict and returns a corrected JSON.
+/// Returns `None` when the critic output is not parseable JSON, the reviewer
+/// fails/times out, or the corrected output is unusable — the caller keeps the
+/// critic's verdict in those cases.
+async fn reflect_verdict(
+    client: &reqwest::Client,
+    gemini_key: &str,
+    prompt: &str,
+    critic_json: &str,
+) -> Option<String> {
+    // Only reflect when the critic actually produced a JSON object to check.
+    if !critic_json.trim_start().starts_with('{') {
+        return None;
+    }
+    let reflection_prompt = prompts::build_proactive_reflection_prompt(prompt, critic_json);
+    let models = pools::get_available_models(Some("watcher"));
+    for alias in models.into_iter().take(2) {
+        let call = tokio::time::timeout(
+            Duration::from_secs(30),
+            providers::call_any_model(client, gemini_key, &alias, &reflection_prompt, None),
+        )
+        .await;
+        let Ok(Ok(text)) = call else {
+            continue;
+        };
+        // Accept only a clean JSON object (no markdown fences, no commentary).
+        let Some(candidate) = extract_json_object(&text) else {
+            continue;
+        };
+        let v: serde_json::Value = serde_json::from_str(&candidate).ok()?;
+        if v.get("goals").and_then(|g| g.as_array()).is_none() {
+            continue;
+        }
+        pools::record_successful_model(&alias);
+        return Some(candidate);
+    }
+    None
+}
+
+/// Extract the first balanced JSON object from a model response, tolerating
+/// markdown fences and stray prose around it. Returns `None` when there is no
+/// `{...}` pair or the braces are unbalanced.
+pub fn extract_json_object(text: &str) -> Option<String> {
+    let start = text.find('{')?;
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, c) in text[start..].char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(text[start..start + i + 1].to_string());
+                }
+            }
+            '"' => in_string = true,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// CLI: run one real scan for a user and print every pipeline stage, the parsed
@@ -797,6 +955,14 @@ pub async fn run_cli_scan(
     }
 
     println!(
+        "\n--- PROPOSALS NEEDING USER CONFIRMATION ({} msg) ---",
+        outcome.proposals.len()
+    );
+    for (goal_id, m) in &outcome.proposals {
+        println!("goal #{}: {}", goal_id, m);
+    }
+
+    println!(
         "\n--- STATE CHANGES APPLIED ({}) ---",
         outcome.changed.len()
     );
@@ -847,7 +1013,7 @@ fn parse_goal_actions(json: &str, active_goals: &[Goal]) -> anyhow::Result<Vec<G
             .and_then(|r| r.as_str())
             .unwrap_or("")
             .to_string();
-        if matches!(action.as_str(), "alert" | "done" | "stale" | "wait") {
+        if matches!(action.as_str(), "alert" | "done" | "propose" | "wait") {
             out.push(GoalAction {
                 goal_id,
                 action,
@@ -912,6 +1078,14 @@ async fn build_market_snapshot(
     }
     symbols.truncate(MAX_SNAPSHOT_SYMBOLS);
 
+    // Scenario override: deterministic "what-if" market for tests — replaces
+    // the live snapshot entirely (same prompt shape, no API calls).
+    if let Some(snap) =
+        crate::crypto::ai::scenario::active_scenario().and_then(|s| s.market_snapshot(&symbols))
+    {
+        return snap;
+    }
+
     let (fear_greed, global) = tokio::join!(
         crate::bot::handlers::ai::fetch_fear_and_greed_index(),
         cmc.get_global_metrics(),
@@ -940,8 +1114,15 @@ async fn build_market_snapshot(
 
     let sym_refs: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
     let mut lines = vec![global_str];
+    let mut quote_signals: Vec<crate::crypto::ai::strategy::QuoteSignal> = Vec::new();
     if let Ok(quotes) = cmc.get_quotes(&sym_refs).await {
         for q in quotes {
+            quote_signals.push(crate::crypto::ai::strategy::QuoteSignal {
+                symbol: q.symbol.clone(),
+                price: q.price_usd,
+                chg_24h: q.change_24h,
+                chg_7d: q.change_7d,
+            });
             let mut yaml = format!(
                 "- {}: {:.2} USD | 1h: {:+.2}% | 24h: {:+.2}% | 7d: {:+.2}%",
                 q.symbol,
@@ -998,6 +1179,37 @@ async fn build_market_snapshot(
                 lines.push(format!("- {} milestones: {}", sym, ms.join(", ")));
             }
         }
+    }
+
+    // Phase B — local market memory: price trajectory from the bot's own
+    // history (30d), so the goal scan sees the trend, not just the snapshot.
+    let traj = crate::crypto::ai::market_memory::trajectory_context(sqlite, &symbols, 30).await;
+    if !traj.is_empty() {
+        lines.push(traj);
+    }
+    // Chart view: RSI / SMA / support-resistance / volatility from local OHLCV.
+    let chart = crate::crypto::ai::market_memory::chart_context_block(sqlite, &symbols, 30).await;
+    if !chart.is_empty() {
+        lines.push(chart);
+    }
+    // Trained strategy: top configs from historical sweeps for these symbols.
+    let trained = crate::crypto::ai::market_memory::trained_strategy_block(&symbols, 3).await;
+    if !trained.is_empty() {
+        lines.push(trained);
+    }
+    // Market calendar: halving phase + trained monthly seasonality.
+    let calendar = crate::crypto::ai::market_memory::seasonality_context_block(&symbols).await;
+    if !calendar.is_empty() {
+        lines.push(calendar);
+    }
+
+    // Phase C — deterministic strategy layer: regime rules for the scan.
+    let strat = crate::crypto::ai::strategy::guidance(
+        crate::crypto::ai::strategy::parse_fear_greed(&fear_greed),
+        &quote_signals,
+    );
+    if !strat.is_empty() {
+        lines.push(strat);
     }
 
     lines.join("\n")
@@ -1058,6 +1270,7 @@ mod tests {
             expires_at: None,
             active: true,
             last_alert_at: None,
+            last_declined_at: None,
             alert_count: 0,
             done: false,
             progress_notes: Vec::new(),
@@ -1073,21 +1286,33 @@ mod tests {
             "goals": [
                 {"goal_id": 1, "action": "alert", "message": "ETH dipped to support, good DCA point", "reason": "x"},
                 {"goal_id": 2, "action": "wait", "message": "", "reason": "no signal"},
-                {"goal_id": 3, "action": "done", "message": "", "reason": "x2 reached"}
+                {"goal_id": 3, "action": "done", "message": "", "reason": "x2 reached"},
+                {"goal_id": 4, "action": "propose", "message": "", "reason": "goal outdated"}
             ]
         }"#;
-        let goals = vec![goal(1), goal(2), goal(3)];
+        let goals = vec![goal(1), goal(2), goal(3), goal(4)];
         let actions = parse_goal_actions(json, &goals).unwrap();
-        assert_eq!(actions.len(), 3);
+        assert_eq!(actions.len(), 4);
         assert_eq!(actions[0].goal_id, 1);
         assert_eq!(actions[0].action, "alert");
         assert_eq!(actions[2].reason, "x2 reached");
+        assert_eq!(actions[3].action, "propose");
     }
 
     #[test]
     fn parse_actions_skips_unknown_goal_ids() {
         let json = r#"{"goals":[{"goal_id": 99, "action": "alert", "message": "fake"}]}"#;
         let goals: Vec<Goal> = vec![];
+        let actions = parse_goal_actions(json, &goals).unwrap();
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn parse_actions_skips_stale() {
+        // The AI is never allowed to deactivate goals: "stale" is dropped by
+        // the parser so it can never reach apply_action or the report mode.
+        let json = r#"{"goals":[{"goal_id": 1, "action": "stale", "message": "", "reason": "no longer relevant"}]}"#;
+        let goals = vec![goal(1)];
         let actions = parse_goal_actions(json, &goals).unwrap();
         assert!(actions.is_empty());
     }
@@ -1117,7 +1342,9 @@ mod tests {
     }
 
     #[test]
-    fn apply_stale_notifies_with_reason() {
+    fn apply_stale_is_suppressed() {
+        // Guardrail: the AI can never deactivate a goal. "stale" is a no-op
+        // that keeps the goal fully active (the parser also drops it).
         let mut g = goal(1);
         let a = GoalAction {
             goal_id: 1,
@@ -1125,12 +1352,67 @@ mod tests {
             message: String::new(),
             reason: "goal expired, superseded by memo #2".into(),
         };
-        let (msg, status) = apply_action(&mut g, &a, Utc::now()).unwrap();
-        assert_eq!(status, "inactive");
-        assert!(!g.active);
-        assert!(msg.contains("removed from tracking"));
-        assert!(msg.contains("goal expired, superseded by memo #2"));
+        assert!(apply_action(&mut g, &a, Utc::now()).is_none());
+        assert!(g.active);
+        assert!(!g.done);
         assert!(g.progress_notes.is_empty());
+    }
+
+    #[test]
+    fn apply_propose_notifies_with_reason() {
+        let mut g = goal(1);
+        let a = GoalAction {
+            goal_id: 1,
+            action: "propose".into(),
+            message: String::new(),
+            reason: "BTC is far above the 62-63k target; consider pausing this goal".into(),
+        };
+        let (msg, status) = apply_action(&mut g, &a, Utc::now()).unwrap();
+        assert_eq!(status, "propose");
+        assert!(g.active); // proposal never mutates goal state
+        assert!(msg.contains("💡"));
+        assert!(msg.contains("62-63k"));
+        // The proposal is remembered so the AI doesn't repeat it next scan.
+        assert_eq!(g.sent_alerts.len(), 1);
+        assert_eq!(g.alert_count, 1);
+    }
+
+    #[test]
+    fn apply_propose_honors_cooldown() {
+        let mut g = goal(1);
+        let a = GoalAction {
+            goal_id: 1,
+            action: "propose".into(),
+            message: "reconsider".into(),
+            reason: String::new(),
+        };
+        let now = Utc::now();
+        assert!(apply_action(&mut g, &a, now).is_some());
+        // Second proposal immediately after — suppressed by cooldown.
+        assert!(apply_action(&mut g, &a, now).is_none());
+        // After 24h+ it may propose again.
+        let later = now + ChronoDuration::hours(25);
+        assert!(apply_action(&mut g, &a, later).is_some());
+        assert_eq!(g.alert_count, 2);
+    }
+
+    #[test]
+    fn apply_propose_suppressed_after_user_decline() {
+        let mut g = goal(1);
+        // User clicked "keep active" — the bot records the decline.
+        g.last_declined_at = Some(Utc::now());
+        let a = GoalAction {
+            goal_id: 1,
+            action: "propose".into(),
+            message: "reconsider".into(),
+            reason: String::new(),
+        };
+        // Even after the normal 24h cooldown, the decline suppresses re-proposing.
+        let later = Utc::now() + ChronoDuration::hours(25);
+        assert!(apply_action(&mut g, &a, later).is_none());
+        // After the suppression window (7 days) it may propose again.
+        let much_later = Utc::now() + ChronoDuration::hours(24 * 7 + 1);
+        assert!(apply_action(&mut g, &a, much_later).is_some());
     }
 
     #[test]
@@ -1168,5 +1450,36 @@ mod tests {
         apply_action(&mut g, &a, Utc::now()).unwrap();
         assert_eq!(g.sent_alerts.len(), 1);
         assert_eq!(g.sent_alerts[0].text, "ETH dipped to support");
+    }
+
+    #[test]
+    fn extract_json_object_handles_fences_and_prose() {
+        let with_fences = "```json\n{\"goals\": [{\"goal_id\": 1, \"action\": \"wait\"}]}\n```";
+        let got = extract_json_object(with_fences).unwrap();
+        assert!(got.starts_with('{'));
+        assert!(serde_json::from_str::<serde_json::Value>(&got).is_ok());
+
+        let with_prose = "Here is the verdict: {\"goals\": []} hope that helps.";
+        assert_eq!(extract_json_object(with_prose).unwrap(), "{\"goals\": []}");
+
+        // Braces inside strings must not break the balance.
+        let tricky = "{\"message\": \"price { 60-63k } zone\", \"goals\": []}";
+        let got2 = extract_json_object(tricky).unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(&got2).is_ok());
+
+        assert!(extract_json_object("no json here").is_none());
+        assert!(extract_json_object("{\"unclosed\": ").is_none());
+    }
+
+    #[test]
+    fn reflection_prompt_forbids_stale_and_fomo() {
+        let p = prompts::build_proactive_reflection_prompt(
+            "CURRENT MARKET SNAPSHOT: BTC 78k +23% 7d (vertical pump)",
+            "{\"goals\": [{\"goal_id\": 1, \"action\": \"alert\", \"message\": \"buy now at the top\"}]}",
+        );
+        assert!(p.contains("stale"));
+        assert!(p.contains("ANTI-FOMO"));
+        assert!(p.contains("vertical pump"));
+        assert!(p.contains("complete sentences"));
     }
 }

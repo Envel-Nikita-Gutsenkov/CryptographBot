@@ -65,7 +65,9 @@ Runs every **2 hours** to summarize market news into concise bullet points.
 
 ## Provider Fallbacks & Pools
 
-Cryptograph supports multiple AI providers: **Gemini, Groq, Mistral, Nvidia, and OpenRouter**.
+Cryptograph supports multiple AI providers: **Gemini, Groq, Cerebras, Mistral,
+Nvidia, Cohere, Cloudflare, Hugging Face, OpenRouter (free tier)**, with a
+paid **DeepSeek** model as a budget-capped last resort.
 To bypass rate limits and outages, it uses a **Fallback Pool System**:
 - If a primary model hits a `429 Too Many Requests` or `503 Service Unavailable`, the pipeline automatically falls back to alternative providers in the pool.
 - **Model Segment Routing**: High-volume recurring tasks (like news digestion) prioritize cost-efficient models (e.g., Qwen/Llama) and exclude Gemini models from the primary list. Gemini (e.g., `gemini-2.5-flash`) is reserved strictly as the final fallback layer. This balances speed, limits, and cost effectively.

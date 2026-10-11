@@ -241,6 +241,7 @@ pub async fn handle_goal_cmd(
                     expires_at: expires,
                     active: true,
                     last_alert_at: None,
+                    last_declined_at: None,
                     alert_count: 0,
                     done: false,
                     progress_notes: Vec::new(),
@@ -428,9 +429,10 @@ async fn plan_check(
     {
         Ok(o) => o,
         Err(e) => {
+            let err_str = crate::format::redact_secrets(&e.to_string());
             bot.send_message(
                 chat_id,
-                format!("❌ AI plan check failed: {e}\nThe model pool may be temporarily unavailable — try again later."),
+                format!("❌ AI plan check failed: {err_str}\nThe model pool may be temporarily unavailable — try again later."),
             )
             .await?;
             return Ok(());
@@ -458,7 +460,7 @@ async fn plan_check(
         let verdict = match a.action.as_str() {
             "alert" => "🔔 alert",
             "done" => "✅ done",
-            "stale" => "⏸ stale",
+            "propose" => "💡 propose",
             _ => "⏳ wait",
         };
         let goal_text = store.read(user_id, |p| {

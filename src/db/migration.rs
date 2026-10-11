@@ -59,8 +59,9 @@ pub fn decode(data: &[u8]) -> Result<Portfolio> {
     }
 
     // Fallback: legacy unversioned Portfolio JSON (backups made before v1)
-    serde_json::from_slice::<Portfolio>(data)
-        .map_err(|e| BotError::Encryption(format!(
+    serde_json::from_slice::<Portfolio>(data).map_err(|e| {
+        BotError::Encryption(format!(
             "Cannot parse backup (tried versioned + legacy): {e}"
-        )))
+        ))
+    })
 }

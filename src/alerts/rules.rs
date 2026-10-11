@@ -80,16 +80,28 @@ pub fn fmt_rule(rule: &AlertRule) -> String {
         AlertCondition::PriceBelow => format!("price < ${:.2}", rule.threshold),
         AlertCondition::PriceAbove => format!("price > ${:.2}", rule.threshold),
         AlertCondition::DropPercent => {
-            let p = rule.period.as_ref().map(|x| x.to_string()).unwrap_or("24h".into());
+            let p = rule
+                .period
+                .as_ref()
+                .map(|x| x.to_string())
+                .unwrap_or("24h".into());
             format!("drop > {:.1}% over {}", rule.threshold, p)
         }
         AlertCondition::RisePercent => {
-            let p = rule.period.as_ref().map(|x| x.to_string()).unwrap_or("24h".into());
+            let p = rule
+                .period
+                .as_ref()
+                .map(|x| x.to_string())
+                .unwrap_or("24h".into());
             format!("rise > {:.1}% over {}", rule.threshold, p)
         }
     };
 
-    let label = rule.label.as_deref().map(|l| format!(" [{l}]")).unwrap_or_default();
+    let label = rule
+        .label
+        .as_deref()
+        .map(|l| format!(" [{l}]"))
+        .unwrap_or_default();
     let status = if rule.enabled { "✅" } else { "⏸" };
     format!(
         "{} #{} {} {}{}  cooldown {}h",
@@ -145,20 +157,38 @@ mod tests {
 
     #[test]
     fn price_below_fires() {
-        assert!(evaluate(&rule(AlertCondition::PriceBelow, 60_000.0), &mock_quote(59_000.0, 0.0, 0.0)));
-        assert!(!evaluate(&rule(AlertCondition::PriceBelow, 60_000.0), &mock_quote(61_000.0, 0.0, 0.0)));
+        assert!(evaluate(
+            &rule(AlertCondition::PriceBelow, 60_000.0),
+            &mock_quote(59_000.0, 0.0, 0.0)
+        ));
+        assert!(!evaluate(
+            &rule(AlertCondition::PriceBelow, 60_000.0),
+            &mock_quote(61_000.0, 0.0, 0.0)
+        ));
     }
 
     #[test]
     fn price_above_fires() {
-        assert!(evaluate(&rule(AlertCondition::PriceAbove, 100_000.0), &mock_quote(101_000.0, 0.0, 0.0)));
-        assert!(!evaluate(&rule(AlertCondition::PriceAbove, 100_000.0), &mock_quote(99_000.0, 0.0, 0.0)));
+        assert!(evaluate(
+            &rule(AlertCondition::PriceAbove, 100_000.0),
+            &mock_quote(101_000.0, 0.0, 0.0)
+        ));
+        assert!(!evaluate(
+            &rule(AlertCondition::PriceAbove, 100_000.0),
+            &mock_quote(99_000.0, 0.0, 0.0)
+        ));
     }
 
     #[test]
     fn drop_percent_fires() {
-        assert!(evaluate(&rule(AlertCondition::DropPercent, 5.0), &mock_quote(0.0, -6.0, 0.0)));
-        assert!(!evaluate(&rule(AlertCondition::DropPercent, 5.0), &mock_quote(0.0, -4.0, 0.0)));
+        assert!(evaluate(
+            &rule(AlertCondition::DropPercent, 5.0),
+            &mock_quote(0.0, -6.0, 0.0)
+        ));
+        assert!(!evaluate(
+            &rule(AlertCondition::DropPercent, 5.0),
+            &mock_quote(0.0, -4.0, 0.0)
+        ));
     }
 
     #[test]

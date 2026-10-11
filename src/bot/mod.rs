@@ -103,6 +103,8 @@ fn build_handler() -> UpdateHandler<anyhow::Error> {
         .branch(case![Command::Goal(a)].endpoint(handle_goal_cmd))
         .branch(case![Command::Plan(a)].endpoint(handle_plan_cmd))
         .branch(case![Command::News(a)].endpoint(handle_news_cmd))
+        .branch(case![Command::Trade(a)].endpoint(handle_trade_cmd))
+        .branch(case![Command::TradeTask(a)].endpoint(handle_tradetask_cmd))
         .branch(case![Command::Settings].endpoint(handle_settings_cmd))
         .branch(case![Command::Model(a)].endpoint(handle_model_cmd))
         .branch(case![Command::Allow(a)].endpoint(handle_allow_cmd))
@@ -118,7 +120,12 @@ fn build_handler() -> UpdateHandler<anyhow::Error> {
             dptree::filter(|q: CallbackQuery| {
                 q.data
                     .as_deref()
-                    .map(|d| d == "plan" || d.starts_with("plan:"))
+                    .map(|d| {
+                        d == "plan"
+                            || d.starts_with("plan:")
+                            || d.starts_with("goal:confirm:")
+                            || d.starts_with("goal:keep:")
+                    })
                     .unwrap_or(false)
             })
             .endpoint(handle_plan_cb),
@@ -215,7 +222,10 @@ async fn handle_help(bot: Bot, msg: Message) -> anyhow::Result<()> {
                      • <code>/add</code> [SYM] [AMT] [COST] [WALLET] — Record purchase (e.g. <code>/add BTC 0.01 600 exchange:binance</code>)\n\
                      • <code>/move</code> [SYM] [AMT] <code>from:W</code> <code>to:W</code> [fee:AMT] — Transfer (e.g. <code>/move BTC 0.1 from:binance to:ledger fee:0.0001</code>)\n\
                      • <code>/adjust</code> [W] [SYM] [AMT] — Manually set balance (e.g. <code>/adjust wallet:ledger BTC 0.05</code>)\n\
-                     • <code>/correct</code> <code>#ID</code> [field] [value] — Edit purchase record (e.g. <code>/correct #1 amount 0.02</code>)\n\n\
+                     • <code>/correct</code> <code>#ID</code> [field] [value] — Edit purchase record (e.g. <code>/correct #1 amount 0.02</code>)\n\
+                     • <code>/history</code> [SYM] — Purchase history (e.g. <code>/history BTC</code>)\n\
+                     • <code>/watchlist</code> — Watchlist: <code>add SYM</code> | <code>remove SYM</code> | <code>list</code>\n\
+                     • <code>/invested</code> [SYM] [AMT] — Manually set total invested (e.g. <code>/invested BTC 5000</code>)\n\
                      🔔 <b>Price Alerts</b>\n\
                      • <code>/alert list</code> — View all configured price alerts\n\
                      • <code>/alert add</code> [SYM] [COND] [cooldown:Nh] — Add price alert:\n\
@@ -237,8 +247,21 @@ async fn handle_help(bot: Bot, msg: Message) -> anyhow::Result<()> {
                      • <code>/goal [text]</code> — Proactive goal; AI alerts you when market conditions fit (e.g. <code>/goal want to spend 400 USD on crypto this month</code>); <code>/goal list</code> | <code>/goal progress N text</code> | <code>/goal done N</code> | <code>/goal del N</code>\n\
                      • <code>/plan</code> — Plan dashboard menu; <code>/plan status</code> | <code>/plan check</code> (ask the AI about your plan now) | <code>/plan ask question</code>\n\
                      • <code>/advice</code> — Long-term investment intelligence &amp; market sentiment\n\
+                     📰 <b>News</b>\n\
+                     • <code>/news</code> [SYM] — Recent crypto news (e.g. <code>/news BTC</code>)\n\
+                     • <code>/fng</code> — Fear &amp; Greed Index\n\
+                     📊 <b>Trading (commander mode)</b>\n\
+                     • <code>/trade list</code> — Allocations, constraints, rules, PnL\n\
+                     • <code>/trade pnl</code> — Realized + mark-to-market PnL\n\
+                     • <code>/trade allocate</code> [SYM] [AMT] — Set monthly budget\n\
+                     • <code>/trade rule</code> [add|del] — Trading rules (dip %, ceiling, etc.)\n\
+                     • <code>/tradetask list</code> — Standing advisor instructions\n\
+                     • <code>/tradetask add</code> [--name N] [--assets SYMS] — Add a task\n\
+                     • <code>/tradetask advise</code> — Run advisor now\n\
                      ⚙️ <b>System &amp; Security</b>\n\
                      • <code>/settings</code> — Interactive settings menu (includes /stats)\n\
+                     • <code>/model</code> — Select AI model: <code>list</code> | <code>set N</code>\n\
+                     • <code>/ver</code> — Show bot build version/hash\n\
                      • <code>/backup</code> — Export JSON backup file\n\
                      • <code>/restore</code> — Restore from JSON backup file (send file after command)\n\
                      • <code>/reset</code> — Admin: reset stats and caches (news, milestones, health); portfolio is kept\n\
@@ -444,6 +467,26 @@ async fn handle_news_cmd(
     args: String,
 ) -> anyhow::Result<()> {
     handlers::handle_news_cmd(bot, msg, config, args).await
+}
+async fn handle_trade_cmd(
+    bot: Bot,
+    msg: Message,
+    _store: Arc<Store>,
+    _cmc: Arc<CryptoClient>,
+    config: Arc<Config>,
+    args: String,
+) -> anyhow::Result<()> {
+    handlers::handle_trade_cmd(bot, msg, config, args).await
+}
+async fn handle_tradetask_cmd(
+    bot: Bot,
+    msg: Message,
+    _store: Arc<Store>,
+    _cmc: Arc<CryptoClient>,
+    config: Arc<Config>,
+    args: String,
+) -> anyhow::Result<()> {
+    handlers::handle_tradetask_cmd(bot, msg, config, args).await
 }
 
 async fn handle_fng_cmd(
@@ -668,6 +711,68 @@ async fn handle_plan_cb(
         }
         cb::PLAN_HELP => {
             handle_help(bot, msg).await?;
+        }
+        // User confirmed an AI proposal to deactivate a goal. The AI can only
+        // *propose*; deactivation happens exclusively here, on user action.
+        d if d.starts_with("goal:confirm:") => {
+            let goal_id: u64 = d
+                .strip_prefix("goal:confirm:")
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0);
+            let found = store.write(user_id, |p| {
+                if let Some(g) = p.goals.iter_mut().find(|g| g.id == goal_id) {
+                    g.active = false;
+                    g.progress_notes.push(crate::models::ProgressNote {
+                        at: chrono::Utc::now(),
+                        text: "user confirmed deactivation (AI proposal)".into(),
+                    });
+                    true
+                } else {
+                    false
+                }
+            });
+            if found {
+                crate::bot::handlers::memo_goal::persist_goals(&store, &sqlite, user_id).await;
+                bot.send_message(
+                    msg.chat.id,
+                    format!("⏸ Goal #{} deactivated (you confirmed).", goal_id),
+                )
+                .await?;
+            } else {
+                bot.send_message(msg.chat.id, format!("❌ Goal #{} not found.", goal_id))
+                    .await?;
+            }
+        }
+        // User declined the AI proposal — the goal stays active, and the
+        // cooldown is reset so the AI doesn't re-propose it next scan.
+        d if d.starts_with("goal:keep:") => {
+            let goal_id: u64 = d
+                .strip_prefix("goal:keep:")
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0);
+            let found = store.write(user_id, |p| {
+                if let Some(g) = p.goals.iter_mut().find(|g| g.id == goal_id) {
+                    g.progress_notes.push(crate::models::ProgressNote {
+                        at: chrono::Utc::now(),
+                        text: "user chose to KEEP this goal active (AI proposal declined)".into(),
+                    });
+                    g.last_alert_at = Some(chrono::Utc::now());
+                    g.last_declined_at = Some(chrono::Utc::now());
+                    true
+                } else {
+                    false
+                }
+            });
+            if found {
+                crate::bot::handlers::memo_goal::persist_goals(&store, &sqlite, user_id).await;
+                bot.send_message(msg.chat.id, format!("🔒 Goal #{} stays active.", goal_id))
+                    .await?;
+            } else {
+                bot.send_message(msg.chat.id, format!("❌ Goal #{} not found.", goal_id))
+                    .await?;
+            }
         }
         _ => {}
     }
@@ -1022,6 +1127,7 @@ async fn handle_text(
     cmc: Arc<CryptoClient>,
     acl: Arc<AccessControl>,
     config: Arc<Config>,
+    sqlite: Arc<crate::db::SqliteStore>,
 ) -> anyhow::Result<()> {
     // Check for message replies or forwards for /restore command
     let text = msg.text().unwrap_or("");
@@ -1188,6 +1294,24 @@ async fn handle_text(
             if text.trim().starts_with('/') {
                 bot.send_message(msg.chat.id, "❌ Unknown command or parsing error. Make sure there are no typos (e.g. accidental Cyrillic letters). If you're stuck in a dialog, press /cancel.")
                     .await?;
+            } else if let Some(reply) = msg.reply_to_message() {
+                // Plain-text reply to a bot message → treat it as a follow-up
+                // /ask question. The replied message becomes the dialogue
+                // context, so "и че когда откат" on top of the bot's analysis
+                // continues the conversation instead of being silently ignored.
+                let replied_by_bot = reply.from().map(|u| u.is_bot).unwrap_or(false);
+                if replied_by_bot && reply.text().is_some() {
+                    return handlers::handle_ask_cmd(
+                        bot,
+                        msg.clone(),
+                        store,
+                        cmc,
+                        config,
+                        sqlite,
+                        text.to_string(),
+                    )
+                    .await;
+                }
             }
         }
     }

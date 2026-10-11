@@ -3,11 +3,26 @@
 
 #[derive(Debug, PartialEq)]
 pub enum NlpCommand {
-    AddPurchase { symbol: String, amount: f64, cost_usd: f64, wallet: Option<String> },
-    Move { symbol: String, amount: f64, from: String, to: String, fee: Option<f64> },
+    AddPurchase {
+        symbol: String,
+        amount: f64,
+        cost_usd: f64,
+        wallet: Option<String>,
+    },
+    Move {
+        symbol: String,
+        amount: f64,
+        from: String,
+        to: String,
+        fee: Option<f64>,
+    },
     Price(Vec<String>),
-    AlertAdd(String),        // raw args forwarded to alert parser
-    Convert { amount: f64, from: String, to: String },
+    AlertAdd(String), // raw args forwarded to alert parser
+    Convert {
+        amount: f64,
+        from: String,
+        to: String,
+    },
     Backup,
     Portfolio,
     Top(u32),
@@ -19,7 +34,9 @@ pub enum NlpCommand {
 pub fn parse(text: &str) -> Option<NlpCommand> {
     let upper = text.to_uppercase();
     let parts: Vec<&str> = text.split_whitespace().collect();
-    if parts.is_empty() { return None; }
+    if parts.is_empty() {
+        return None;
+    }
 
     let cmd = upper.split_whitespace().next().unwrap_or("");
 
@@ -30,32 +47,51 @@ pub fn parse(text: &str) -> Option<NlpCommand> {
             let amount = parts[2].parse().ok()?;
             let cost_usd = parts[3].parse().ok()?;
             let wallet = parts.get(4).map(|s| s.to_string());
-            Some(NlpCommand::AddPurchase { symbol, amount, cost_usd, wallet })
+            Some(NlpCommand::AddPurchase {
+                symbol,
+                amount,
+                cost_usd,
+                wallet,
+            })
         }
 
         // MOVE BTC 0.5 from:ledger to:binance [fee:0.0001]
         "MOVE" | "TRANSFER" | "SEND" if parts.len() >= 5 => {
             let symbol = parts[1].to_uppercase();
             let amount = parts[2].parse().ok()?;
-            let mut from = None; let mut to = None; let mut fee = None;
+            let mut from = None;
+            let mut to = None;
+            let mut fee = None;
             for p in &parts[3..] {
-                if let Some(v) = p.strip_prefix("from:") { from = Some(v.to_string()); }
-                else if let Some(v) = p.strip_prefix("to:") { to = Some(v.to_string()); }
-                else if let Some(v) = p.strip_prefix("fee:") { fee = v.parse().ok(); }
+                if let Some(v) = p.strip_prefix("from:") {
+                    from = Some(v.to_string());
+                } else if let Some(v) = p.strip_prefix("to:") {
+                    to = Some(v.to_string());
+                } else if let Some(v) = p.strip_prefix("fee:") {
+                    fee = v.parse().ok();
+                }
             }
-            Some(NlpCommand::Move { symbol, amount, from: from?, to: to?, fee })
+            Some(NlpCommand::Move {
+                symbol,
+                amount,
+                from: from?,
+                to: to?,
+                fee,
+            })
         }
 
         // PRICE BTC ETH
         "PRICE" | "P" => {
             let syms: Vec<String> = parts[1..].iter().map(|s| s.to_uppercase()).collect();
-            if syms.is_empty() { Some(NlpCommand::Price(vec![])) } else { Some(NlpCommand::Price(syms)) }
+            if syms.is_empty() {
+                Some(NlpCommand::Price(vec![]))
+            } else {
+                Some(NlpCommand::Price(syms))
+            }
         }
 
         // ALERT BTC < 60000 [cooldown:12h]
-        "ALERT" if parts.len() >= 3 => {
-            Some(NlpCommand::AlertAdd(parts[1..].join(" ")))
-        }
+        "ALERT" if parts.len() >= 3 => Some(NlpCommand::AlertAdd(parts[1..].join(" "))),
 
         // CONVERT 100 BYN BTC
         "CONVERT" | "C" if parts.len() == 4 => {
@@ -85,7 +121,13 @@ mod tests {
     fn parse_add() {
         let r = parse("ADD BTC 0.001 60 cold:ledger").unwrap();
         assert!(matches!(r, NlpCommand::AddPurchase { .. }));
-        if let NlpCommand::AddPurchase { symbol, amount, cost_usd, wallet } = r {
+        if let NlpCommand::AddPurchase {
+            symbol,
+            amount,
+            cost_usd,
+            wallet,
+        } = r
+        {
             assert_eq!(symbol, "BTC");
             assert_eq!(amount, 0.001);
             assert_eq!(cost_usd, 60.0);

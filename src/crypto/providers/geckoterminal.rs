@@ -1,8 +1,8 @@
-use std::time::Duration;
+use crate::error::{BotError, Result};
 use moka::future::Cache;
 use reqwest::Client;
 use serde::Deserialize;
-use crate::error::{BotError, Result};
+use std::time::Duration;
 
 pub struct GeckoTerminalProvider {
     http: Client,
@@ -38,7 +38,8 @@ impl GeckoTerminalProvider {
             return Ok(cached);
         }
 
-        let resp = self.http
+        let resp = self
+            .http
             .get("https://api.geckoterminal.com/api/v2/search/pools")
             .query(&[("query", symbol)])
             .send()
@@ -72,7 +73,10 @@ impl GeckoTerminalProvider {
     }
 
     pub async fn get_history(&self, symbol: &str, days: &str) -> Result<Vec<(i64, f64)>> {
-        let pool = self.find_pool(symbol).await?.ok_or_else(|| BotError::SymbolNotFound(symbol.to_string()))?;
+        let pool = self
+            .find_pool(symbol)
+            .await?
+            .ok_or_else(|| BotError::SymbolNotFound(symbol.to_string()))?;
 
         // Determine timeframe based on days
         let timeframe = match days {
@@ -88,16 +92,24 @@ impl GeckoTerminalProvider {
         // GeckoTerminal limits points, so for 7d with 'hour' it might require pagination, but we just request max limit
         let limit = match timeframe {
             "hour" => {
-                let d = days.strip_suffix('d').unwrap_or("1").parse::<u32>().unwrap_or(1);
+                let d = days
+                    .strip_suffix('d')
+                    .unwrap_or("1")
+                    .parse::<u32>()
+                    .unwrap_or(1);
                 (d * 24).min(1000).to_string()
             }
             "day" => days.strip_suffix('d').unwrap_or("30").to_string(),
             _ => "100".to_string(),
         };
 
-        let url = format!("https://api.geckoterminal.com/api/v2/networks/{}/pools/{}/ohlcv/{}", pool.network, pool.address, timeframe);
-        
-        let resp = self.http
+        let url = format!(
+            "https://api.geckoterminal.com/api/v2/networks/{}/pools/{}/ohlcv/{}",
+            pool.network, pool.address, timeframe
+        );
+
+        let resp = self
+            .http
             .get(&url)
             .query(&[("limit", limit)])
             .send()
@@ -107,8 +119,11 @@ impl GeckoTerminalProvider {
             return Err(BotError::RateLimited);
         }
 
-        let body: GtOhlcvResp = resp.json().await.map_err(|e| BotError::CmcApi(e.to_string()))?;
-        
+        let body: GtOhlcvResp = resp
+            .json()
+            .await
+            .map_err(|e| BotError::CmcApi(e.to_string()))?;
+
         // GeckoTerminal OHLCV format: [timestamp, open, high, low, close, volume]
         let mut points = Vec::new();
         if let Some(meta) = body.data {
@@ -125,7 +140,7 @@ impl GeckoTerminalProvider {
 
         // GT returns newest to oldest, we need oldest to newest for charts
         points.reverse();
-        
+
         if points.is_empty() {
             return Err(BotError::SymbolNotFound(symbol.to_string()));
         }

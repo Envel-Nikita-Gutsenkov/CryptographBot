@@ -1,14 +1,16 @@
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
-use tracing::{error, info};
+use tracing::info;
 
 use crate::{crypto::CryptoClient, db::SqliteStore};
 
-/// Background worker that every 30 minutes fetches market intelligence data
+/// Background worker that fetches market intelligence data
 /// (BTC network metrics, derivatives sentiment, stablecoin flows)
-/// and caches an AI-generated summary in SQLite.
+/// and caches the raw formatted metrics in SQLite. No AI here: the data is
+/// deterministic numbers, so an LLM pass would only add cost and noise.
+/// Runs on a 60-min interval (30 min in volatile markets).
 pub async fn run_market_intel_worker(sqlite: Arc<SqliteStore>, crypto: Arc<CryptoClient>) {
-    info!("Starting Market Intelligence Worker (30-min interval)");
+    info!("Starting Market Intelligence Worker (60-min interval)");
 
     loop {
         info!("Market Intel Worker: collecting data...");
@@ -25,74 +27,28 @@ pub async fn run_market_intel_worker(sqlite: Arc<SqliteStore>, crypto: Arc<Crypt
         let derivatives_str = format_derivatives(&onchain_metrics);
 
         if !network_str.is_empty() {
-            let prompt = format!(
-                "You are a Bitcoin network health analyst. Based on the following real-time network metrics, \
-                write a concise 2-3 sentence summary describing the current state of the Bitcoin network. \
-                Focus on: network security (hashrate), transaction demand (mempool), \
-                and miner fee pressure. Use relative terms, no raw numbers in final output. \
-                CRITICAL: Today's date context matters — be accurate about current conditions.\n\n\
-                BTC NETWORK DATA:\n{network_str}"
-            );
-
-            match crate::crypto::ai::pipeline::summarize_news_single_pass(
-                "BTC_NETWORK",
-                "",
-                &prompt,
-                None,
-                sqlite.clone(),
-            )
-            .await
-            {
-                Ok(summary) => {
-                    sqlite.save_macro_summary("BTC_NETWORK", &summary).await;
-                    info!("Saved BTC network summary to cache.");
-                }
-                Err(e) => {
-                    error!("Market intel worker BTC network AI failed: {}", e);
-                    // Save raw data as fallback
-                    sqlite.save_macro_summary("BTC_NETWORK", &network_str).await;
-                }
-            }
+            // Raw metrics are already human-readable and deterministic —
+            // no LLM needed. The AI prompt used to paraphrase this.
+            sqlite.save_macro_summary("BTC_NETWORK", &network_str).await;
+            info!("Saved BTC network metrics to cache.");
         }
 
         if !derivatives_str.is_empty() {
-            let prompt = format!(
-                "You are a crypto derivatives market analyst. Based on the following futures market data, \
-                write a concise 2-3 sentence summary of current market sentiment and risk levels. \
-                Describe: are traders leveraged long or short, is OI elevated (systemic liquidation risk), \
-                and what does funding rate suggest about market bias. Use relative language only.\n\n\
-                DERIVATIVES DATA:\n{derivatives_str}"
-            );
-
-            match crate::crypto::ai::pipeline::summarize_news_single_pass(
-                "DERIVATIVES",
-                "",
-                &prompt,
-                None,
-                sqlite.clone(),
-            )
-            .await
-            {
-                Ok(summary) => {
-                    sqlite.save_macro_summary("DERIVATIVES", &summary).await;
-                    info!("Saved derivatives summary to cache.");
-                }
-                Err(e) => {
-                    error!("Market intel worker derivatives AI failed: {}", e);
-                    sqlite.save_macro_summary("DERIVATIVES", &derivatives_str).await;
-                }
-            }
+            sqlite
+                .save_macro_summary("DERIVATIVES", &derivatives_str)
+                .await;
+            info!("Saved derivatives metrics to cache.");
         }
 
         // Adaptive sleep interval based on market volatility (checking major pairs BTC and ETH)
-        let mut sleep_secs = 20 * 60; // default: 20 minutes
+        let mut sleep_secs = 60 * 60; // default: 60 minutes
         if let Ok(quotes) = crypto.get_quotes(&["BTC", "ETH"]).await {
             let is_volatile = quotes.iter().any(|q| {
                 q.change_1h.unwrap_or(0.0).abs() >= 2.0 || q.change_24h.unwrap_or(0.0).abs() >= 5.0
             });
             if is_volatile {
-                sleep_secs = 10 * 60; // 10 minutes in volatile markets
-                info!("Market Intel Worker: Volatile market detected! Sleep interval shortened to 10 minutes.");
+                sleep_secs = 30 * 60; // 30 minutes in volatile markets
+                info!("Market Intel Worker: Volatile market detected! Sleep interval shortened to 30 minutes.");
             }
         }
         sleep(Duration::from_secs(sleep_secs)).await;

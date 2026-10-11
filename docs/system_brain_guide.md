@@ -19,14 +19,14 @@ Cryptograph runs several asynchronous background loops powered by `tokio::spawn`
   5. Saves the final verified news summary to the SQLite database `news_summaries` table.
 
 ### B. Macro Intelligence Worker (`macro_worker.rs`)
-* **Trigger Interval:** Every **6 hours**.
+* **Trigger Interval:** Every **12 hours** (4 hours in volatile markets).
 * **What it does:**
   1. Gathers macroeconomic markers (Federal Reserve interest rates, US inflation/CPI trends, global liquidity markers).
   2. Pulls macro-focused news snippets from general financial news sources.
   3. Synthesizes a high-level macro context using an AI summarization model.
   4. Writes the result to the SQLite `macro_cache` table.
 
-### C. Alert Evaluation Engine (`engine.rs`)
+### C. Alert Evaluation Engine (`src/alerts/engine.rs`)
 * **Trigger Interval:** Every **5 minutes**.
 * **What it does:**
   1. Reads all active user alerts (price triggers, volatility metrics).
@@ -34,13 +34,42 @@ Cryptograph runs several asynchronous background loops powered by `tokio::spawn`
   3. Checks condition matches (e.g., `BTC > $100,000` or `ETH drops 5% in 1h`).
   4. If a match occurs, triggers an alert notification and generates an AI-powered commentary describing why the price moved (using cached news).
 
-### D. Provider Health Worker (`health_worker.rs`)
-* **Trigger Interval:** Every **15 minutes**.
+### D. AI Market Watcher (`src/crypto/ai/watcher.rs`)
+* **Trigger Interval:** Every **4 hours** (2 hours in volatile markets).
 * **What it does:**
-  1. Pings the configured LLM API endpoints (Groq, OpenRouter, Gemini, Mistral).
-  2. Measures latency and successful ping rates.
-  3. Updates the local SQLite `model_health` table.
-  4. Demotes down/unhealthy providers and shifts them to the end of the backup pool to prevent system-wide outages.
+  1. Scans portfolio symbols, watchlist, and major assets.
+  2. Feeds volatility, news summaries, and macro context into the MoE pipeline.
+  3. Sends a Telegram push notification **only** when a significant market shift is detected (severity levels with cooldowns).
+
+### E. Market Intel Worker (`src/crypto/ai/market_intel_worker.rs`)
+* **Trigger Interval:** Every **60 minutes** (30 minutes in volatile markets).
+* **What it does:**
+  1. Gathers on-chain and derivatives intel: BTC network health, funding rates, open interest, L/S ratio, stablecoin flows.
+  2. Stores the **raw human-readable metrics** in SQLite for AI snapshots. No LLM is involved — the payload is a fixed set of deterministic numbers (hashrate, funding %, OI), so an AI summarization pass would only add cost and hallucination risk.
+
+### F. Proactive Goal Worker (`src/crypto/ai/proactive_worker.rs`)
+* **Trigger Interval:** Scheduled goal scans (per user).
+* **What it does:**
+  1. Builds a market snapshot (prices, changes, ATH distance, Fear & Greed, trajectory from `price_history`).
+  2. Runs the double-checked pipeline (2 generators → reviewer → critic) with anti-FOMO and no-stale guardrails.
+  3. Alerts only when a goal condition genuinely fits; `propose` actions require user confirmation.
+
+### G. Model Ranker (`src/crypto/ai/model_rank.rs`)
+* **Trigger Interval:** Every **24 hours** (one lazy batch).
+* **What it does:**
+  1. Refreshes the model registry (models.json + OpenRouter free models).
+  2. Benchmarks **at most 3 models** per run (30-day cooldown, fingerprint-change detection, underperformer re-tests) with a non-OpenRouter judge.
+  3. Writes role assignments to `models.openrouter.json`, merged into the pools by `load_all_models()`.
+
+### H. Price Prefetch & Watchdog
+* **Price prefetch:** every **10 minutes**, supervised, warms the SQLite price cache.
+* **Watchdog** (`src/watchdog.rs`): process-level guardian — RSS memory cap and hang detection via a heartbeat pinger; supervised workers auto-restart on panic.
+
+### Model health (no separate worker)
+Provider health is derived from **real traffic**: a successful call marks the
+provider `OK`; a failure marks it `COOLDOWN` (1h). `call_single_model` skips
+providers whose status is `DEAD`/`COOLDOWN`. The `model_health` table is cleared
+on boot so stale marks never survive a deploy.
 
 ---
 

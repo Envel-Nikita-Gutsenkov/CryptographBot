@@ -1,12 +1,14 @@
 use std::sync::Arc;
-use teloxide::{dispatching::dialogue::InMemStorage, payloads::SendMessageSetters, prelude::*, types::ParseMode};
+use teloxide::{
+    dispatching::dialogue::InMemStorage, payloads::SendMessageSetters, prelude::*, types::ParseMode,
+};
 
 use crate::{
     bot::{keyboards, state::State},
     config::Config,
+    crypto::CryptoClient,
     db::Store,
     models::{AlertCondition, AlertRule, Period},
-    crypto::CryptoClient,
 };
 
 type MyDialogue = Dialogue<State, InMemStorage<State>>;
@@ -18,23 +20,34 @@ pub async fn handle_alert_step1(
 ) -> anyhow::Result<()> {
     let symbol = msg.text().unwrap_or("").trim().to_uppercase();
     if symbol.is_empty() {
-        bot.send_message(msg.chat.id, "❌ Symbol cannot be empty. Please enter a symbol (e.g. BTC):")
-            .reply_markup(keyboards::cancel_only()).await?;
+        bot.send_message(
+            msg.chat.id,
+            "❌ Symbol cannot be empty. Please enter a symbol (e.g. BTC):",
+        )
+        .reply_markup(keyboards::cancel_only())
+        .await?;
         return Ok(());
     }
 
-    dialogue.update(State::AlertStep2 {
-        symbol: symbol.clone(),
-        condition: AlertCondition::PriceBelow, // Default placeholder, will be chosen next
-    }).await?;
-
-    bot.send_message(msg.chat.id,
-        format!("🔔 *Alert Wizard* \\(Step 2 of 3\\)\n\n\
-                 Symbol: *{}*\n\n\
-                 Select the alert condition type:", symbol))
-        .parse_mode(ParseMode::MarkdownV2)
-        .reply_markup(keyboards::alert_condition_picker())
+    dialogue
+        .update(State::AlertStep2 {
+            symbol: symbol.clone(),
+            condition: AlertCondition::PriceBelow, // Default placeholder, will be chosen next
+        })
         .await?;
+
+    bot.send_message(
+        msg.chat.id,
+        format!(
+            "🔔 *Alert Wizard* \\(Step 2 of 3\\)\n\n\
+                 Symbol: *{}*\n\n\
+                 Select the alert condition type:",
+            symbol
+        ),
+    )
+    .parse_mode(ParseMode::MarkdownV2)
+    .reply_markup(keyboards::alert_condition_picker())
+    .await?;
 
     Ok(())
 }
@@ -44,8 +57,12 @@ pub async fn handle_alert_step2(
     msg: Message,
     _dialogue: MyDialogue,
 ) -> anyhow::Result<()> {
-    bot.send_message(msg.chat.id, "Please select the condition using the inline keyboard buttons.")
-        .reply_markup(keyboards::cancel_only()).await?;
+    bot.send_message(
+        msg.chat.id,
+        "Please select the condition using the inline keyboard buttons.",
+    )
+    .reply_markup(keyboards::cancel_only())
+    .await?;
     Ok(())
 }
 
@@ -60,14 +77,24 @@ pub async fn handle_alert_step3(
     let threshold: f64 = match text.parse() {
         Ok(v) => v,
         Err(_) => {
-            bot.send_message(msg.chat.id, "❌ Invalid number. Please enter a valid decimal number:")
-                .reply_markup(keyboards::cancel_only()).await?;
+            bot.send_message(
+                msg.chat.id,
+                "❌ Invalid number. Please enter a valid decimal number:",
+            )
+            .reply_markup(keyboards::cancel_only())
+            .await?;
             return Ok(());
         }
     };
 
     let state = dialogue.get().await?;
-    if let Some(State::AlertStep3 { symbol, condition, period, .. }) = state {
+    if let Some(State::AlertStep3 {
+        symbol,
+        condition,
+        period,
+        ..
+    }) = state
+    {
         let user_id = msg.chat.id.0 as u64;
         let id = store.write(user_id, |p| {
             let id = p.alloc_alert_id();
@@ -101,13 +128,18 @@ pub async fn handle_alert_step3(
             last_fired_price: None,
         });
 
-        let warning = check_already_triggered_warning(&cmc, &symbol, &condition, threshold, &period).await;
+        let warning =
+            check_already_triggered_warning(&cmc, &symbol, &condition, threshold, &period).await;
 
         dialogue.exit().await?;
 
         bot.send_message(
             msg.chat.id,
-            format!("✅ *Alert \\#{id} created successfully\\!*\n{}{}", crate::format::esc(&desc), warning),
+            format!(
+                "✅ *Alert \\#{id} created successfully\\!*\n{}{}",
+                crate::format::esc(&desc),
+                warning
+            ),
         )
         .parse_mode(ParseMode::MarkdownV2)
         .reply_markup(keyboards::alerts_footer())
@@ -116,7 +148,8 @@ pub async fn handle_alert_step3(
         crate::bot::handlers::portfolio::auto_backup(&bot, &store, user_id).await;
     } else {
         dialogue.exit().await?;
-        bot.send_message(msg.chat.id, "Dialogue state lost. Starting over.").await?;
+        bot.send_message(msg.chat.id, "Dialogue state lost. Starting over.")
+            .await?;
     }
 
     Ok(())
@@ -144,14 +177,18 @@ pub async fn handle_alert_list(
         return Ok(());
     }
 
-    bot.send_message(msg.chat.id, format!("*🔔 Alerts \\({} total\\)*", rules.len()))
-        .parse_mode(ParseMode::MarkdownV2)
-        .await?;
+    bot.send_message(
+        msg.chat.id,
+        format!("*🔔 Alerts \\({} total\\)*", rules.len()),
+    )
+    .parse_mode(ParseMode::MarkdownV2)
+    .await?;
 
     for r in &rules {
         let desc = crate::alerts::fmt_rule(r);
         let status = if r.enabled { "🟢" } else { "⏸" };
-        let last_fired = r.last_fired
+        let last_fired = r
+            .last_fired
             .map(|t| t.format("%m/%d %H:%M UTC").to_string())
             .unwrap_or_else(|| "never".to_string());
         let text = format!(
@@ -197,11 +234,14 @@ pub async fn handle_alert_delete(
     if removed {
         // Delete the alert message, fall back to edit on failure
         if bot.delete_message(msg.chat.id, msg.id).await.is_err() {
-            let _ = bot.edit_message_text(msg.chat.id, msg.id, format!("🗑 Alert #{id} deleted")).await;
+            let _ = bot
+                .edit_message_text(msg.chat.id, msg.id, format!("🗑 Alert #{id} deleted"))
+                .await;
         }
         crate::bot::handlers::portfolio::auto_backup(&bot, &store, user_id).await;
     } else {
-        bot.send_message(msg.chat.id, format!("❌ Alert #{id} not found")).await?;
+        bot.send_message(msg.chat.id, format!("❌ Alert #{id} not found"))
+            .await?;
     }
     Ok(())
 }
@@ -233,13 +273,21 @@ pub async fn handle_alert_toggle(
                 .edit_message_reply_markup(msg.chat.id, msg.id)
                 .reply_markup(keyboards::alert_actions(id, enabled))
                 .await;
-            let label = if enabled { "▶️ Alert #" } else { "⏸ Alert #" };
-            bot.send_message(msg.chat.id, format!("{label}{id} {}", if enabled { "enabled" } else { "paused" }))
-                .await?;
+            let label = if enabled {
+                "▶️ Alert #"
+            } else {
+                "⏸ Alert #"
+            };
+            bot.send_message(
+                msg.chat.id,
+                format!("{label}{id} {}", if enabled { "enabled" } else { "paused" }),
+            )
+            .await?;
             crate::bot::handlers::portfolio::auto_backup(&bot, &store, user_id).await;
         }
         None => {
-            bot.send_message(msg.chat.id, format!("❌ Alert #{id} not found")).await?;
+            bot.send_message(msg.chat.id, format!("❌ Alert #{id} not found"))
+                .await?;
         }
     }
     Ok(())
@@ -296,15 +344,29 @@ pub async fn handle_alert_add_cmd(
             });
 
             let desc = crate::alerts::fmt_rule(&AlertRule {
-                id, symbol: symbol.clone(), condition: cond.clone(), threshold, period: period.clone(), cooldown_hours: cooldown,
-                last_fired: None, consecutive_triggers: 0, enabled: true, label: None, last_fired_price: None,
+                id,
+                symbol: symbol.clone(),
+                condition: cond.clone(),
+                threshold,
+                period: period.clone(),
+                cooldown_hours: cooldown,
+                last_fired: None,
+                consecutive_triggers: 0,
+                enabled: true,
+                label: None,
+                last_fired_price: None,
             });
 
-            let warning = check_already_triggered_warning(&cmc, &symbol, &cond, threshold, &period).await;
+            let warning =
+                check_already_triggered_warning(&cmc, &symbol, &cond, threshold, &period).await;
 
             bot.send_message(
                 msg.chat.id,
-                format!("✅ *Alert \\#{id} created*\n{}{}", crate::format::esc(&desc), warning),
+                format!(
+                    "✅ *Alert \\#{id} created*\n{}{}",
+                    crate::format::esc(&desc),
+                    warning
+                ),
             )
             .parse_mode(ParseMode::MarkdownV2)
             .reply_markup(keyboards::alerts_footer())
@@ -318,9 +380,7 @@ pub async fn handle_alert_add_cmd(
 
 /// Flexible parser for alert expressions.
 /// Formats: `SYM op VALUE`, `SYM PERIOD op VALUE%`, `SYM PERIOD op VALUE`
-fn parse_alert_expr(
-    s: &str,
-) -> Option<(String, AlertCondition, f64, Option<Period>, u64)> {
+fn parse_alert_expr(s: &str) -> Option<(String, AlertCondition, f64, Option<Period>, u64)> {
     let parts: Vec<&str> = s.split_whitespace().collect();
 
     let mut symbol = String::new();
@@ -410,7 +470,10 @@ async fn check_already_triggered_warning(
     period: &Option<Period>,
 ) -> String {
     if let Ok(quotes) = cmc.get_quotes(&[symbol]).await {
-        if let Some(quote) = quotes.iter().find(|q| q.symbol.eq_ignore_ascii_case(symbol)) {
+        if let Some(quote) = quotes
+            .iter()
+            .find(|q| q.symbol.eq_ignore_ascii_case(symbol))
+        {
             let temp_rule = AlertRule {
                 id: 0,
                 symbol: symbol.to_string(),
@@ -470,7 +533,8 @@ pub async fn handle_alert_reset(
         p.next_alert_id = def.next_alert_id;
     });
 
-    bot.send_message(msg.chat.id, "✅ Default alerts restored successfully!").await?;
+    bot.send_message(msg.chat.id, "✅ Default alerts restored successfully!")
+        .await?;
     crate::bot::handlers::portfolio::auto_backup(&bot, &store, user_id).await;
     Ok(())
 }

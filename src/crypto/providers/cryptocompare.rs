@@ -35,22 +35,32 @@ impl CryptoCompareProvider {
     }
 
     pub async fn get_quotes(&self, symbols: &[&str]) -> Result<Vec<super::RawQuote>> {
-        if symbols.is_empty() { return Ok(Vec::new()); }
+        if symbols.is_empty() {
+            return Ok(Vec::new());
+        }
         let fsyms = symbols.join(",");
-        let url = format!("https://min-api.cryptocompare.com/data/pricemultifull?fsyms={}&tsyms=USD", fsyms);
+        let url = format!(
+            "https://min-api.cryptocompare.com/data/pricemultifull?fsyms={}&tsyms=USD",
+            fsyms
+        );
         let mut req = self.http.get(&url);
-        if !self.api_key.is_empty() && !self.api_key.starts_with("xxxxxx") && self.api_key != "dummy" {
+        if !self.api_key.is_empty()
+            && !self.api_key.starts_with("xxxxxx")
+            && self.api_key != "dummy"
+        {
             req = req.header("authorization", format!("Apikey {}", self.api_key));
         }
         let resp: serde_json::Value = req.send().await?.json().await?;
-        
+
         let mut quotes = Vec::new();
         if let Some(raw) = resp.get("RAW").and_then(|r| r.as_object()) {
             for (sym, data) in raw {
                 if let Some(usd) = data.get("USD") {
                     let price_usd = usd.get("PRICE").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    if price_usd <= 0.0 { continue; }
-                    
+                    if price_usd <= 0.0 {
+                        continue;
+                    }
+
                     quotes.push(super::RawQuote {
                         symbol: sym.to_uppercase(),
                         name: sym.to_uppercase(), // CryptoCompare doesn't give full name here
@@ -80,7 +90,8 @@ impl CryptoCompareProvider {
 
     /// Fetches the latest 3-5 news articles for the given symbol to keep the context optimized.
     pub async fn get_news(&self, symbol: &str) -> Result<Vec<NewsArticle>> {
-        if self.api_key.is_empty() || self.api_key.starts_with("xxxxxx") || self.api_key == "dummy" {
+        if self.api_key.is_empty() || self.api_key.starts_with("xxxxxx") || self.api_key == "dummy"
+        {
             return Ok(Vec::new());
         }
 
@@ -94,7 +105,10 @@ impl CryptoCompareProvider {
             )
         };
 
-        let req = self.http.get(&url).header("authorization", format!("Apikey {}", self.api_key));
+        let req = self
+            .http
+            .get(&url)
+            .header("authorization", format!("Apikey {}", self.api_key));
 
         let resp: serde_json::Value = req.send().await?.json().await?;
 
@@ -111,14 +125,19 @@ impl CryptoCompareProvider {
                 let title = item["title"].as_str().unwrap_or("").to_string();
                 let source = item["source"].as_str().unwrap_or("").to_string();
                 let mut body = item["body"].as_str().unwrap_or("").to_string();
-                
+
                 // Truncate body if it's too long, safely handling multi-byte UTF-8 characters
                 if body.chars().count() > 800 {
                     body = body.chars().take(797).collect::<String>();
                     body.push_str("...");
                 }
-                
-                articles.push(NewsArticle { title, source, body, url: String::new() });
+
+                articles.push(NewsArticle {
+                    title,
+                    source,
+                    body,
+                    url: String::new(),
+                });
             }
         }
 
@@ -127,7 +146,9 @@ impl CryptoCompareProvider {
 
     pub async fn get_history(&self, symbol: &str, days: u32) -> Result<Vec<(i64, f64)>> {
         if self.api_key.is_empty() || self.api_key.starts_with("xxxxxx") {
-            return Err(crate::error::BotError::CmcApi("CryptoCompare API key missing".into()));
+            return Err(crate::error::BotError::CmcApi(
+                "CryptoCompare API key missing".into(),
+            ));
         }
 
         let (endpoint, limit) = match days {
@@ -143,19 +164,32 @@ impl CryptoCompareProvider {
             limit
         );
 
-        let req = self.http.get(&url).header("authorization", format!("Apikey {}", self.api_key));
+        let req = self
+            .http
+            .get(&url)
+            .header("authorization", format!("Apikey {}", self.api_key));
         let resp: serde_json::Value = req.send().await?.json().await?;
 
         if let Some(err) = resp.get("Response").and_then(|r| r.as_str()) {
             if err == "Error" {
-                return Err(crate::error::BotError::CmcApi(format!("CryptoCompare API error: {:?}", resp.get("Message"))));
+                return Err(crate::error::BotError::CmcApi(format!(
+                    "CryptoCompare API error: {:?}",
+                    resp.get("Message")
+                )));
             }
         }
 
         let mut history = Vec::new();
-        if let Some(data) = resp.get("Data").and_then(|d| d.get("Data")).and_then(|d| d.as_array()) {
+        if let Some(data) = resp
+            .get("Data")
+            .and_then(|d| d.get("Data"))
+            .and_then(|d| d.as_array())
+        {
             for item in data {
-                if let (Some(time), Some(close)) = (item.get("time").and_then(|t| t.as_i64()), item.get("close").and_then(|c| c.as_f64())) {
+                if let (Some(time), Some(close)) = (
+                    item.get("time").and_then(|t| t.as_i64()),
+                    item.get("close").and_then(|c| c.as_f64()),
+                ) {
                     // CryptoCompare returns time in seconds, typically we use milliseconds for charting
                     history.push((time * 1000, close));
                 }
@@ -163,7 +197,9 @@ impl CryptoCompareProvider {
         }
 
         if history.is_empty() {
-            return Err(crate::error::BotError::CmcApi("Empty history from CryptoCompare".into()));
+            return Err(crate::error::BotError::CmcApi(
+                "Empty history from CryptoCompare".into(),
+            ));
         }
 
         Ok(history)

@@ -1,10 +1,9 @@
-use std::sync::Arc;
 use std::sync::atomic::AtomicU8;
+use std::sync::Arc;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SearchQuery {
-
     pub query: String,
     pub max_results: usize,
 }

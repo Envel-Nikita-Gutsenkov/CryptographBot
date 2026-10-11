@@ -1,16 +1,22 @@
 pub mod client;
 pub mod deepseek_budget;
+pub mod indicators;
 pub mod macro_worker;
 pub mod market_intel_worker;
+pub mod market_memory;
 pub mod metrics;
+pub mod model_rank;
 pub mod news;
 pub mod news_worker;
+pub mod openrouter_budget;
 pub mod pipeline;
 pub mod pools;
 pub mod proactive_worker;
 pub mod prompts;
 pub mod providers;
+pub mod scenario;
 pub mod search;
+pub mod strategy;
 pub mod watcher;
 
 pub use client::GeminiClient;

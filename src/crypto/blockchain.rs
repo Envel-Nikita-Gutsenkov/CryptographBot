@@ -45,9 +45,7 @@ impl BlockchainClient {
             Network::Bsc => self.eth_balance(address, "BNB").await, // EVM-compatible
             Network::Generic(n) => {
                 warn!("No balance checker for network {n}");
-                Err(BotError::BlockchainApi(format!(
-                    "Unsupported network: {n}"
-                )))
+                Err(BotError::BlockchainApi(format!("Unsupported network: {n}")))
             }
         }
     }
@@ -76,7 +74,7 @@ impl BlockchainClient {
 
     async fn eth_balance(&self, address: &str, native_symbol: &str) -> Result<f64> {
         debug!("EVM Multichain balance for {}: {}", native_symbol, address);
-        
+
         if self.ankr_rpc_url.is_empty() {
             warn!("Ankr RPC URL not configured, EVM balances won't work.");
             return Ok(0.0);
@@ -102,22 +100,33 @@ impl BlockchainClient {
             .await?;
 
         if resp.get("error").is_some() {
-            return Err(BotError::BlockchainApi(format!("Ankr error: {:?}", resp["error"])));
+            return Err(BotError::BlockchainApi(format!(
+                "Ankr error: {:?}",
+                resp["error"]
+            )));
         }
 
         // We want to return the "equivalent" amount of the native token (ETH or BNB)
         // so that when the bot multiplies it by the native token's price, it perfectly matches the total USD value.
         let mut total_usd = 0.0;
         let mut native_price = 0.0;
-        
+
         if let Some(assets) = resp["result"]["assets"].as_array() {
             for asset in assets {
-                let bal_usd = asset["balanceUsd"].as_str().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
+                let bal_usd = asset["balanceUsd"]
+                    .as_str()
+                    .unwrap_or("0")
+                    .parse::<f64>()
+                    .unwrap_or(0.0);
                 total_usd += bal_usd;
-                
+
                 let sym = asset["tokenSymbol"].as_str().unwrap_or("");
                 if sym == native_symbol {
-                    let price = asset["tokenPrice"].as_str().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
+                    let price = asset["tokenPrice"]
+                        .as_str()
+                        .unwrap_or("0")
+                        .parse::<f64>()
+                        .unwrap_or(0.0);
                     if price > 0.0 {
                         native_price = price;
                     }
@@ -153,8 +162,14 @@ impl BlockchainClient {
             "params": [address]
         });
 
-        let resp: serde_json::Value =
-            self.http.post(&url).json(&body).send().await?.json().await?;
+        let resp: serde_json::Value = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await?
+            .json()
+            .await?;
 
         let lamports = resp["result"]["value"]
             .as_u64()

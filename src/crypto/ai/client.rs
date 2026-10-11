@@ -1,21 +1,25 @@
-use std::sync::OnceLock;
 use chrono::Utc;
 use moka::future::Cache;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use super::pipeline::call_with_critic;
-use super::prompts::{build_full_prompt, build_multi_prompt, build_watcher_prompt, parse_watcher_response, WatcherResult, WatcherSeverity};
-
+use super::prompts::{
+    build_full_prompt, build_multi_prompt, build_watcher_prompt, parse_watcher_response,
+    WatcherResult, WatcherSeverity,
+};
 
 static ANALYSIS_CACHE: OnceLock<Cache<String, String>> = OnceLock::new();
 
 fn get_analysis_cache() -> Cache<String, String> {
-    ANALYSIS_CACHE.get_or_init(|| {
-        Cache::builder()
-            .time_to_live(Duration::from_secs(3600)) // 1 hour TTL
-            .max_capacity(500)
-            .build()
-    }).clone()
+    ANALYSIS_CACHE
+        .get_or_init(|| {
+            Cache::builder()
+                .time_to_live(Duration::from_secs(3600)) // 1 hour TTL
+                .max_capacity(500)
+                .build()
+        })
+        .clone()
 }
 
 pub struct GeminiClient {
@@ -24,7 +28,9 @@ pub struct GeminiClient {
 
 impl GeminiClient {
     pub fn new(api_key: impl Into<String>) -> Self {
-        Self { api_key: api_key.into() }
+        Self {
+            api_key: api_key.into(),
+        }
     }
 
     pub fn is_configured(&self) -> bool {
@@ -48,24 +54,44 @@ impl GeminiClient {
         db: std::sync::Arc<crate::db::sqlite::SqliteStore>,
     ) -> anyhow::Result<String> {
         let cache = get_analysis_cache();
-        let cache_key = format!("single_{}_{}_{}_{}", symbol, preferred_model.unwrap_or(""), portfolio_context.is_some(), news_summary.len());
+        let cache_key = format!(
+            "single_{}_{}_{}_{}",
+            symbol,
+            preferred_model.unwrap_or(""),
+            portfolio_context.is_some(),
+            news_summary.len()
+        );
 
         if let Some(text) = cache.get(&cache_key).await {
             return Ok(text);
         }
 
         let portfolio_section = portfolio_context
-            .map(|ctx| format!("\n\nUser Portfolio Allocation (reference only, no exact amounts):\n{ctx}"))
+            .map(|ctx| {
+                format!("\n\nUser Portfolio Allocation (reference only, no exact amounts):\n{ctx}")
+            })
             .unwrap_or_default();
 
         let prompt = build_full_prompt(symbol, market_data, news_summary, &portfolio_section);
 
-        if std::env::var("DEBUG_PROMPT").map(|v| v == "true" || v == "1").unwrap_or(false) {
+        if std::env::var("DEBUG_PROMPT")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false)
+        {
             println!("\n=== [DEBUG] PROMPT ===\n{prompt}\n=====================\n");
         }
 
         let client = Self::build_http_client(45)?; // Extended timeout for critic loop
-        let text = call_with_critic(&client, &self.api_key, &prompt, preferred_model, false, true, db).await?;
+        let text = call_with_critic(
+            &client,
+            &self.api_key,
+            &prompt,
+            preferred_model,
+            false,
+            true,
+            db,
+        )
+        .await?;
 
         cache.insert(cache_key, text.clone()).await;
         Ok(text)
@@ -87,31 +113,51 @@ impl GeminiClient {
 
         let cache = get_analysis_cache();
         let cache_key = format!("multi_{}_{}", Utc::now().format("%Y%m%d_%H"), prompt.len());
-        
+
         if let Some(text) = cache.get(&cache_key).await {
             return Ok(text);
         }
 
-        let client = Self::build_http_client(45)?; 
-        let text = call_with_critic(&client, &self.api_key, &prompt, preferred_model, false, true, db).await?;
+        let client = Self::build_http_client(45)?;
+        let text = call_with_critic(
+            &client,
+            &self.api_key,
+            &prompt,
+            preferred_model,
+            false,
+            true,
+            db,
+        )
+        .await?;
 
         cache.insert(cache_key, text.clone()).await;
         Ok(text)
     }
 
-    pub async fn watcher_analysis(&self, symbols_data: &str, previous_analysis: Option<&str>, db: std::sync::Arc<crate::db::sqlite::SqliteStore>) -> anyhow::Result<WatcherResult> {
+    pub async fn watcher_analysis(
+        &self,
+        symbols_data: &str,
+        previous_analysis: Option<&str>,
+        user_context: Option<&str>,
+        db: std::sync::Arc<crate::db::sqlite::SqliteStore>,
+    ) -> anyhow::Result<WatcherResult> {
         let current_date = Utc::now().format("%Y-%m-%d").to_string();
-        let prompt = build_watcher_prompt(symbols_data, previous_analysis, &current_date);
-        let client = Self::build_http_client(45)?; 
-        
-        let raw = match call_with_critic(&client, &self.api_key, &prompt, None, true, false, db).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("Watcher analysis critic loop failed: {e}");
-                return Ok(WatcherResult { severity: WatcherSeverity::None, headline: String::new(), detail: String::new() });
-            }
-        };
-        
+        let prompt = build_watcher_prompt(symbols_data, previous_analysis, &current_date, user_context);
+        let client = Self::build_http_client(45)?;
+
+        let raw =
+            match call_with_critic(&client, &self.api_key, &prompt, None, true, false, db).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!("Watcher analysis critic loop failed: {e}");
+                    return Ok(WatcherResult {
+                        severity: WatcherSeverity::None,
+                        headline: String::new(),
+                        detail: String::new(),
+                    });
+                }
+            };
+
         Ok(parse_watcher_response(&raw))
     }
 
@@ -150,7 +196,8 @@ impl GeminiClient {
             volume_24h = quote.volume_24h,
         );
         let client = Self::build_http_client(20)?;
-        let text = call_with_critic(&client, &self.api_key, &prompt, None, false, false, db).await?;
+        let text =
+            call_with_critic(&client, &self.api_key, &prompt, None, false, false, db).await?;
         Ok(text.trim().to_string())
     }
 }

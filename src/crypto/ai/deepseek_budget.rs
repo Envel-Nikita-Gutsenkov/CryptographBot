@@ -12,7 +12,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 ///   unavailable, the RAM copy stays authoritative for the rest of the month
 ///   (and is re-synced from the DB on the next month / restart if DB recovers).
 pub struct DeepSeekBudget {
-    db: Mutex<Option<Arc<crate::db::sqlite::SqliteStore>>>,
+    /// Weak handle so short-lived CLI processes can drop the store (and its
+    /// SQLite worker thread) and exit cleanly; the long-running bot keeps the
+    /// Arc alive, so upgrades always succeed there.
+    db: Mutex<Option<std::sync::Weak<crate::db::sqlite::SqliteStore>>>,
     /// Current calendar month as YYYYMM (counters below belong to it).
     month: AtomicI64,
     tokens_used: AtomicI64,
@@ -37,7 +40,7 @@ impl DeepSeekBudget {
     /// Wire up the SQLite handle at startup. If `None` is passed (no DB available),
     /// the budget is enforced purely in RAM.
     pub fn init(&self, db: Option<Arc<crate::db::sqlite::SqliteStore>>) {
-        *self.db.lock().unwrap() = db;
+        *self.db.lock().unwrap() = db.map(|d| Arc::downgrade(&d));
         self.refresh();
     }
 
@@ -61,15 +64,17 @@ impl DeepSeekBudget {
             return;
         }
         let db = self.db.lock().unwrap().clone();
-        if let Some(store) = db {
-            match store.get_monthly_usage("deepseek") {
-                Ok((t, r)) => {
-                    self.tokens_used.store(t, Ordering::SeqCst);
-                    self.requests_used.store(r, Ordering::SeqCst);
-                }
-                Err(e) => {
-                    tracing::warn!("DeepSeek budget: DB read failed, keeping RAM copy: {}", e);
-                    self.db_failed.store(true, Ordering::SeqCst);
+        if let Some(weak) = db {
+            if let Some(store) = weak.upgrade() {
+                match store.get_monthly_usage("deepseek") {
+                    Ok((t, r)) => {
+                        self.tokens_used.store(t, Ordering::SeqCst);
+                        self.requests_used.store(r, Ordering::SeqCst);
+                    }
+                    Err(e) => {
+                        tracing::warn!("DeepSeek budget: DB read failed, keeping RAM copy: {}", e);
+                        self.db_failed.store(true, Ordering::SeqCst);
+                    }
                 }
             }
         }
@@ -86,7 +91,7 @@ impl DeepSeekBudget {
         std::env::var("DEEPSEEK_MONTHLY_REQ_BUDGET")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(150)
+            .unwrap_or(500)
     }
 
     /// Atomically consume one request slot and verify the estimated token cost fits
@@ -128,13 +133,15 @@ impl DeepSeekBudget {
             return;
         }
         let db = self.db.lock().unwrap().clone();
-        if let Some(store) = db {
-            if let Err(e) = store.add_monthly_usage("deepseek", t) {
-                tracing::warn!(
-                    "DeepSeek budget: DB write failed, RAM copy stays authoritative: {}",
-                    e
-                );
-                self.db_failed.store(true, Ordering::SeqCst);
+        if let Some(weak) = db {
+            if let Some(store) = weak.upgrade() {
+                if let Err(e) = store.add_monthly_usage("deepseek", t) {
+                    tracing::warn!(
+                        "DeepSeek budget: DB write failed, RAM copy stays authoritative: {}",
+                        e
+                    );
+                    self.db_failed.store(true, Ordering::SeqCst);
+                }
             }
         }
     }
@@ -145,8 +152,10 @@ impl DeepSeekBudget {
             return;
         }
         let db = self.db.lock().unwrap().clone();
-        if let Some(store) = db {
-            let _ = store.record_paid_usage(model, tokens.max(1));
+        if let Some(weak) = db {
+            if let Some(store) = weak.upgrade() {
+                let _ = store.record_paid_usage(model, tokens.max(1));
+            }
         }
     }
 }

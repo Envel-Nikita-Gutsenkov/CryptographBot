@@ -48,8 +48,6 @@ pub enum PaidCurrency {
     Other(String),
 }
 
-
-
 impl std::str::FromStr for PaidCurrency {
     type Err = std::convert::Infallible;
     fn from_str(s: &str) -> Result<Self, Self::Err> {

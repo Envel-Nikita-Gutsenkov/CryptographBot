@@ -32,6 +32,11 @@ pub struct Goal {
     pub active: bool,
     /// Last time this goal triggered a proactive alert (cooldown tracker).
     pub last_alert_at: Option<DateTime<Utc>>,
+    /// Last time the user explicitly declined an AI proposal to deactivate this
+    /// goal ("keep active"). Used to suppress re-proposing the same goal for a
+    /// longer period than the normal alert cooldown.
+    #[serde(default)]
+    pub last_declined_at: Option<DateTime<Utc>>,
     /// How many alerts have fired for this goal.
     pub alert_count: u32,
     /// Marked done by the user or by the AI when the condition is met.

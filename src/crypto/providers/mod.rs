@@ -13,7 +13,6 @@ pub mod dexscreener;
 pub mod geckoterminal;
 pub mod mempool;
 pub mod onchain;
-pub mod pyth;
 pub mod rss;
 pub mod yfinance;
 /// Unified quote type returned by all providers.

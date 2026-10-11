@@ -39,11 +39,8 @@ pub struct ModelInfo {
 }
 
 pub fn available_models() -> Vec<ModelInfo> {
-    let file_content = std::fs::read_to_string("models.json").unwrap_or_default();
-    let models_file: crate::crypto::ai::pools::ModelsFile = serde_json::from_str(&file_content)
-        .unwrap_or_else(|_| crate::crypto::ai::pools::ModelsFile { models: vec![] });
-    models_file
-        .models
+    let models = crate::crypto::ai::pools::load_all_models();
+    models
         .into_iter()
         .map(|m| {
             let provider = std::str::FromStr::from_str(&m.provider).unwrap_or(Provider::Gemini);
@@ -125,32 +122,71 @@ pub async fn call_single_model(
         ));
     }
 
-    let result = match info.provider {
-        Provider::Gemini => {
-            let body = serde_json::json!({
-                "contents": [{"parts": [{"text": prompt}]}]
-            });
-            call_gemini_model(client, gemini_key, info.id.as_str(), &body).await
+    let started = std::time::Instant::now();
+    let mut attempts = 0;
+    let result = loop {
+        attempts += 1;
+        let res = match info.provider {
+            Provider::Gemini => {
+                let body = serde_json::json!({
+                    "contents": [{"parts": [{"text": prompt}]}]
+                });
+                call_gemini_model(client, gemini_key, info.id.as_str(), &body).await
+            }
+            Provider::Groq => call_groq_model(client, info.id.as_str(), prompt).await,
+            Provider::Mistral => call_mistral_model(client, info.id.as_str(), prompt).await,
+            Provider::Nvidia => call_nvidia_model(client, info.id.as_str(), prompt).await,
+            Provider::OpenRouter => call_openrouter_raw(client, info.id.as_str(), prompt).await,
+            Provider::Cohere => call_cohere_model(client, info.id.as_str(), prompt).await,
+            Provider::Cerebras => call_cerebras_model(client, info.id.as_str(), prompt).await,
+            Provider::HuggingFace => call_huggingface_model(client, info.id.as_str(), prompt).await,
+            Provider::Cloudflare => call_cloudflare_model(client, info.id.as_str(), prompt).await,
+            Provider::DeepSeek => call_deepseek_model(info.id.as_str(), prompt).await,
+        };
+        match &res {
+            Err(e) if attempts < 3 => {
+                let err_s = e.to_string();
+                // Transient failures only: timeouts, 5xx, and 429 rate limits.
+                // Anything else (auth, 4xx, bad payload) fails immediately.
+                let transient = err_s.contains("timed out")
+                    || err_s.contains("502")
+                    || err_s.contains("503")
+                    || err_s.contains("504")
+                    || err_s.contains("429")
+                    || err_s.contains("413")
+                    || err_s.contains("rate limit")
+                    || err_s.contains("too many requests");
+                if transient {
+                    // Exponential backoff: 500ms, 1s, 2s — bounded so a spike
+                    // costs at most ~3.5s of latency instead of panicking.
+                    let backoff_ms = 500u64 * (1u64 << (attempts - 1));
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                    continue;
+                }
+            }
+            _ => {}
         }
-        Provider::Groq => call_groq_model(client, info.id.as_str(), prompt).await,
-        Provider::Mistral => call_mistral_model(client, info.id.as_str(), prompt).await,
-        Provider::Nvidia => call_nvidia_model(client, info.id.as_str(), prompt).await,
-        Provider::OpenRouter => call_openrouter_model(client, info.id.as_str(), prompt).await,
-        Provider::Cohere => call_cohere_model(client, info.id.as_str(), prompt).await,
-        Provider::Cerebras => call_cerebras_model(client, info.id.as_str(), prompt).await,
-        Provider::HuggingFace => call_huggingface_model(client, info.id.as_str(), prompt).await,
-        Provider::Cloudflare => call_cloudflare_model(client, info.id.as_str(), prompt).await,
-        Provider::DeepSeek => call_deepseek_model(info.id.as_str(), prompt).await,
+        break res;
     };
+    let latency_ms = started.elapsed().as_millis() as i64;
+
+    // Production ok/err/latency feed model_stats (quality=0 — benchmarks are the
+    // only quality source). Best-effort: a stats write must never break a call.
+    let provider_str = format!("{:?}", info.provider);
+    if let Some(store) = &db {
+        let ok = result.is_ok();
+        let _ = store.record_model_stats(&provider_str, &info.id, latency_ms, ok, 0.0);
+    }
 
     match result {
         Ok(res) => {
+            let cleaned = clean_model_output(&res);
             crate::crypto::ai::metrics::record_success(&provider_id);
             // Real success → mark healthy (clears any stale ban).
             if let Some(store) = &db {
                 store.update_model_health(&provider_id, "OK", None);
             }
-            Ok(res)
+            Ok(cleaned)
         }
         Err(e) => {
             tracing::warn!(
@@ -160,9 +196,31 @@ pub async fn call_single_model(
                 e
             );
             crate::crypto::ai::metrics::record_error(&provider_id);
-            crate::crypto::ai::pools::ban_provider_model(&info.provider, info.id.as_str());
+            // Permanent failures (auth/4xx) bench the model for 1h in-memory so
+            // dead models stop being retried every 60s. Transient ones (timeout,
+            // 5xx, 429, Cohere 422) get NO ban: the model is fine, just busy —
+            // banning it would let background workers knock working models out
+            // of the pool for interactive /ask calls.
+            let err_s = e.to_string();
+            let transient = err_s.contains("timed out")
+                || err_s.contains("502")
+                || err_s.contains("503")
+                || err_s.contains("504")
+                || err_s.contains("429")
+                || err_s.contains("422")
+                || err_s.contains("413")
+                || err_s.contains("rate limit")
+                || err_s.contains("too many requests");
+            if !transient {
+                crate::crypto::ai::pools::ban_provider_model(
+                    &info.provider,
+                    info.id.as_str(),
+                    3600,
+                );
+            }
             // Real failure → temporarily bench the model (1h COOLDOWN in DB,
-            // 60s in-memory circuit breaker). Health comes from real traffic only.
+            // 1h in-memory circuit breaker for permanent errors only). Health
+            // comes from real traffic only.
             if let Some(store) = &db {
                 store.update_model_health(&provider_id, "COOLDOWN", Some(e.to_string()));
             }
@@ -170,6 +228,119 @@ pub async fn call_single_model(
         }
     }
 }
+
+/// Last-resort fallback used when the whole model pool is dead/skipped (rate
+/// limits, quota exhaustion, circuit breakers). Tries several independent
+/// providers in order — Cohere, Groq, OpenRouter, then Gemini — so a single
+/// provider outage (e.g. Gemini quota) can't hard-fail the pipeline.
+/// Returns (provider_label, text) on first success.
+pub async fn call_last_resort(
+    client: &reqwest::Client,
+    gemini_key: &str,
+    prompt: &str,
+) -> anyhow::Result<(String, String)> {
+    // Each provider is independent and bounded by a short timeout so a hanging
+    // provider (e.g. Gemini 2.5-flash) can't stall the whole fallback.
+    async fn try_provider<F, Fut>(label: &str, fut: F) -> Option<(String, String)>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<String>>,
+    {
+        match tokio::time::timeout(std::time::Duration::from_secs(20), fut()).await {
+            Ok(Ok(res)) => Some((label.to_string(), res)),
+            Ok(Err(e)) => {
+                tracing::warn!("Last-resort {} failed: {}", label, e);
+                None
+            }
+            Err(_) => {
+                tracing::warn!("Last-resort {} timed out after 20s", label);
+                None
+            }
+        }
+    }
+
+    // Cohere (most reliable free tier in our pool).
+    if let Some(r) = try_provider("command-a-reasoning", || {
+        call_cohere_model(client, "command-a-reasoning-08-2025", prompt)
+    })
+    .await
+    {
+        return Ok(r);
+    }
+    if let Some(r) = try_provider("command-a-plus", || {
+        call_cohere_model(client, "command-a-plus-05-2026", prompt)
+    })
+    .await
+    {
+        return Ok(r);
+    }
+    // Groq.
+    if let Some(r) = try_provider("gpt-oss-120b", || {
+        call_groq_model(client, "openai/gpt-oss-120b", prompt)
+    })
+    .await
+    {
+        return Ok(r);
+    }
+    if let Some(r) = try_provider("qwen3.8-27b", || {
+        call_groq_model(client, "qwen/qwen3.8-27b", prompt)
+    })
+    .await
+    {
+        return Ok(r);
+    }
+    if let Some(r) = try_provider("gpt-oss-20b", || {
+        call_groq_model(client, "openai/gpt-oss-20b", prompt)
+    })
+    .await
+    {
+        return Ok(r);
+    }
+    // Cloudflare Workers AI.
+    if let Some(r) = try_provider("llama-4-scout-cf", || {
+        call_cloudflare_model(client, "@cf/meta/llama-4-scout-17b-16e-instruct", prompt)
+    })
+    .await
+    {
+        return Ok(r);
+    }
+    if let Some(r) = try_provider("qwen3-30b-cf", || {
+        call_cloudflare_model(client, "@cf/qwen/qwen3-30b-a3b-fp8", prompt)
+    })
+    .await
+    {
+        return Ok(r);
+    }
+    // OpenRouter free tier (budgeted internally).
+    if let Some(r) = try_provider("glm-5.2:free", || {
+        call_openrouter_raw(client, "z-ai/glm-5.2:free", prompt)
+    })
+    .await
+    {
+        return Ok(r);
+    }
+    if let Some(r) = try_provider("nemotron-3-super:free", || {
+        call_openrouter_raw(client, "nvidia/nemotron-3-super-120b-a12b:free", prompt)
+    })
+    .await
+    {
+        return Ok(r);
+    }
+    // Gemini last (free tier quota is easily exhausted).
+    let fallback_body = serde_json::json!({
+        "contents": [{"parts": [{"text": prompt}]}]
+    });
+    if let Some(r) = try_provider("gemini-2.5-flash", || {
+        call_gemini_model(client, gemini_key, "gemini-2.5-flash", &fallback_body)
+    })
+    .await
+    {
+        return Ok(r);
+    }
+
+    Err(anyhow::anyhow!("All last-resort providers failed"))
+}
+
 pub async fn call_gemini_model(
     client: &reqwest::Client,
     api_key: &str,
@@ -180,7 +351,6 @@ pub async fn call_gemini_model(
         "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
         model_id, api_key
     );
-
     let resp = client.post(&url).json(body).send().await?;
 
     if resp.status().is_success() {
@@ -305,7 +475,9 @@ async fn call_nvidia_model(
         .ok_or_else(|| anyhow::anyhow!("Failed to parse Nvidia response for {model}"))
 }
 
-async fn call_openrouter_model(
+/// Budgeted OpenRouter call (daily 300-request cap). Public so the model
+/// ranker can benchmark free models through the exact same path as production.
+pub(crate) async fn call_openrouter_raw(
     client: &reqwest::Client,
     model: &str,
     prompt: &str,
@@ -314,6 +486,20 @@ async fn call_openrouter_model(
     if key.is_empty() {
         return Err(anyhow::anyhow!("OPENROUTER_API_KEY not configured"));
     }
+
+    // Serialize OpenRouter calls so budget check + settle are race-free (hard
+    // daily cap — the free tier allows 300 requests/day on the shared key).
+    static CALL_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let _guard = CALL_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+
+    let budget = super::openrouter_budget::OpenRouterBudget::instance();
+    budget
+        .reserve()
+        .map_err(|e| anyhow::anyhow!("OpenRouter budget: {}", e))?;
+
     let body = serde_json::json!({
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -338,6 +524,14 @@ async fn call_openrouter_model(
         ));
     }
     let json = resp.json::<serde_json::Value>().await?;
+
+    // Commit actual usage (prefer API-reported totals).
+    let used = json["usage"]["total_tokens"]
+        .as_i64()
+        .unwrap_or_else(|| (prompt.len() as i64 / 4).max(1));
+    budget.settle(used.max(1));
+    budget.record_daily(model, used.max(1));
+
     json["choices"][0]["message"]["content"]
         .as_str()
         .map(|s| s.to_string())
@@ -483,6 +677,61 @@ fn truncate_error_body(body: &str) -> String {
     }
 }
 
+pub fn clean_model_output(raw: &str) -> String {
+    let mut text = raw.to_string();
+
+    // Strip <think>...</think> (case-insensitive search)
+    loop {
+        let lower = text.to_lowercase();
+        if let Some(start) = lower.find("<think>") {
+            if let Some(end) = lower[start..].find("</think>") {
+                let full_end = start + end + "</think>".len();
+                text.replace_range(start..full_end, "");
+            } else {
+                // Unclosed think tag (e.g. max tokens hit during reasoning)
+                text.truncate(start);
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    // Strip [THINK]...[/THINK]
+    loop {
+        let lower = text.to_lowercase();
+        if let Some(start) = lower.find("[think]") {
+            if let Some(end) = lower[start..].find("[/think]") {
+                let full_end = start + end + "[/think]".len();
+                text.replace_range(start..full_end, "");
+            } else {
+                text.truncate(start);
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    // Strip <reasoning>...</reasoning>
+    loop {
+        let lower = text.to_lowercase();
+        if let Some(start) = lower.find("<reasoning>") {
+            if let Some(end) = lower[start..].find("</reasoning>") {
+                let full_end = start + end + "</reasoning>".len();
+                text.replace_range(start..full_end, "");
+            } else {
+                text.truncate(start);
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    text.trim().to_string()
+}
+
 async fn call_cloudflare_model(
     client: &reqwest::Client,
     model: &str,
@@ -498,6 +747,7 @@ async fn call_cloudflare_model(
     let body = serde_json::json!({
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 8192,
     });
     let url = format!(
         "https://api.cloudflare.com/client/v4/accounts/{}/ai/v1/chat/completions",

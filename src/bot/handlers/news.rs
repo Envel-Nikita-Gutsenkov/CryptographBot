@@ -1,6 +1,6 @@
+use crate::{config::Config, crypto::ai::fetch_news_for_symbol};
 use std::sync::Arc;
 use teloxide::{prelude::*, types::ParseMode};
-use crate::{config::Config, crypto::ai::fetch_news_for_symbol};
 
 #[allow(deprecated)]
 pub async fn handle_news_cmd(
@@ -32,7 +32,11 @@ pub async fn handle_news_callback(
     _config: Arc<Config>,
 ) -> anyhow::Result<()> {
     let loading = bot.send_message(chat_id, "📰 Fetching news…").await?;
-    let query = if symbol.to_lowercase() == "general" { "general".to_string() } else { symbol.clone() };
+    let query = if symbol.to_lowercase() == "general" {
+        "general".to_string()
+    } else {
+        symbol.clone()
+    };
     let result = fetch_news_for_symbol(&query, &symbol, 5).await;
     let _ = bot.delete_message(chat_id, loading.id).await;
     send_news(&bot, chat_id, &symbol, result).await
@@ -56,17 +60,27 @@ fn parse_news_args(parts: &[&str]) -> (String, usize) {
     }
 }
 
-async fn send_news(bot: &Bot, chat_id: ChatId, symbol: &str, result: anyhow::Result<String>) -> anyhow::Result<()> {
+async fn send_news(
+    bot: &Bot,
+    chat_id: ChatId,
+    symbol: &str,
+    result: anyhow::Result<String>,
+) -> anyhow::Result<()> {
     match result {
         Ok(news) => {
-            let display = if symbol.to_lowercase() == "general" { "General Market" } else { symbol };
+            let display = if symbol.to_lowercase() == "general" {
+                "General Market"
+            } else {
+                symbol
+            };
             let header = format!("📰 *Recent News for {}*:\n\n", crate::format::esc(display));
             bot.send_message(chat_id, format!("{}{}", header, crate::format::esc(&news)))
                 .parse_mode(ParseMode::MarkdownV2)
                 .await?;
         }
         Err(e) => {
-            bot.send_message(chat_id, format!("❌ Failed to fetch news: {e}")).await?;
+            bot.send_message(chat_id, format!("❌ Failed to fetch news: {e}"))
+                .await?;
         }
     }
     Ok(())

@@ -54,7 +54,10 @@ impl Watchdog {
             // Memory check (Linux: /proc/self/status)
             let rss_mb = current_rss_mb();
             if rss_mb > self.max_rss_mb {
-                warn!("WATCHDOG: RSS {}MB > limit {}MB — restarting", rss_mb, self.max_rss_mb);
+                warn!(
+                    "WATCHDOG: RSS {}MB > limit {}MB — restarting",
+                    rss_mb, self.max_rss_mb
+                );
                 std::process::exit(2);
             }
 

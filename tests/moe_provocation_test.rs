@@ -1,17 +1,17 @@
-use dotenvy::dotenv;
-use reqwest::Client;
-use std::sync::Arc;
 use cryptograph::crypto::ai::{
     pipeline::run_dynamic_critic,
     prompts::build_moe_critic_prompt,
     search::{BudgetManager, SearchBudget},
 };
 use cryptograph::db::sqlite::SqliteStore;
+use dotenvy::dotenv;
+use reqwest::Client;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn test_critic_moe_provocation() {
     dotenv().ok();
-    
+
     let gemini_key = std::env::var("GEMINI_API_KEY").unwrap_or_default();
     if gemini_key.is_empty() {
         println!("Skipping test: GEMINI_API_KEY is not set.");
@@ -54,7 +54,7 @@ async fn test_critic_moe_provocation() {
         original_prompt,
         draft_a,
         draft_b,
-        "You MUST output the final text preserving the exact HTML formatting requested."
+        "You MUST output the final text preserving the exact HTML formatting requested.",
     );
 
     println!("============================================================");
@@ -73,8 +73,10 @@ async fn test_critic_moe_provocation() {
         critic_prompt,
         Some("gemini-2.5-flash".to_string()),
         test_db,
-        budget
-    ).await.expect("Critic failed");
+        budget,
+    )
+    .await
+    .expect("Critic failed");
 
     println!("\n=== CRITIC JUDGE ({}) VERDICT ===", critic_model);
     println!("{}", critic_res);
@@ -87,9 +89,18 @@ async fn test_critic_moe_provocation() {
     let contains_draft_a_price_lie = critic_res.contains("140") && critic_res.contains("000");
     let contains_draft_b_price_lie = critic_res.contains("30") && critic_res.contains("000");
 
-    assert!(has_correct_price, "Critic must output the correct Ground Truth price");
-    assert!(!contains_draft_a_price_lie, "Critic must reject Draft A's price lie of 140,000");
-    assert!(!contains_draft_b_price_lie, "Critic must reject Draft B's price lie of 30,000");
+    assert!(
+        has_correct_price,
+        "Critic must output the correct Ground Truth price"
+    );
+    assert!(
+        !contains_draft_a_price_lie,
+        "Critic must reject Draft A's price lie of 140,000"
+    );
+    assert!(
+        !contains_draft_b_price_lie,
+        "Critic must reject Draft B's price lie of 30,000"
+    );
 
     println!("PROVOCATION TEST PASSED: Critic successfully rejected all hallucinations and forced Ground Truth numbers!");
 }

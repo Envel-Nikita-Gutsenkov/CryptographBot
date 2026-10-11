@@ -1,5 +1,5 @@
+use super::types::{SearchBudget, SearchProvider};
 use std::sync::atomic::Ordering;
-use super::types::{SearchProvider, SearchBudget};
 
 pub struct BudgetManager {
     budget: SearchBudget,
@@ -22,7 +22,10 @@ impl BudgetManager {
             if current >= limit {
                 return false;
             }
-            if counter.compare_exchange_weak(current, current + 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            if counter
+                .compare_exchange_weak(current, current + 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
                 return true;
             }
         }
@@ -30,7 +33,6 @@ impl BudgetManager {
 
     #[allow(dead_code)]
     pub fn remaining(&self, provider: SearchProvider, limit: u8) -> u8 {
-
         let counter = match provider {
             SearchProvider::Tavily => &self.budget.tavily_used,
             SearchProvider::Exa => &self.budget.exa_used,

@@ -1,9 +1,9 @@
-use std::time::Duration;
+use super::RawQuote;
+use crate::error::{BotError, Result};
 use moka::future::Cache;
 use reqwest::Client;
 use serde::Deserialize;
-use super::RawQuote;
-use crate::error::{BotError, Result};
+use std::time::Duration;
 
 pub struct CoinbaseProvider {
     http: Client,
@@ -27,7 +27,10 @@ impl CoinbaseProvider {
                 .use_rustls_tls()
                 .build()
                 .unwrap(),
-            cache: Cache::builder().time_to_live(Duration::from_secs(30)).max_capacity(200).build(),
+            cache: Cache::builder()
+                .time_to_live(Duration::from_secs(30))
+                .max_capacity(200)
+                .build(),
         }
     }
 
@@ -60,8 +63,12 @@ impl CoinbaseProvider {
 
     async fn fetch_one(&self, symbol: &str) -> Result<Option<RawQuote>> {
         let pair = format!("{}-USD", symbol);
-        let resp = self.http
-            .get(format!("https://api.exchange.coinbase.com/products/{}/ticker", pair))
+        let resp = self
+            .http
+            .get(format!(
+                "https://api.exchange.coinbase.com/products/{}/ticker",
+                pair
+            ))
             .send()
             .await?;
 
@@ -73,7 +80,10 @@ impl CoinbaseProvider {
             return Ok(None);
         }
 
-        let ticker: CoinbaseTicker = resp.json().await.map_err(|e| BotError::CmcApi(format!("Coinbase parse: {e}")))?;
+        let ticker: CoinbaseTicker = resp
+            .json()
+            .await
+            .map_err(|e| BotError::CmcApi(format!("Coinbase parse: {e}")))?;
         let price_usd: f64 = ticker.price.parse().unwrap_or(0.0);
         let volume_24h: f64 = ticker.volume.parse().unwrap_or(0.0) * price_usd;
 

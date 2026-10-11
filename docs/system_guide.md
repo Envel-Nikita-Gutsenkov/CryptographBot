@@ -3,13 +3,13 @@
 This guide describes the core architecture, data pipelines, database models, and algorithm workflows of Cryptograph. It is designed to help engineers understand exactly how data flows through the application and how various modules interact.
 
 > [!TIP]
-> For a detailed overview of AI model pools, request payloads, and dynamic promotion/routing logic, read the **[AI Pipeline & Model Orchestration Guide](docs/ai_pipeline_guide.md)**.
+> For a detailed overview of AI model pools, request payloads, and dynamic promotion/routing logic, read the **[AI Pipeline & Model Orchestration Guide](ai_pipeline_guide.md)**.
 
 ---
 
 ## 🏗️ 1. High-Level System Architecture
 
-Cryptograph is a zero-trust, memory-first cryptocurrency portfolio tracker Telegram bot built in Rust. It utilizes Teloxide for event-driven bot commands, keeps active user portfolios in RAM, and leverages SQLite for non-sensitive public metadata caching.
+Cryptograph is a zero-trust, memory-first cryptocurrency portfolio tracker Telegram bot built in Rust. It utilizes Teloxide for event-driven bot commands, keeps hot portfolio state in RAM, and persists everything — users, goals, memos, caches, budgets, model telemetry — in a single SQLite database (`crypto.db`, WAL mode) that self-migrates on every boot.
 
 ### Architectural Diagram
 
@@ -19,30 +19,30 @@ graph TD
     Telegram <-->|Long Polling| Bot[Bot Module / Teloxide Handler]
     
     subgraph Storage Layer
-        Bot <-->|Read/Write| RAMStore[In-Memory Decrypted State]
-        RAMStore <-->|Backup / Load| SqliteDB[(SQLite: users table)]
-        RAMStore -.->|AES-256-GCM Backup file| User
+        Bot <-->|Read/Write| RAMStore[In-Memory Portfolio Store]
+        RAMStore <-->|Versioned JSON Backup| SqliteDB[(SQLite: crypto.db)]
+        SqliteDB <-->|Restore on boot| RAMStore
     end
 
     subgraph Price & Market Engine
         Bot <-->|Consensus Rate / Watchdog| CryptoClient[Crypto Client]
-        CryptoClient <-->|Consensus API Queries| PriceProviders[CMC / Binance / Coinbase / Coingecko]
+        CryptoClient <-->|Consensus API Queries| PriceProviders[CMC / Binance / Coinbase / Coingecko / CoinCap ...]
         CryptoClient <-->|FX Conversion| NBRB[NBRB Bank API - Daily BYN]
         CryptoClient -->|Cache Quote Metadata| SqliteDB
     end
 
     subgraph News Aggregation Engine
-        NewsWorker[Background News Worker] -->|Fetch News| CryptoCompare[CryptoCompare News API]
-        NewsWorker -->|Fallback Parallel Fetch| RssProvider[RSS Provider]
-        RssProvider -->|Concurrent GET| RSSFeeds[CoinTelegraph / CoinDesk / Decrypt / Blockworks]
+        NewsWorker[Background News Worker] -->|Fetch News| RssProvider[RSS Provider]
+        RssProvider -->|Concurrent GET| RSSFeeds[CoinTelegraph / CoinDesk / Decrypt / Blockworks / The Block / Bitcoin Magazine]
         NewsWorker -->|Deduplicate & Summarize| MoEPipeline[AI MoE Pipeline]
         MoEPipeline -->|Cache Summary| SqliteDB
     end
 
     subgraph AI Processing Pool
         Bot & NewsWorker <-->|Prompt Dispatch| MoEPipeline
-        MoEPipeline <-->|Primary Pool: Groq / OpenRouter / Nvidia| CheapModels[Llama 3 / Qwen 2.5]
-        MoEPipeline <-->|Last Resort Fallback| Gemini[Gemini 2.5 Flash]
+        MoEPipeline <-->|Provider Pool| Providers[Gemini / Groq / Cerebras / Mistral / Nvidia / Cohere / Cloudflare / OpenRouter / DeepSeek]
+        MoEPipeline <-->|Budgets| Budgets[DeepSeek monthly / OpenRouter daily 300]
+        Ranker[Model Ranker / daily] -->|Registry + Benchmarks| SqliteDB
     end
 ```
 
@@ -100,18 +100,23 @@ sequenceDiagram
 
 ## 💾 3. Database & Storage Architecture
 
-Cryptograph divides data into two sections based on trust and sensitivity:
-1. **Sensitive Portfolio Data**: Saved in-memory during execution, backed up via AES-256-GCM encryption.
-2. **Public Market Metadata & Cache**: SQLite cache database (`cryptograph_cache.db` or `crypto.db`).
+Cryptograph divides data into two layers based on trust and sensitivity:
+1. **User data (portfolios, goals, memos)**: persisted in SQLite (`users` as
+   versioned JSON, `user_goals` / `user_memos` as dedicated tables) and loaded
+   into RAM on boot. Backups are portable plain-JSON files — **not encrypted**.
+2. **Public market metadata & caches**: SQLite tables (`quote_meta_cache`,
+   `price_history`, `news_summaries`, `macro_cache`, `price_milestones`,
+   `model_health`) rebuilt automatically from external APIs if deleted.
 
 ### Schema Definitions
 
 The SQLite database contains the following tables:
 
 #### 1. `users`
-Stores user-encrypted binary portfolios. If the server restarts, this table initializes the RAM store.
+Stores the serialized portfolio JSON per Telegram user. On restart this table
+re-initializes the RAM store.
 - `id` (INTEGER PRIMARY KEY): Telegram User ID.
-- `portfolio_data` (BLOB NOT NULL): Serialized JSON encrypted using AES-256-GCM (random 96-bit nonce, key derived from `MASTER_KEY`).
+- `portfolio_data` (BLOB NOT NULL): Serialized JSON (`BackupEnvelope`).
 - `last_updated` (DATETIME): Timestamp of last backup.
 
 #### 2. `news_summaries`
@@ -130,7 +135,27 @@ Caches non-real-time token metadata (rank, supply, historical percentage changes
 - `updated_at` (DATETIME)
 
 #### 4. `price_history` & `events`
-Logs historical price points (for volatility metrics) and user-triggered audit logs. Kept for a maximum of 30 days (auto-cleaned via `CleanupOldEvents`).
+Logs historical price points (for volatility metrics and the AI trajectory
+memory) and user-triggered audit logs. Kept for a maximum of 30 days
+(auto-cleaned via `CleanupOldEvents`).
+
+#### 5. `user_memos` / `user_goals` / `proactive_cache`
+Standing AI memory (hard rules), user goals with progress + verdicts, and the
+last proactive scan snapshot. These survive cache wipes and `users` rebuilds.
+
+#### 6. Budget tables — `monthly_usage`, `paid_usage`, `daily_usage`
+Token/request counters for the DeepSeek monthly cap and the OpenRouter daily
+300-request cap, mirrored in RAM by the budget singletons.
+
+#### 7. Model ranking tables — `model_registry`, `model_stats`
+Discovered models (with fingerprints and test state) and per-model daily
+calls/errors/latency/quality. `model_stats.bench_calls` counts only
+benchmark calls, so production traffic cannot dilute judge quality scores.
+
+#### 8. Trading tables (`trading_sim.db` / `trading_live.db`)
+`operator_constraints`, `strategy_allocations`, `trade_lots`, `agent_debates`,
+`trade_executions`, `backtest_runs`, `strategy_lessons`, `engine_configs`,
+`strategy_profiles` — see [Database & Data Models](database.md) §4.
 
 ---
 

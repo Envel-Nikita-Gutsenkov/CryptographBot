@@ -147,6 +147,54 @@ Local search uses context keywords to optimize token usage:
 
 ---
 
+## 🏆 6b. Model Ranking & Lazy Benchmarking (`model_rank.rs`)
+
+Cryptograph continuously discovers and ranks the best **free** models across all
+providers, so the pools self-improve without burning rate limits.
+
+### Discovery
+* `models refresh` upserts hand-configured `models.json` entries plus all
+  **OpenRouter free-tier** models (pricing = 0). The OpenRouter models-list
+  endpoint does **not** consume the 300/day chat-completion budget.
+* New/changed models land in the `model_registry` table with a fingerprint
+  (OpenRouter `updated` field) so unchanged models are never re-tested.
+
+### Lazy benchmarking (rate-limit friendly)
+* At most **3 models per run** (`MAX_BENCH_PER_RUN`), one role each.
+* A **30-day cooldown** (`BENCH_COOLDOWN_DAYS`) skips recently tested models;
+  fingerprint changes and production underperformers (error rate > 30% with
+  ≥ 10 calls) force an early re-test.
+* Benchmarking stops when the OpenRouter budget drops below the reserve
+  (`MIN_OPENROUTER_RESERVE = 20`), so the bench can never exhaust the day's cap.
+* The **judge runs on non-OpenRouter providers** (`gpt-oss-120b` via
+  Groq/Cerebras), so benchmarking never consumes the 300/day OpenRouter budget.
+
+### Scoring & role assignment
+* The judge scores each candidate 0–10 for a role (`main`, `critic`, `news`,
+  `watcher`); `models calibrate` measures the judge's own baseline, which must
+  stay above `JUDGE_MIN_BASELINE = 4.0` before assignments are written.
+* Role thresholds: `main`/`critic` ≥ 6.0, `news` ≥ 5.0, `watcher` ≥ 4.0.
+* Assigned models are written to `models.openrouter.json`, which
+  `load_all_models()` merges into the pools — for the same (alias, provider)
+  the ranked entry wins over `models.json`.
+
+### Statistics
+* `model_stats` records per-model daily calls, errors, latency, and quality.
+* Quality averages over **benchmark calls only** (`bench_calls` column), so
+  production traffic (quality = 0) cannot dilute judge scores.
+* `models stats [days]` prints the per-provider health summary; `models rank`
+  shows the reason each model was picked (new/changed/cooldown/underperforming).
+
+### Budgets (hard caps)
+* **DeepSeek** (`deepseek_budget.rs`): monthly cap (default 3M tokens / 150
+  requests) enforced atomically, mirrored in `monthly_usage`/`paid_usage`.
+* **OpenRouter** (`openrouter_budget.rs`): daily cap (default 300 requests,
+  `OPENROUTER_DAILY_REQ_BUDGET`), enforced under a global call lock and
+  mirrored in `daily_usage`. Both budgets hold a `Weak<SqliteStore>` so CLI
+  processes exit cleanly (the long-running bot keeps the `Arc` alive).
+
+---
+
 ## 💾 6. Database Schema & Resilience
 
 The database layer (`src/db/sqlite.rs`) uses SQLite in Write-Ahead Logging (WAL) mode for fast, concurrent access.
