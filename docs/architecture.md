@@ -24,9 +24,9 @@ graph TD
     Watchdog[Watchdog / RSS + Hang Guard] -->|Supervises| Workers
     subgraph Workers[Supervised Background Workers]
         AlertEngine[Alert Engine / 5 min]
-        Watcher[AI Market Watcher / 6h]
+        Watcher[AI Market Watcher / 4h]
         NewsWorker[News Worker / 2h]
-        MacroWorker[Macro Worker / 6h]
+        MacroWorker[Macro Worker / 12h]
         IntelWorker[Market Intel Worker / 60 min]
         Proactive[Proactive Goal Worker]
         Ranker[Model Ranker / daily]
@@ -71,9 +71,12 @@ graph TD
 - **Consensus quotes**: fetches rates from many independent providers
   (CoinMarketCap, CoinGecko, CoinCap, CryptoCompare, Binance, Bybit, Coinbase,
   CoinPaprika, DefiLlama, DexScreener, GeckoTerminal) and applies outlier
-  exclusion (median) to prevent single-point anomalies.
-- **TTL caching** for real-time prices (60s) and market metrics (5 min) to stay
-  within free-tier rate limits.
+  exclusion (median) to prevent single-point anomalies. Providers without a
+  configured API key (e.g. CryptoCompare) are skipped instead of being called
+  just to fail.
+- **TTL caching** for real-time prices (180s, refreshed out-of-band by the
+  Binance WS stream) and market metrics (5 min) to stay within free-tier rate
+  limits.
 - **BYN/USD conversion** via the Belarus National Bank (NBRB) API, cached daily.
 - **Deduplicated news aggregator**: parallel RSS polling (CoinTelegraph,
   CoinDesk, Decrypt, Blockworks, The Block, Bitcoin Magazine) merged and
@@ -83,7 +86,8 @@ graph TD
   are appended to history (30-day retention). The AI prompt only ever sees
   compact fresh summaries (24h staleness guard); raw articles and summary
   history are available on demand via `news` CLI — no token burn on
-  re-processing raw feeds.
+  re-processing raw feeds. Stored summaries are normalized on write (markdown
+  and emoji stripped): these rows feed AI prompts, never rendered output.
 
 ### 4. Alert & Watchdog System (`src/alerts/`, `src/watchdog.rs`)
 - **Alert engine**: wakes every 5 minutes, evaluates user alert rules against

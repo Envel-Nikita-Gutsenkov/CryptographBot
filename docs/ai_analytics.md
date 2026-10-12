@@ -41,7 +41,7 @@ Located in the `/portfolio` menu. This feature reads the user's **actual portfol
 ## Automated AI Monitoring
 
 ### Background AI Watcher
-Runs automatically every **6 hours** in the background.
+Runs automatically every **4 hours** (2 hours under market volatility) in the background.
 - Scans all user portfolio symbols, watchlist, and major assets.
 - Feeds 7-day volatility (min/max prices) and recent news summaries into the MoE pipeline.
 - Remembers previous analyses to prevent contradictory "360-degree flips" in opinion.

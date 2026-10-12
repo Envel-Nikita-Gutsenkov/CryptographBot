@@ -80,7 +80,7 @@ P&L breakdowns, portfolio allocation donuts, and historical price charts rendere
 Price alerts have cooldowns and quiet hours. The AI watcher and the goal worker decide *whether* to message you, and the goal worker is explicitly instructed to prefer silence over noise.
 
 ### 6. 🧭 Network Efficiency
-Quotes are served from a local cache with real-time refresh by the Binance WS stream; providers are fanned out only on cache misses — dozens of times fewer provider calls than naive per-request polling. Deterministic analytics (7-day min/max, volatility gates, milestone anchors) are computed from local SQLite history — no AI and no network calls where plain math is enough.
+Quotes are served from a local cache (180s TTL) with real-time refresh by the Binance WS stream; providers are fanned out only on cache misses — dozens of times fewer provider calls than naive per-request polling. Providers left without an API key are skipped instead of being called just to fail. Deterministic analytics (7-day min/max, volatility gates, milestone anchors) are computed from local SQLite history — no AI and no network calls where plain math is enough.
 
 ---
 
@@ -138,7 +138,7 @@ Quotes are served from a local cache with real-time refresh by the Binance WS st
 | `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `NVIDIA_API_KEY`, `MISTRAL_API_KEY`, `COHERE_API_KEY`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `HF_API_KEY` | ◻️ | Additional free AI tiers (the more, the more resilient) |
 | `OPENROUTER_API_KEY` | ◻️ | Free-tier model discovery + ranking; hard daily 300-request budget |
 | `DEEPSEEK_API_KEY` | ◻️ | Optional paid last-resort model (budget-capped: 3M tokens / 150 req per month) |
-| `CMC_API_KEY`, `COINGECKO_API_KEY`, `COINCAP_API_KEY`, `CRYPTOCOMPARE_API_KEY` | ◻️ | Market data providers (free tiers are fine) |
+| `CMC_API_KEY`, `COINGECKO_API_KEY`, `COINCAP_API_KEY`, `CRYPTOCOMPARE_API_KEY` | ◻️ | Market data providers (free tiers are fine; a provider without a key is auto-skipped) |
 | `HELIUS_API_KEY`, `ANKR_RPC_URL` | ◻️ | On-chain wallet balances |
 | `TAVILY_API_KEY`, `EXA_API_KEY` | ◻️ | Web search for the AI |
 | `SQLITE_DB` | ◻️ | DB path (default `crypto.db`, `/app/data/crypto.db` in Docker) |

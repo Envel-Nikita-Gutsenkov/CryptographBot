@@ -69,7 +69,7 @@ fast concurrent reads.
 | `users` | `id`, `portfolio_data` (versioned JSON backup), `last_updated` |
 | `events` | Audit log of user-triggered events |
 | `price_history` | Historical price points (symbol, price, timestamp) — the trajectory memory fed into AI snapshots; gained OHLC columns, 90-day retention |
-| `news_summaries` | Latest AI-verified news digest per symbol |
+| `news_summaries` | Latest AI-verified news digest per symbol (markdown/emoji stripped on write) |
 | `news_articles` | Raw articles per symbol, dedup by URL, 7-day retention (on-demand "extended results") |
 | `news_summary_history` | Append-only per-symbol summary history, 30-day retention ("what changed over time") |
 | `quote_meta_cache` | Non-real-time token metadata (rank, supply, 1h/24h/7d/30d/90d changes) |
@@ -79,6 +79,7 @@ fast concurrent reads.
 | `user_memos` | Per-user memos (hard rules the AI must respect) |
 | `user_goals` | Per-user goals with progress, verdicts, and cooldowns |
 | `proactive_cache` | Last proactive scan snapshot + analysis per user |
+| `ask_history` | Recent `/ask` questions and answers per user (used as conversational memory) |
 
 ### Budget & usage tables
 
