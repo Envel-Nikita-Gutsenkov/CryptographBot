@@ -39,12 +39,52 @@ The `/advice` command generates sophisticated market intelligence reports using 
 
 ---
 
+## 2b. Deterministic Forecast & Dip Zones (`/forecast`, `/dip`)
+
+Both commands are pure math over the local daily-close cache plus the intraday
+rows in SQLite: **no AI call, no provider call, no quota**, fully reproducible
+for the same inputs.
+
+- **`/forecast SYMBOL`** — a horizon ladder (`1/3/5/7/14/30/90/180d` for BTC/ETH,
+  shortened for younger alts) built from log-drift with horizon damping, a
+  volatility-scaled ~68% cone, and probabilities of finishing above spot. The
+  damping, drift shrink and cone width are **walk-forward calibrated** against
+  the symbol's own history; the message also reports the model's real
+  out-of-sample direction hit rate, MAPE and cone coverage per horizon.
+- **`/dip SYMBOL`** — support levels below spot taken from SMA50/200, recent
+  lows and the forecast cone, each with a first-passage probability of being
+  touched within 1/3/7/14/30 days (closed-form Brownian running-minimum
+  result), plus the probability of still being below the level at that horizon.
+  The verdict is `BUY` (at/below your average entry and a further dip is
+  unlikely), `SPLIT` (buy part now, the rest at `zone_price`), `WAIT` (not in a
+  zone yet, ladder is reachable) or `NO-BUY` (above your average entry).
+
+Per-zone cooldowns apply to the proactive dip alert (`dip_alert_enabled`,
+`dip_cooldown_hours`, default 168 h), and the alert only fires at/below the
+average entry inside a zone — it is not a price-spam channel.
+
+---
+
 ## 3. High-Fidelity Infographic Charts
 
 Cryptograph generates premium charts inside the chat interface using the native `Plotters` engine without using external charting servers:
 - **`/pnl` (Profit & Loss Timeline)**: A time-series chart mapping investment growth, current valuation, and cumulative profits/losses.
 - **`/distribution` (Asset Allocation)**: A pie chart mapping portfolio weight distribution by USD value.
 - **Top Movers**: Horizontal bar charts comparing 24-hour performance dynamics across the top market cap coins.
+
+---
+
+## 3b. Security Incident Detection
+
+A deterministic scanner (`run_security_scan`) walks the cached news summaries
+and articles every 5 minutes — local SQLite reads only — and classifies
+incidents (hack/breach/exploit/theft/depeg/freeze/phishing, English and
+Russian wording) with brand-level topics (`binance`, `ledger`, `kraken`, …).
+
+Deduplication is **per topic** (`ai_security_seen` map with a 7-day window),
+not a single "last topic" slot, so two incidents alternating in the feed can no
+longer re-send the same alert every scan. The first sighting is delivered
+immediately; repeats stay silent for the cooldown.
 
 ---
 

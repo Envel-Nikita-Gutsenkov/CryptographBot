@@ -48,6 +48,10 @@ WALLET_POLL_MINS=15
 OPENROUTER_DAILY_REQ_BUDGET=300               # hard daily cap for OpenRouter free tier
 MAX_RSS_MB=512                                # watchdog RSS cap
 HANG_TIMEOUT_SECS=300                         # watchdog hang detection
+
+# --- Optional overrides ---
+CRYPTOGRAPH_HISTORY_DIR=data/history          # daily-close CSV cache (Docker image uses /app/history)
+CRYPTOGRAPH_ENABLE_COINCAP=0                  # CoinCap host is dead since 2026; 1 re-enables it
 ```
 
 **Required:** `TELOXIDE_TOKEN`, `ALLOWED_ADMIN_IDS`, `CMC_API_KEY`. Everything

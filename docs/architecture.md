@@ -132,10 +132,20 @@ graph TD
     numbers that needs no interpretation.
   - `watcher` — 4h (2h under volatility) AI market watcher with severity
     levels and cooldowns.
+  - `security_scan` — 5 min deterministic incident detector over the cached
+    news (local SQLite reads only; one AI digest per *new* incident, 7-day
+    per-topic cooldown).
+  - `dip_worker` — daily dip-zone scan; alerts only at/below the average entry
+    inside a zone, 7-day per-symbol/zone cooldown.
   - `proactive_worker` — goal/memo scan with 2 gens → reviewer → critic and
     anti-FOMO / no-stale guardrails.
   - `model_ranker` — daily registry refresh + lazy benchmark batch (see below).
   - `price_prefetch` — 10 min price pre-fetch into SQLite.
+- **Deterministic analytics** (`src/trading/forecast.rs`,
+  `src/trading/dipzones.rs`): the `/forecast` horizon ladder (walk-forward
+  calibrated drift damping + volatility cone) and the `/dip` zone ladder
+  (closed-form first-passage probabilities). Pure functions over the local
+  history — no AI, no network, unit-tested for monotonicity/determinism.
 
 ### 7. Model Ranking System (`src/crypto/ai/model_rank.rs`)
 - **Generalized lazy ranker across all providers**: discovers hand-configured

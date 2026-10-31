@@ -80,7 +80,7 @@ P&L breakdowns, portfolio allocation donuts, and historical price charts rendere
 Price alerts have cooldowns and quiet hours. The AI watcher and the goal worker decide *whether* to message you, and the goal worker is explicitly instructed to prefer silence over noise.
 
 ### 6. 🧭 Network Efficiency
-Quotes are served from a local cache (180s TTL) with real-time refresh by the Binance WS stream; providers are fanned out only on cache misses — dozens of times fewer provider calls than naive per-request polling. Providers left without an API key are skipped instead of being called just to fail. Deterministic analytics (7-day min/max, volatility gates, milestone anchors) are computed from local SQLite history — no AI and no network calls where plain math is enough.
+Quotes are served from a local cache (180s TTL) with real-time refresh by the Binance WS stream; providers are fanned out only on cache misses — dozens of times fewer provider calls than naive per-request polling. Providers left without an API key are skipped instead of being called just to fail. Deterministic analytics (7-day min/max, volatility gates, milestone anchors, the `/forecast` horizon ladder and the whole `/dip` ladder with its first-passage probabilities) are computed from local SQLite history — no AI and no network calls where plain math is enough.
 
 ---
 
@@ -91,6 +91,8 @@ Quotes are served from a local cache (180s TTL) with real-time refresh by the Bi
 * `/top N` — top movers by 24h volume
 * `/convert 100 USD BTC` — converter
 * `/fng` — Fear & Greed Index
+* `/forecast BTC` — deterministic multi-horizon forecast (1/3/5/7/14/30/90/180d) with a 68% cone and live walk-forward accuracy — no AI, no API calls
+* `/dip BTC` — dip zones below spot, first-passage touch probabilities and a BUY / SPLIT / WAIT / NO-BUY verdict derived from your average entry
 
 **Portfolio Management**
 * `/add BTC 0.01 600 hot:binance` — record a purchase
@@ -142,6 +144,8 @@ Quotes are served from a local cache (180s TTL) with real-time refresh by the Bi
 | `HELIUS_API_KEY`, `ANKR_RPC_URL` | ◻️ | On-chain wallet balances |
 | `TAVILY_API_KEY`, `EXA_API_KEY` | ◻️ | Web search for the AI |
 | `SQLITE_DB` | ◻️ | DB path (default `crypto.db`, `/app/data/crypto.db` in Docker) |
+| `CRYPTOGRAPH_HISTORY_DIR` | ◻️ | Directory with the daily-close CSV cache (default `data/history`; the Docker image ships `/app/history`) |
+| `CRYPTOGRAPH_ENABLE_COINCAP` | ◻️ | Set to `1` to re-enable the CoinCap provider (its API host stopped resolving in 2026, so it is skipped by default) |
 
 **The bot works with just a Telegram token + Gemini free key.** Every other key adds reliability, data sources, or features — not a hard requirement. See `.env.example` for the full template.
 
@@ -188,6 +192,8 @@ cargo run -- analyze BTC                 # deep AI analysis in the terminal
 cargo run -- ask demo "your question"    # replay /ask with prompts, web searches, drafts, critic
 cargo run -- goal demo                   # replay a proactive goal scan, stage by stage
 cargo run -- scenario scenarios/euphoria.json "стоит ли докупать?" --fast  # deterministic what-if
+cargo run -- forecast BTC                # horizon ladder + cone + walk-forward accuracy (no AI)
+cargo run -- dip BTC                     # dip zones, touch probabilities, buy verdict (no AI)
 cargo run -- search "новости по ETH"     # inspect only the web-search flow
 cargo run -- models refresh|rank|stats   # lazy model ranking across providers
 cargo run -- trade status                # trading module (sim by default)

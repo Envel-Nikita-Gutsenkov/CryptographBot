@@ -27,6 +27,38 @@ Append `--live` to any command to target the live DB, e.g.
 
 ---
 
+## `/forecast` — Deterministic Horizon Ladder
+
+| Command | Description |
+|---|---|
+| `/forecast SYMBOL` | Point target + ~68% cone + P(above spot) per horizon, with walk-forward hit rate / MAPE / cone coverage |
+
+Ladder: `1/3/5/7/14/30/90/180d` for BTC/ETH, `…60/90d` for SOL/LINK, `…30d`
+for anything else; horizons are also trimmed when the local history is short
+(never beyond a quarter of the observed record). Buttons: **AI Analysis**
+(narrative only — the numbers stay deterministic) and **Refresh**.
+
+```
+/forecast BTC
+```
+
+## `/dip` — Dip Zones & Buy Verdict
+
+| Command | Description |
+|---|---|
+| `/dip SYMBOL` | Zones below spot with touch probabilities + `BUY` / `SPLIT` / `WAIT` / `NO-BUY` |
+
+Zones come from SMA50/200, recent lows and the forecast cone; each carries
+`P(touch within 1/3/7/14/30d)` and `P(close below at horizon)`. The verdict
+also uses your average entry price, so the same report is different for two
+users with different cost bases. Buttons: **AI Analysis** and **Refresh**.
+
+```
+/dip SOL
+```
+
+---
+
 ## `/trade` — Trading Control
 
 | Command | Description |
