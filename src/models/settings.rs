@@ -21,6 +21,41 @@ pub struct UserSettings {
     pub ai_last_watcher_analysis: Option<String>,
     /// Preferred AI answer language: "" = auto (match the user), "en", "ru".
     pub preferred_language: String,
+    /// Canonical security topic (e.g. "binance-breach") of the last security
+    /// alert actually delivered. Lets the watcher notify on the FIRST sighting
+    /// of an incident and then stay quiet about the same incident for days.
+    #[serde(default)]
+    pub ai_last_security_topic: Option<String>,
+    #[serde(default)]
+    pub ai_last_security_notify: Option<DateTime<Utc>>,
+    /// Every security topic already delivered, with its delivery time. A single
+    /// "last topic" slot caused repeated alerts: when two incidents alternated
+    /// in the feed (`binance`, then `theft`, then `binance` again) the same
+    /// breach was re-sent every scan because the *previous* topic differed.
+    /// Topics older than the cooldown window are pruned on write.
+    #[serde(default)]
+    pub ai_security_seen: std::collections::HashMap<String, DateTime<Utc>>,
+    /// Proactive dip-zone watcher. Enabled by default for buy-the-dip users;
+    /// it only fires when the price is at/below the average entry AND inside a
+    /// dip zone, so it is not a general price-spam channel.
+    #[serde(default = "default_true")]
+    pub dip_alert_enabled: bool,
+    /// Per-zone cooldown for the proactive dip alert.
+    #[serde(default = "default_dip_cooldown_hours")]
+    pub dip_cooldown_hours: u64,
+    /// `symbol:zone_key` → last delivery time. A map (not a single slot) so
+    /// alternating symbols/zones cannot re-send the same alert — the exact
+    /// regression that caused the security-alert spam.
+    #[serde(default)]
+    pub dip_seen: std::collections::HashMap<String, DateTime<Utc>>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_dip_cooldown_hours() -> u64 {
+    168
 }
 
 impl Default for UserSettings {
@@ -38,6 +73,12 @@ impl Default for UserSettings {
             ai_multi_assets: vec!["BTC".into(), "ETH".into(), "LINK".into(), "SOL".into()],
             ai_last_watcher_analysis: None,
             preferred_language: String::new(),
+            ai_last_security_topic: None,
+            ai_last_security_notify: None,
+            ai_security_seen: std::collections::HashMap::new(),
+            dip_alert_enabled: true,
+            dip_cooldown_hours: 168,
+            dip_seen: std::collections::HashMap::new(),
         }
     }
 }

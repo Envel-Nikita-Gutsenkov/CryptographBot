@@ -142,7 +142,8 @@ impl GeminiClient {
         db: std::sync::Arc<crate::db::sqlite::SqliteStore>,
     ) -> anyhow::Result<WatcherResult> {
         let current_date = Utc::now().format("%Y-%m-%d").to_string();
-        let prompt = build_watcher_prompt(symbols_data, previous_analysis, &current_date, user_context);
+        let prompt =
+            build_watcher_prompt(symbols_data, previous_analysis, &current_date, user_context);
         let client = Self::build_http_client(45)?;
 
         let raw =
@@ -159,6 +160,103 @@ impl GeminiClient {
             };
 
         Ok(parse_watcher_response(&raw))
+    }
+
+    /// Write ONE readable alert for a batch of security incidents. Kept
+    /// separate from the market prompts so the model only rewrites the supplied
+    /// facts (no invented numbers) and never classifies severity itself.
+    pub async fn security_digest(
+        &self,
+        incidents: &str,
+        language: &str,
+        db: std::sync::Arc<crate::db::sqlite::SqliteStore>,
+    ) -> anyhow::Result<String> {
+        let prompt = format!(
+            "You are a crypto security analyst. Below are newly detected security \
+             incidents from the news feed. Write ONE short Telegram alert.\n\n\
+             Rules:\n\
+             - Start with a single bold headline line (<b>...</b>).\n\
+             - Then 2-4 short bullet lines, each starting with \"• \". Each bullet \
+             says what happened and who is affected.\n\
+             - End with one line starting with \"<b>What to do:</b> \" and a concrete, \
+             cautious action for someone holding crypto.\n\
+             - Use ONLY the facts below. Do NOT invent prices, dates or dollar \
+             amounts that are not in the text. If a detail is missing, omit it.\n\
+             - Plain text with only <b> tags; no markdown, no code blocks.\n\
+             - Keep it under 1200 characters.\n\
+             - Write in {language}.\n\n\
+             INCIDENTS:\n{incidents}"
+        );
+        let client = Self::build_http_client(30)?;
+        let text =
+            call_with_critic(&client, &self.api_key, &prompt, None, false, false, db).await?;
+        Ok(text.trim().to_string())
+    }
+
+    /// Narrate a deterministic forecast table. The numbers are fixed by the
+    /// caller; the model may explain them but must not invent new ones.
+    pub async fn forecast_commentary(
+        &self,
+        symbol: &str,
+        forecast_text: &str,
+        db: std::sync::Arc<crate::db::sqlite::SqliteStore>,
+    ) -> anyhow::Result<String> {
+        let prompt = format!(
+            "You are a crypto analyst. Below is a DETERMINISTIC forecast table for {symbol}, \
+             produced by a calibrated drift/volatility model. Explain it to the user.\n\n\
+             Rules:\n\
+             - Start with one bold headline line (<b>...</b>) of at most 12 words.\n\
+             - Then 3-5 short bullet lines, each starting with \"• \". Cover: what the \
+             trend suggests, the width of the 68% range (uncertainty), and what would \
+             invalidate the view.\n\
+             - End with one line starting with \"<b>Watch:</b> \" naming the levels or \
+             events worth monitoring.\n\
+             - Use ONLY the numbers in the table. Do NOT invent prices, dates, \
+             catalysts or news. If direction accuracy is near 50%, say plainly that \
+             the model has no directional edge and the range matters more.\n\
+             - Never present this as financial advice or a guarantee.\n\
+             - Plain text with only <b> tags; no markdown, no code blocks.\n\
+             - Keep it under 900 characters.\n\n\
+             FORECAST:\n{forecast_text}"
+        );
+        let client = Self::build_http_client(30)?;
+        let text =
+            call_with_critic(&client, &self.api_key, &prompt, None, false, false, db).await?;
+        Ok(text.trim().to_string())
+    }
+
+    /// Narrate a deterministic dip report. The probabilities, levels and the
+    /// verdict are fixed by the caller; the model may explain them but must not
+    /// invent numbers, catalysts or a different recommendation.
+    pub async fn dip_commentary(
+        &self,
+        symbol: &str,
+        report_text: &str,
+        db: std::sync::Arc<crate::db::sqlite::SqliteStore>,
+    ) -> anyhow::Result<String> {
+        let prompt = format!(
+            "You are a crypto analyst. Below is a DETERMINISTIC dip-zone report for {symbol}: \
+             moving-average/recent-low zones, first-passage probabilities of touching each \
+             level, and a rule-based verdict relative to the user's average entry price.\n\n\
+             Rules:\n\
+             - Start with one bold headline line (<b>...</b>) of at most 12 words.\n\
+             - Then 3-5 short bullet lines, each starting with \"• \". Cover: how deep the \
+             nearest zone is, how likely it is to be reached, and what the verdict means for \
+             a buy-the-dip strategy.\n\
+             - End with one line starting with \"<b>Watch:</b> \" naming the levels worth \
+             monitoring.\n\
+             - Use ONLY the numbers in the report. Do NOT invent prices, dates, catalysts or \
+             news. Do NOT overrule the verdict; if the verdict says do not add above the \
+             average, say so plainly.\n\
+             - Never claim a bottom is guaranteed and never present this as financial advice.\n\
+             - Plain text with only <b> tags; no markdown, no code blocks.\n\
+             - Keep it under 900 characters.\n\n\
+             DIP REPORT:\n{report_text}"
+        );
+        let client = Self::build_http_client(30)?;
+        let text =
+            call_with_critic(&client, &self.api_key, &prompt, None, false, false, db).await?;
+        Ok(text.trim().to_string())
     }
 
     #[allow(dead_code)]

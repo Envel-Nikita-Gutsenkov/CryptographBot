@@ -715,6 +715,24 @@ impl CryptoClientInner {
             }
         }
 
+        // 4. On-disk daily cache (`data/history/{SYM}.csv`, shipped with the
+        // repo). Guarantees BTC/ETH/LINK/SOL still have a usable series when
+        // every provider is down or rate-limited — this is what produced
+        // "No provider returned usable history for BTC/SOL" in the chat.
+        if let Some(cached) = crate::trading::history_file::load_history(symbol) {
+            let cutoff = chrono::Utc::now().timestamp_millis() - days as i64 * 86_400_000;
+            let slice: Vec<(i64, f64)> =
+                cached.into_iter().filter(|(ts, _)| *ts >= cutoff).collect();
+            if slice.len() >= 2 {
+                tracing::warn!(
+                    "History for {} served from the on-disk daily cache ({} candles)",
+                    symbol,
+                    slice.len()
+                );
+                return Ok(slice);
+            }
+        }
+
         Err(crate::error::BotError::CmcApi(format!(
             "No provider returned usable history for {}",
             symbol
@@ -924,7 +942,7 @@ impl CryptoClientInner {
                     // Third independent ATH opinion (free, no key): CoinCap's
                     // own daily-history peak — used when the direct ATH fields
                     // (CoinGecko/CoinPaprika) are missing. Same 100x cap.
-                    if quote.ath.is_none() {
+                    if quote.ath.is_none() && CoinCapProvider::is_available() {
                         if let Some(peak) = self.coincap.get_ath(&sym).await {
                             if peak <= current_price * 100.0 && peak >= current_price {
                                 quote.ath = Some(peak);
@@ -1100,6 +1118,10 @@ impl CryptoClientInner {
     }
 
     async fn fetch_from_cc(&self, symbols: &[&str]) -> Option<Vec<RawQuote>> {
+        // api.coincap.io is a dead domain — don't spend a probe on it.
+        if !CoinCapProvider::is_available() {
+            return None;
+        }
         if !self.health.should_probe(CoinCapProvider::NAME) {
             return None;
         }

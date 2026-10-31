@@ -99,6 +99,8 @@ fn build_handler() -> UpdateHandler<anyhow::Error> {
         .branch(case![Command::Patch(a)].endpoint(handle_patch_cmd_ep))
         .branch(case![Command::Path(a)].endpoint(handle_patch_cmd_ep))
         .branch(case![Command::Ask(a)].endpoint(handle_ask_cmd_ep))
+        .branch(case![Command::Forecast(a)].endpoint(handle_forecast_cmd))
+        .branch(case![Command::Dip(a)].endpoint(handle_dip_cmd))
         .branch(case![Command::Memo(a)].endpoint(handle_memo_cmd))
         .branch(case![Command::Goal(a)].endpoint(handle_goal_cmd))
         .branch(case![Command::Plan(a)].endpoint(handle_plan_cmd))
@@ -135,6 +137,14 @@ fn build_handler() -> UpdateHandler<anyhow::Error> {
                 q.data.as_deref().unwrap_or("").starts_with("setting")
             })
             .endpoint(handle_settings_cb),
+        )
+        .branch(
+            dptree::filter(|q: CallbackQuery| q.data.as_deref().unwrap_or("").starts_with("fc:"))
+                .endpoint(handle_forecast_cb),
+        )
+        .branch(
+            dptree::filter(|q: CallbackQuery| q.data.as_deref().unwrap_or("").starts_with("dip:"))
+                .endpoint(handle_dip_cb),
         )
         .branch(dptree::endpoint(handle_callback));
     let documents = Message::filter_document().endpoint(handle_document);
@@ -243,6 +253,8 @@ async fn handle_help(bot: Bot, msg: Message) -> anyhow::Result<()> {
                      • <code>/ai set</code> [SYMS] — Set multi-asset watchlist (e.g. <code>/ai set BTC ETH SOL</code>)\n\
                      • <code>/patch</code> [text] — AI portfolio corrector (e.g. <code>/patch I have 0.1 BTC not 0.5</code>)\n\
                      • <code>/ask [question]</code> — Ask AI about your portfolio + market (e.g. <code>/ask should I buy SOL?</code>)\n\
+                     • <code>/forecast</code> [SYMS] — Deterministic forecast for 1/3/5/7/14/30/90/180 days (e.g. <code>/forecast BTC ETH</code>)\n\
+                     • <code>/dip</code> [SYMS] — Dip zones, P(touch level within 7/14/30/90d) and a buy-the-dip verdict vs your average entry (e.g. <code>/dip BTC</code>)\n\
                      • <code>/memo [text]</code> — AI memory note (e.g. <code>/memo invest 100 USD at a time</code>); <code>/memo list</code> | <code>/memo del N</code>\n\
                      • <code>/goal [text]</code> — Proactive goal; AI alerts you when market conditions fit (e.g. <code>/goal want to spend 400 USD on crypto this month</code>); <code>/goal list</code> | <code>/goal progress N text</code> | <code>/goal done N</code> | <code>/goal del N</code>\n\
                      • <code>/plan</code> — Plan dashboard menu; <code>/plan status</code> | <code>/plan check</code> (ask the AI about your plan now) | <code>/plan ask question</code>\n\
@@ -403,6 +415,29 @@ async fn handle_ai_cmd(
     args: String,
 ) -> anyhow::Result<()> {
     handlers::handle_ai_cmd(bot, msg, store, cmc, config, args).await
+}
+
+async fn handle_forecast_cmd(
+    bot: Bot,
+    msg: Message,
+    store: Arc<Store>,
+    cmc: Arc<CryptoClient>,
+    sqlite: Arc<crate::db::SqliteStore>,
+    config: Arc<Config>,
+    args: String,
+) -> anyhow::Result<()> {
+    handlers::handle_forecast_cmd(bot, msg, store, cmc, sqlite, config, args).await
+}
+async fn handle_dip_cmd(
+    bot: Bot,
+    msg: Message,
+    store: Arc<Store>,
+    cmc: Arc<CryptoClient>,
+    sqlite: Arc<crate::db::SqliteStore>,
+    config: Arc<Config>,
+    args: String,
+) -> anyhow::Result<()> {
+    handlers::handle_dip_cmd(bot, msg, store, cmc, sqlite, config, args).await
 }
 async fn handle_patch_cmd_ep(
     bot: Bot,
@@ -777,6 +812,31 @@ async fn handle_plan_cb(
         _ => {}
     }
     Ok(())
+}
+
+/// Forecast callbacks (`fc:ai:SYM`, `fc:fx:SYM`) — separate from
+/// [`handle_callback`] because the handler needs `sqlite` for the history.
+async fn handle_forecast_cb(
+    bot: Bot,
+    q: CallbackQuery,
+    cmc: Arc<CryptoClient>,
+    config: Arc<Config>,
+    sqlite: Arc<crate::db::SqliteStore>,
+) -> anyhow::Result<()> {
+    handlers::handle_forecast_callback(bot, q, cmc, sqlite, config).await
+}
+
+/// Dip callbacks (`dip:ai:SYM`, `dip:fx:SYM`) — needs `store` (average entry)
+/// and `sqlite` (history), so it cannot live inside [`handle_callback`].
+async fn handle_dip_cb(
+    bot: Bot,
+    q: CallbackQuery,
+    store: Arc<Store>,
+    cmc: Arc<CryptoClient>,
+    config: Arc<Config>,
+    sqlite: Arc<crate::db::SqliteStore>,
+) -> anyhow::Result<()> {
+    handlers::handle_dip_callback(bot, q, store, cmc, sqlite, config).await
 }
 
 async fn handle_callback(
@@ -1292,15 +1352,25 @@ async fn handle_text(
         }
         None => {
             if text.trim().starts_with('/') {
-                bot.send_message(msg.chat.id, "❌ Unknown command or parsing error. Make sure there are no typos (e.g. accidental Cyrillic letters). If you're stuck in a dialog, press /cancel.")
-                    .await?;
+                let cmd = text.trim().split_whitespace().next().unwrap_or("/?");
+                bot.send_message(
+                    msg.chat.id,
+                    format!(
+                        "❓ Unknown command {cmd}.\n\nCheck /help for the list, or just ask in plain \
+                         text (e.g. \"what about ETH?\") — no command needed. If you're stuck in a \
+                         dialog, press /cancel."
+                    ),
+                )
+                .await?;
             } else if let Some(reply) = msg.reply_to_message() {
                 // Plain-text reply to a bot message → treat it as a follow-up
                 // /ask question. The replied message becomes the dialogue
                 // context, so "и че когда откат" on top of the bot's analysis
                 // continues the conversation instead of being silently ignored.
                 let replied_by_bot = reply.from().map(|u| u.is_bot).unwrap_or(false);
-                if replied_by_bot && reply.text().is_some() {
+                // Cover photo/chart messages too: rich answers arrive as an
+                // image with a caption, and replying to one used to be dropped.
+                if replied_by_bot && (reply.text().is_some() || reply.caption().is_some()) {
                     return handlers::handle_ask_cmd(
                         bot,
                         msg.clone(),

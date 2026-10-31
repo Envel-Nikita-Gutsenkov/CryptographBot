@@ -257,7 +257,8 @@ pub fn build_ask_prompt(
          You have full knowledge of their portfolio, current market conditions, and recent news.\n\n\
          IMPORTANT SYSTEM INFO:\n\
          Today's Date: {current_date}\n\
-         Use this date to understand the timeline of recent news and market events.\n\n\
+         Use this date to understand the timeline of recent news and market events.\n\
+         FRESHNESS & UNCERTAINTY RULE: your live web-search results were fetched just now; cached news may be a day old. If the user asks about something very recent (an event, exploit, listing, ruling, price move) and the provided context does not contain it, say plainly that you cannot confirm it from the available data as of {current_date} — do NOT invent details, dates or numbers, and do NOT present training knowledge as breaking news. Prefer the newest dated source and mention its date.\n\n\
          PORTFOLIO:\n{portfolio_context}\n\n\
          CURRENT MARKET DATA:\n{market_data}\n\n\
          {intel_section}\
@@ -398,6 +399,7 @@ pub fn build_proactive_prompt(
         NEVER close or cancel goals unilaterally: you CANNOT mark a goal as stale or canceled. If a goal seems out of reach or the user should reconsider it, choose \"propose\" and let the user decide, or choose \"wait\".\n\
         RULES:\n\
         - Be conservative: only alert when it would genuinely help. Prefer \"wait\" on weak signals. Do not spam.\n\
+        - PROPOSE RARELY: a goal that is simply waiting for a price or an event (e.g. \"notify me when BTC < 65k\") is NORMAL, not outdated. Do NOT propose deactivation for it. Use \"propose\" only when the goal is genuinely contradicted by the user's newer memos/goals, is impossible by construction, or its deadline passed and the user must re-decide. If the user ignored or kept a previous proposal, choose \"wait\".\n\
         - ANTI-FOMO & OVERHEATING GUARDRAIL: If an asset has pumped vertically or surged (>15-20% over 7d/30d), NEVER advise aggressive buying at the top. Warn about pullbacks or suggest waiting for consolidation/correction.\n\
         - LIMIT ORDERS & SAFETY NETS: Limit buy targets set below current prices (e.g. buy dip at $60k when price is $78k) are protective safety nets. NEVER treat them as impossible or irrelevant just because the market is surging; markets are cyclical and mean-revert.\n\
         - EXPIRING GOALS ARE NOT BUY SIGNALS: a goal with expires_at is not a reason to spend into a pump. If the deadline is near and prices are bad, propose extending the goal instead of rushing.\n\

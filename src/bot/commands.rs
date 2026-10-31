@@ -58,6 +58,10 @@ pub enum Command {
     Path(String),
     #[command(description = "Ask AI anything about your portfolio: /ask why is ETH falling?")]
     Ask(String),
+    #[command(description = "Forecast: /forecast BTC | horizons 1/3/5/7/14/30/90/180d")]
+    Forecast(String),
+    #[command(description = "Dip zones & buy-the-dip verdict: /dip BTC")]
+    Dip(String),
     #[command(description = "AI memory notes: /memo text | list | del N")]
     Memo(String),
     #[command(description = "Proactive goals: /goal text | list | del N | done N | resume N")]

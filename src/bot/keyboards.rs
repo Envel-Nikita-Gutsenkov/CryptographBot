@@ -305,6 +305,34 @@ pub fn cancel_only() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new([row1("❌ Cancel", cb::CANCEL)])
 }
 
+/// Actions attached to every forecast message: hand the table to the AI for a
+/// narrative, or rebuild it from the freshest data.
+pub fn forecast_actions(symbol: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new([
+        row2(
+            "🧠 AI Analysis",
+            &format!("fc:ai:{symbol}"),
+            "🔄 Refresh",
+            &format!("fc:fx:{symbol}"),
+        ),
+        row1("🏠 Main Menu", "menu"),
+    ])
+}
+
+/// Actions attached to every dip report: AI narration of the deterministic
+/// ladder, or a rebuild from the freshest data.
+pub fn dip_actions(symbol: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new([
+        row2(
+            "🧠 AI Analysis",
+            &format!("dip:ai:{symbol}"),
+            "🔄 Refresh",
+            &format!("dip:fx:{symbol}"),
+        ),
+        row1("🏠 Main Menu", "menu"),
+    ])
+}
+
 pub fn chart_period_menu(symbol: &str, active_period: &str) -> InlineKeyboardMarkup {
     let p1d = if active_period == "1d" {
         "• 1D •"

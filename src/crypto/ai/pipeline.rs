@@ -81,12 +81,11 @@ pub async fn summarize_news_single_pass(
         Provide the final summary now:"
     );
 
-    let mut map_models: Vec<String> = super::pools::get_available_models(Some("news"));
+    let map_models: Vec<String> = super::pools::get_available_models(Some("news"));
 
-    // Always append gemini-2.5-flash as the last resort fallback
-    if !map_models.contains(&"gemini-2.5-flash".to_string()) {
-        map_models.push("gemini-2.5-flash".to_string());
-    }
+    // Do not append a hardcoded model here: `gemini-2.5-flash` was always
+    // appended and had exhausted its quota, so every news cycle ended with a
+    // guaranteed 429. If the pool is empty the last-resort chain below is used.
 
     if std::env::var("CRYPTOGRAPH_DEBUG_PROMPTS").unwrap_or_default() == "1" {
         println!(
@@ -138,7 +137,16 @@ pub async fn summarize_news_single_pass(
         }
     }
 
-    Err(last_err)
+    // Pool exhausted (common during a rate-limit window) — try the independent
+    // provider chain instead of failing the whole news cycle.
+    tracing::warn!("All news models failed; trying last-resort chain");
+    match super::providers::call_last_resort(&client, &gemini_key, &prompt).await {
+        Ok((_, res)) => Ok(res.trim().to_string()),
+        Err(e) => {
+            tracing::warn!("Last-resort news fallback failed: {e}");
+            Err(last_err)
+        }
+    }
 }
 
 pub async fn call_with_critic(
@@ -160,20 +168,68 @@ pub async fn call_with_critic(
     let search_budget = super::search::SearchBudget::new();
     let budget_mgr = std::sync::Arc::new(super::search::BudgetManager::new(search_budget));
 
+    // The /ask caller wraps this whole function in 150s. Every stage here must
+    // therefore share one deadline instead of each claiming its own 120s — that
+    // mismatch is what produced "Ask pipeline timed out after 180s" while the
+    // last-resort fallback was never even attempted.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(135);
+    let remaining = || {
+        deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .max(std::time::Duration::from_millis(1))
+    };
+
     // 1. Race Dynamic Generators (bounded — a stuck provider must never hang /ask)
-    let (draft_a, draft_b, gen_a, gen_b) = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        race_dynamic_generators(
-            client.clone(),
-            gemini_key.to_string(),
-            prompt.to_string(),
-            preferred_model.map(|s| s.to_string()),
-            db.clone(),
-            budget_mgr.clone(),
-        ),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("Generator race timed out after 120s"))??;
+    let (draft_a, draft_b, gen_a, gen_b) = {
+        let budget = std::cmp::min(remaining(), std::time::Duration::from_secs(75));
+        match tokio::time::timeout(
+            budget,
+            race_dynamic_generators(
+                client.clone(),
+                gemini_key.to_string(),
+                prompt.to_string(),
+                preferred_model.map(|s| s.to_string()),
+                db.clone(),
+                budget_mgr.clone(),
+            ),
+        )
+        .await
+        {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                // The pool did not answer in time. Falling back here (rather
+                // than returning the error) keeps /ask alive: the last-resort
+                // chain usually answers in under 20s.
+                tracing::warn!("Generator race timed out; trying last-resort chain");
+                let lr_budget = std::cmp::min(remaining(), std::time::Duration::from_secs(40));
+                match tokio::time::timeout(
+                    lr_budget,
+                    super::providers::call_last_resort(client, gemini_key, prompt),
+                )
+                .await
+                {
+                    Ok(Ok((label, res))) => {
+                        super::pools::record_successful_model(&label);
+                        (
+                            res.clone(),
+                            String::from("(single fallback draft)"),
+                            label.clone(),
+                            label,
+                        )
+                    }
+                    Ok(Err(e)) => {
+                        return Err(anyhow::anyhow!(
+                            "Generator race timed out and last-resort failed: {e}"
+                        ))
+                    }
+                    Err(_) => {
+                        return Err(anyhow::anyhow!("Generator stage exhausted its time budget"))
+                    }
+                }
+            }
+        }
+    };
 
     // 2. Build Critic Prompt
     let format_instruction = if is_json {
@@ -183,9 +239,11 @@ pub async fn call_with_critic(
     };
     let critic_prompt = build_moe_critic_prompt(prompt, &draft_a, &draft_b, format_instruction);
 
-    // 3. Run Critic Queue (bounded — same hang protection as the generators)
-    let (critic_model, critic_res) = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
+    // 3. Run Critic Queue (bounded by the shared deadline — N critics × 25s
+    //    used to exceed it and take the whole answer down with them)
+    let critic_budget = std::cmp::min(remaining(), std::time::Duration::from_secs(45));
+    let (critic_model, critic_res, critic_ok) = match tokio::time::timeout(
+        critic_budget,
         run_dynamic_critic(
             client.clone(),
             gemini_key.to_string(),
@@ -196,10 +254,21 @@ pub async fn call_with_critic(
         ),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("Critic queue timed out after 120s"))??;
+    {
+        Ok(Ok((m, r))) => (m, r, true),
+        Ok(Err(e)) => {
+            tracing::warn!("Critic queue failed ({e}); using best generator draft");
+            (gen_a.clone(), draft_a.clone(), false)
+        }
+        Err(_) => {
+            tracing::warn!("Critic queue timed out; using best generator draft");
+            (gen_a.clone(), draft_a.clone(), false)
+        }
+    };
 
     if is_json {
-        let clean = super::providers::clean_model_output(&critic_res);
+        let source = if critic_ok { &critic_res } else { &draft_a };
+        let clean = super::providers::clean_model_output(source);
         let start_idx = clean.find('{').unwrap_or(0);
         let end_idx = clean.rfind('}').map(|i| i + 1).unwrap_or(clean.len());
         let clean_json = if start_idx < end_idx {
@@ -213,28 +282,30 @@ pub async fn call_with_critic(
         let mut final_text = String::new();
         let mut critic_succeeded = false;
 
-        if let Some(start_pos) = clean_critic.find("<final_analysis>") {
-            let content_start = start_pos + "<final_analysis>".len();
-            if let Some(end_pos) = clean_critic[content_start..].find("</final_analysis>") {
-                let candidate = clean_critic[content_start..content_start + end_pos].trim();
-                if !candidate.is_empty() && !is_meta_critique(candidate) {
-                    final_text = candidate.to_string();
-                    critic_succeeded = true;
-                }
-            } else {
-                let candidate = clean_critic[content_start..].trim();
-                if !candidate.is_empty() && !is_meta_critique(candidate) {
-                    final_text = candidate.to_string();
-                    critic_succeeded = true;
+        if critic_ok {
+            if let Some(start_pos) = clean_critic.find("<final_analysis>") {
+                let content_start = start_pos + "<final_analysis>".len();
+                if let Some(end_pos) = clean_critic[content_start..].find("</final_analysis>") {
+                    let candidate = clean_critic[content_start..content_start + end_pos].trim();
+                    if !candidate.is_empty() && !is_meta_critique(candidate) {
+                        final_text = candidate.to_string();
+                        critic_succeeded = true;
+                    }
+                } else {
+                    let candidate = clean_critic[content_start..].trim();
+                    if !candidate.is_empty() && !is_meta_critique(candidate) {
+                        final_text = candidate.to_string();
+                        critic_succeeded = true;
+                    }
                 }
             }
-        }
 
-        if !critic_succeeded {
-            let trimmed = clean_critic.trim();
-            if !trimmed.is_empty() && !is_meta_critique(trimmed) {
-                final_text = trimmed.to_string();
-                critic_succeeded = true;
+            if !critic_succeeded {
+                let trimmed = clean_critic.trim();
+                if !trimmed.is_empty() && !is_meta_critique(trimmed) {
+                    final_text = trimmed.to_string();
+                    critic_succeeded = true;
+                }
             }
         }
 

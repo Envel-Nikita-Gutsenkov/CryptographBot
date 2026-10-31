@@ -83,13 +83,25 @@ pub fn parse_constraint(text: &str) -> Option<ParsedConstraint> {
         .find(|(alias, _)| contains_word(&lower, alias))?;
 
     let value = extract_threshold(&lower)?;
-    let buy = contains_stem(&lower, &["купи", "покупай", "покупать", "купить", "bought", "buy"]);
-    let sell = contains_stem(&lower, &["прода", "продавай", "продавать", "продать", "sold", "sell"]);
+    let buy = contains_stem(
+        &lower,
+        &["купи", "покупай", "покупать", "купить", "bought", "buy"],
+    );
+    let sell = contains_stem(
+        &lower,
+        &["прода", "продавай", "продавать", "продать", "sold", "sell"],
+    );
     if !buy && !sell {
         return None;
     }
-    let above = contains_stem(&lower, &["выше", "больше", "дороже", "above", "over", "higher"]);
-    let below = contains_stem(&lower, &["ниже", "меньше", "дешевле", "below", "under", "lower"]);
+    let above = contains_stem(
+        &lower,
+        &["выше", "больше", "дороже", "above", "over", "higher"],
+    );
+    let below = contains_stem(
+        &lower,
+        &["ниже", "меньше", "дешевле", "below", "under", "lower"],
+    );
     if above == below {
         return None; // no clear direction
     }

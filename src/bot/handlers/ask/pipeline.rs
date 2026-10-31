@@ -20,7 +20,10 @@ use super::{
     market::build_market_data,
     news::build_news_context,
     reflect::{needs_reflection, reflect_and_refine},
-    search::{fallback_search_queries, fetch_and_summarize, is_echo_query, plan_web_search},
+    search::{
+        fallback_search_queries, fetch_and_summarize, is_echo_query, is_low_value_query,
+        plan_web_search,
+    },
 };
 
 pub async fn execute_ask_pipeline(
@@ -269,12 +272,13 @@ pub async fn execute_ask_pipeline(
     if crate::crypto::ai::scenario::active_scenario().is_none() {
         let planned = plan_web_search(&client, &config.gemini_api_key, question, &detected).await;
         // Sanity-filter planner output: weak planner models sometimes echo the
-        // user's question verbatim instead of composing an English query.
-        // Non-ASCII (Cyrillic) text and near-verbatim repeats are echoes — drop
-        // them.
+        // user's question verbatim instead of composing an English query, or
+        // emit useless generic searches ("why did BTC fall", "crypto forecast
+        // 2026"). Echoes and low-value queries are dropped; if nothing useful
+        // remains we fall back to the event-oriented composer below.
         let planned: Vec<String> = planned
             .into_iter()
-            .filter(|q| !is_echo_query(q, question))
+            .filter(|q| !is_echo_query(q, question) && !is_low_value_query(q))
             .collect();
         let search_queries: Vec<String> = if !planned.is_empty() {
             planned

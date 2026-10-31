@@ -321,11 +321,14 @@ pub(crate) async fn plan_web_search(
          three SEARCH: lines, one per topic.\n\
          IMPORTANT: write the query in ENGLISH always, even if the user writes in Russian or \
          another language — English sources are the most trustworthy for crypto.\n\
-         NEVER copy the user's question verbatim — reformulate it into a concise keyword query \
-         (e.g. \"BTC price forecast 2026\", not the user's exact wording).\n\
+         NEVER copy the user's question verbatim and NEVER search a question — search for the \
+         ENTITY + EVENT + DATE instead.\n\
+         BAD (never output): \"why did bitcoin fall\", \"crypto forecast 2026\", \"btc price\".\n\
+         GOOD: \"Binance $6.3B hack October 2026 TraderTraitor\", \"Spot BTC ETF net flows week of 2026-10-27\", \
+         \"Solana network outage 2026-10-30\", \"Ledger Safe 5 firmware implant CryptoBilis\".\n\
          If the user mentions specific coins, include their tickers (BTC, ETH, SOL, LINK, ...) \
-         in the query.\n\
-         CRITICAL: include the current year ({} or the exact date) in the query when it is a \n\
+         in the query, but a ticker alone is not enough — add the event, product or metric.\n\
+         CRITICAL: include the current year ({} or the exact date) in the query when it is a \
          \"best/top/review\" type question, so the results are from the current year, not years ago.\n\
          If general knowledge or already-provided market data is enough, output exactly: NO_SEARCH\n\
          User question: \"{}\"",
@@ -461,7 +464,59 @@ pub(crate) fn fallback_search_queries(
         "price"
     };
     let year = chrono::Utc::now().format("%Y");
-    vec![format!("{syms} {topic} {year}")]
+    let date = chrono::Utc::now().format("%Y-%m-%d");
+    // Event-oriented fallbacks. A bare "BTC price forecast 2026" search returns
+    // SEO content farms; asking for the entity + date at least surfaces news.
+    vec![match topic {
+        "news" => format!("{syms} news {date}"),
+        "price forecast" => format!("{syms} price analysis {date}"),
+        "best" => format!("{syms} best {year} comparison review"),
+        _ => format!("{syms} price analysis {date}"),
+    }]
+}
+
+/// True when a planner query is too generic to return useful results: question
+/// phrasing ("why did BTC fall") or a bare "SYM price forecast <year>" with no
+/// event, product or metric in it.
+pub(crate) fn is_low_value_query(query: &str) -> bool {
+    let q = query.trim().to_lowercase();
+    if q.split_whitespace().count() < 2 {
+        return true;
+    }
+    const QUESTION_PHRASES: &[&str] = &[
+        "why did",
+        "why is",
+        "why has",
+        "why are",
+        "what happened",
+        "what caused",
+        "how did",
+        "почему",
+        "что случилось",
+        "что произошло",
+    ];
+    if QUESTION_PHRASES.iter().any(|p| q.starts_with(p)) {
+        return true;
+    }
+    const GENERIC: &[&str] = &[
+        "price",
+        "forecast",
+        "prediction",
+        "news",
+        "crypto",
+        "analysis",
+        "2024",
+        "2025",
+        "2026",
+        "2027",
+    ];
+    let words: Vec<&str> = q.split_whitespace().collect();
+    let specific = words
+        .iter()
+        .filter(|w| !GENERIC.contains(w) && w.chars().any(|c| c.is_ascii_alphabetic()))
+        .count();
+    // "btc price forecast 2026" → 1 specific token → low value.
+    specific < 2 && words.len() <= 5
 }
 
 /// True when a planner query is a useless echo of the user's question:
@@ -510,8 +565,8 @@ mod tests {
         let q = "ну что братан как там по крипте в сентябре, прогноз по битку";
         let queries = fallback_search_queries(q, &set(&["BTC"]));
         assert_eq!(queries.len(), 1);
-        let year = chrono::Utc::now().format("%Y").to_string();
-        assert_eq!(queries[0], format!("BTC price forecast {year}"));
+        let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        assert_eq!(queries[0], format!("BTC price analysis {date}"));
     }
 
     #[test]
@@ -520,7 +575,10 @@ mod tests {
         let queries = fallback_search_queries(q, &set(&["ETH"]));
         assert_eq!(
             queries,
-            vec![format!("ETH news {}", chrono::Utc::now().format("%Y"))]
+            vec![format!(
+                "ETH news {}",
+                chrono::Utc::now().format("%Y-%m-%d")
+            )]
         );
     }
 
@@ -531,13 +589,34 @@ mod tests {
     }
 
     #[test]
-    fn fallback_defaults_to_crypto_price() {
+    fn fallback_defaults_to_price_analysis() {
         let q = "какая сейчас цена на биток";
         let queries = fallback_search_queries(q, &set(&[]));
         assert_eq!(
             queries,
-            vec![format!("crypto price {}", chrono::Utc::now().format("%Y"))]
+            vec![format!(
+                "crypto price analysis {}",
+                chrono::Utc::now().format("%Y-%m-%d")
+            )]
         );
+    }
+
+    #[test]
+    fn low_value_query_filter_drops_question_and_generic_searches() {
+        // Question phrasing is not a search query.
+        assert!(is_low_value_query("why did bitcoin fall"));
+        assert!(is_low_value_query("почему упал биткоин"));
+        // Bare ticker + generic words carry no event signal.
+        assert!(is_low_value_query("btc price forecast 2026"));
+        assert!(is_low_value_query("crypto forecast 2026"));
+        // Event-oriented queries survive.
+        assert!(!is_low_value_query(
+            "Binance $6.3B hack October 2026 TraderTraitor"
+        ));
+        assert!(!is_low_value_query("Solana network outage 2026-10-30"));
+        assert!(!is_low_value_query(
+            "Ledger Safe 5 firmware implant CryptoBilis"
+        ));
     }
 
     #[test]

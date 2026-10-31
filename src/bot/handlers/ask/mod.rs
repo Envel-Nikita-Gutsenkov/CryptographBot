@@ -64,16 +64,19 @@ pub async fn handle_ask_cmd(
     let bot_task = bot.clone();
     let chat_id = msg.chat.id;
     let loading_id = loading.id;
-    let reply_context = msg.reply_to_message().and_then(|m| m.text()).map(|s| {
-        let chars: Vec<char> = s.chars().collect();
-        if chars.len() > 2000 {
-            let mut t: String = chars.into_iter().take(2000).collect();
-            t.push_str("... (truncated)");
-            t
-        } else {
-            s.to_string()
-        }
-    });
+    let reply_context = msg
+        .reply_to_message()
+        .and_then(|m| m.text().or_else(|| m.caption()))
+        .map(|s| {
+            let chars: Vec<char> = s.chars().collect();
+            if chars.len() > 2000 {
+                let mut t: String = chars.into_iter().take(2000).collect();
+                t.push_str("... (truncated)");
+                t
+            } else {
+                s.to_string()
+            }
+        });
 
     tokio::spawn(async move {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

@@ -482,13 +482,16 @@ fn apply_action(
             action_message(goal, action).map(|m| (m, "done".to_string()))
         }
         "propose" => {
-            // Same cooldown discipline as alerts: don't re-propose the same
-            // goal every scan. "Keep active" resets last_alert_at so the AI
-            // knows the user already declined.
+            // A proposal is a low-value nag: the AI usually repeats the same
+            // "this goal may no longer be relevant" verdict every day because the
+            // underlying market situation has not changed. Suppress it with the
+            // same 7-day window as an explicit decline, so an unanswered
+            // proposal counts as an implicit "leave it alone".
             if !cooldown_ok(goal, now) || decline_suppressed(goal, now) {
                 return None;
             }
             goal.last_alert_at = Some(now);
+            goal.last_declined_at = Some(now);
             goal.alert_count += 1;
             let note = pick_note(action, "the goal may no longer be relevant.");
             remember_alert(goal, now, &note);
@@ -524,8 +527,9 @@ fn cooldown_ok(goal: &Goal, now: DateTime<Utc>) -> bool {
 }
 
 /// True when the user recently declined an AI proposal to deactivate this goal
-/// ("keep active"). Suppresses re-proposing the same goal for a week so the bot
-/// doesn't nag the user every day about a goal they already said to keep.
+/// ("keep active") *or* the bot already sent such a proposal. Unanswered
+/// proposals are treated as implicit declines so the same goal is not
+/// re-proposed every day.
 fn decline_suppressed(goal: &Goal, now: DateTime<Utc>) -> bool {
     goal.last_declined_at
         .map(|t| now.signed_duration_since(t).num_hours() < GOAL_DECLINE_SUPPRESS_HOURS)
@@ -1390,9 +1394,14 @@ mod tests {
         assert!(apply_action(&mut g, &a, now).is_some());
         // Second proposal immediately after — suppressed by cooldown.
         assert!(apply_action(&mut g, &a, now).is_none());
-        // After 24h+ it may propose again.
+        // Unlike a plain alert, a proposal is not repeated the next day: an
+        // unanswered proposal counts as "leave it alone" for a week.
         let later = now + ChronoDuration::hours(25);
-        assert!(apply_action(&mut g, &a, later).is_some());
+        assert!(apply_action(&mut g, &a, later).is_none());
+        assert_eq!(g.alert_count, 1);
+        // After the 7-day suppression window it may propose again.
+        let much_later = now + ChronoDuration::hours(24 * 7 + 1);
+        assert!(apply_action(&mut g, &a, much_later).is_some());
         assert_eq!(g.alert_count, 2);
     }
 

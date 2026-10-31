@@ -159,6 +159,95 @@ async fn main_inner() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // `cargo run -- forecast BTC [ETH ...]` — deterministic multi-horizon
+    // forecast (1/3/5/7/14/30/90/180d) from the local history cache merged with
+    // the intraday rows in SQLite. No AI call, no API quota.
+    if args.len() > 2 && (args[1] == "forecast" || args[1] == "--forecast") {
+        let config = Arc::new(config::Config::from_env()?);
+        if let Some(parent) = std::path::Path::new(&config.sqlite_db).parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        db::SqliteStore::initialize_schema(&config.sqlite_db)?;
+        let sqlite = Arc::new(db::SqliteStore::new(&config.sqlite_db)?);
+        let cmc = Arc::new(crypto::CryptoClient::new(
+            &config.cmc_api_key,
+            &config.coingecko_api_key,
+            &config.coincap_api_key,
+            &config.cryptocompare_api_key,
+            Some(sqlite.clone()),
+        ));
+        for sym in args[2..].iter() {
+            let sym = sym.to_uppercase();
+            match bot::handlers::build_forecast(&sym, &cmc, &sqlite, None).await {
+                Ok(f) => println!("{}\n", f.render()),
+                Err(e) => println!("{sym}: forecast failed — {e}\n"),
+            }
+        }
+        return Ok(());
+    }
+
+    // `cargo run -- dip BTC [ETH ...]` — dip zones, first-passage touch
+    // probabilities and a buy-the-dip verdict from the local history. No AI.
+    if args.len() > 2 && (args[1] == "dip" || args[1] == "--dip") {
+        let config = Arc::new(config::Config::from_env()?);
+        if let Some(parent) = std::path::Path::new(&config.sqlite_db).parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        db::SqliteStore::initialize_schema(&config.sqlite_db)?;
+        let sqlite = Arc::new(db::SqliteStore::new(&config.sqlite_db)?);
+        let cmc = Arc::new(crypto::CryptoClient::new(
+            &config.cmc_api_key,
+            &config.coingecko_api_key,
+            &config.coincap_api_key,
+            &config.cryptocompare_api_key,
+            Some(sqlite.clone()),
+        ));
+        for sym in args[2..].iter() {
+            let sym = sym.to_uppercase();
+            match bot::handlers::build_dip_report(&sym, &cmc, &sqlite, None, None).await {
+                Ok(r) => println!("{}\n", r.plain()),
+                Err(e) => println!("{sym}: dip analysis failed — {e}\n"),
+            }
+        }
+        return Ok(());
+    }
+
+    // `cargo run -- backtest BTC [ETH ...]` — walk-forward accuracy of the
+    // shipped model vs the calibrated one, over a long and a short window. This
+    // answers "was the previous release accurate?" without the Telegram bot.
+    if args.len() > 2 && (args[1] == "backtest" || args[1] == "--backtest") {
+        let config = Arc::new(config::Config::from_env()?);
+        if let Some(parent) = std::path::Path::new(&config.sqlite_db).parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        db::SqliteStore::initialize_schema(&config.sqlite_db)?;
+        let sqlite = Arc::new(db::SqliteStore::new(&config.sqlite_db)?);
+        for sym in args[2..].iter() {
+            let sym = sym.to_uppercase();
+            let mut series = trading::history_file::load_history(&sym).unwrap_or_default();
+            if let Ok(rows) = sqlite.get_price_history(&sym, 220).await {
+                if !rows.is_empty() {
+                    series = trading::forecast::merge_daily_history(&series, &rows);
+                }
+            }
+            if series.len() < 120 {
+                println!(
+                    "{sym}: only {} closes — need 120+ for a walk-forward\n",
+                    series.len()
+                );
+                continue;
+            }
+            println!("{}\n", trading::forecast::backtest_report(&sym, &series));
+        }
+        return Ok(());
+    }
+
     // `cargo run -- goal <user_id|demo> [-v]` — transparently run one proactive
     // goal scan and print every pipeline stage (prompt → drafts → reviewer →
     // critic → actions → notifications), so decisions like "goal is done/stale"
@@ -821,7 +910,26 @@ async fn main_inner() -> anyhow::Result<()> {
         }
     });
 
-    // 9) Model ranker — refreshes the registry (all providers + OpenRouter free
+    // 9) Proactive dip-zone worker — once a day, tells a buy-the-dip user when
+    //    the price is at/below their average entry AND inside a dip zone. Map
+    //    dedup per zone, so it cannot spam the same level.
+    let store_dip = Arc::clone(&store);
+    let sqlite_dip = Arc::clone(&sqlite);
+    let cmc_dip = Arc::clone(&cmc);
+    let bot_dip = bot.clone();
+    let config_dip = Arc::clone(&config);
+    supervisor::spawn_infallible("dip-worker", move || {
+        let b = bot_dip.clone();
+        let s = Arc::clone(&store_dip);
+        let c = Arc::clone(&cmc_dip);
+        let sq = Arc::clone(&sqlite_dip);
+        let cfg = Arc::clone(&config_dip);
+        async move {
+            crypto::ai::dip_worker::run(b, s, c, sq, cfg).await;
+        }
+    });
+
+    // 10) Model ranker — refreshes the registry (all providers + OpenRouter free
     //    tier) and runs ONE lazy benchmark batch per day: at most 3 models, one
     //    role each, 30-day cooldown, fingerprint change detection, and a hard
     //    stop when the OpenRouter budget drops below the reserve. Writes

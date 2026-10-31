@@ -16,6 +16,14 @@ pub struct CoinCapProvider {
 impl CoinCapProvider {
     pub const NAME: &'static str = "coincap";
 
+    /// `api.coincap.io` no longer resolves (verified 2026-10-31 from both the
+    /// dev box and the prod VPS), so every request is a guaranteed DNS failure
+    /// that only adds latency and log noise. The provider stays compiled for
+    /// when the domain returns; set `CRYPTOGRAPH_ENABLE_COINCAP=1` to re-enable.
+    pub fn is_available() -> bool {
+        std::env::var("CRYPTOGRAPH_ENABLE_COINCAP").unwrap_or_default() == "1"
+    }
+
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             http: Client::builder()
@@ -44,6 +52,9 @@ impl CoinCapProvider {
     }
 
     pub async fn get_quotes(&self, symbols: &[&str]) -> Result<Vec<RawQuote>> {
+        if !Self::is_available() {
+            return Ok(Vec::new());
+        }
         let mut out = Vec::new();
         let mut fetch: Vec<&str> = Vec::new();
         for &s in symbols {
@@ -92,6 +103,9 @@ impl CoinCapProvider {
     }
 
     pub async fn get_top(&self, limit: u32) -> Result<Vec<RawQuote>> {
+        if !Self::is_available() {
+            return Ok(Vec::new());
+        }
         if let Some(c) = self.cache_top.get(&limit).await {
             return Ok(c);
         }
@@ -119,6 +133,9 @@ impl CoinCapProvider {
     /// key, third independent vendor besides CoinGecko/CoinPaprika).
     /// Cached 6h. Returns None when the symbol is unknown or the API fails.
     pub async fn get_ath(&self, symbol: &str) -> Option<f64> {
+        if !Self::is_available() {
+            return None;
+        }
         let key = format!("ath:{}", symbol.to_uppercase());
         if let Some(c) = self.cache_ath.get(&key).await {
             return c;

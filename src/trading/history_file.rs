@@ -10,8 +10,18 @@ use std::path::{Path, PathBuf};
 
 pub const HISTORY_DIR: &str = "data/history";
 
+/// Directory holding the daily CSV cache. Overridable so a Docker image can ship
+/// the cache outside the SQLite volume (which would otherwise shadow it).
+pub fn history_dir() -> PathBuf {
+    std::env::var("CRYPTOGRAPH_HISTORY_DIR")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(HISTORY_DIR))
+}
+
 pub fn history_path(symbol: &str) -> PathBuf {
-    PathBuf::from(HISTORY_DIR).join(format!("{}.csv", symbol.to_uppercase()))
+    history_dir().join(format!("{}.csv", symbol.to_uppercase()))
 }
 
 fn load_history_at(path: &Path) -> Option<Vec<(i64, f64)>> {
@@ -47,7 +57,7 @@ pub fn load_history(symbol: &str) -> Option<Vec<(i64, f64)>> {
 
 /// Persist daily closes for `symbol` (oldest first). Creates the dir.
 pub fn save_history(symbol: &str, history: &[(i64, f64)]) -> anyhow::Result<()> {
-    std::fs::create_dir_all(HISTORY_DIR)?;
+    std::fs::create_dir_all(history_dir())?;
     let path = history_path(symbol);
     let mut text = String::with_capacity(history.len() * 24);
     text.push_str("# ts_ms,close\n");

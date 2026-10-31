@@ -1,5 +1,6 @@
 pub mod client;
 pub mod deepseek_budget;
+pub mod dip_worker;
 pub mod indicators;
 pub mod macro_worker;
 pub mod market_intel_worker;

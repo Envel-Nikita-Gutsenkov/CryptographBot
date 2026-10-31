@@ -22,8 +22,10 @@ pub mod backtest;
 pub mod cli;
 pub mod debate;
 pub mod dex;
+pub mod dipzones;
 pub mod engine;
 pub mod experiment;
+pub mod forecast;
 pub mod history_file;
 pub mod market_calendar;
 pub mod nlp;
@@ -52,6 +54,8 @@ pub use dex::{
     SwapQuote, SwapSide,
 };
 #[allow(unused_imports)]
+pub use dipzones::{dip_report, DipReport, DipVerdict, DipZone};
+#[allow(unused_imports)]
 pub use engine::{
     BuyPlan, Decision, EngineConfig, MarketTick, ProfitMode, SellPlan, TickOutcome, TradingEngine,
     DEFAULT_CRASH_DROP_PCT, DEFAULT_CRASH_WINDOW_SECS, DEFAULT_MAX_SPREAD_PCT,
@@ -60,6 +64,11 @@ pub use engine::{
 };
 #[allow(unused_imports)]
 pub use experiment::{run_experiment, ExperimentConfig, ExperimentResult};
+#[allow(unused_imports)]
+pub use forecast::{
+    backtest_report, forecast, merge_daily_history, Forecast, HorizonForecast, HORIZONS_ALT,
+    HORIZONS_MAJOR, HORIZONS_SHORT,
+};
 #[allow(unused_imports)]
 pub use market_calendar::{
     days_to_next_halving, halving_phase, monthly_seasonality, monthly_seasonality_detailed,

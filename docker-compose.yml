@@ -10,6 +10,8 @@ services:
       MAX_RSS_MB: "300"
       HANG_TIMEOUT_SECS: "300"
       SQLITE_DB: "/app/data/crypto.db"
+      # Daily CSV cache shipped in the image (outside the /app/data volume).
+      CRYPTOGRAPH_HISTORY_DIR: "/app/history"
     # Hard memory limits — OOM → container restart → fresh process
     mem_limit: 312m
     memswap_limit: 312m

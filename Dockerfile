@@ -29,6 +29,10 @@ COPY models.json /app/models.json
 # Bundled trading seed: copied into the SQLite volume on first open so a
 # fresh install starts with trained profiles + regime winners.
 COPY data/trading_sim_seed.db /app/data/trading_sim_seed.db
+# Daily close cache for /forecast and backtests. Kept OUTSIDE /app/data because
+# the SQLite volume shadows that directory; the app reads it via
+# CRYPTOGRAPH_HISTORY_DIR (see docker-compose.yml).
+COPY data/history ./history
 
 RUN mkdir -p /app/data \
     && chown -R cryptograph:cryptograph /app

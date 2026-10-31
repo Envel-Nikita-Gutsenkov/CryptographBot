@@ -49,3 +49,6 @@ judge_baseline.json
 
 # uw gateway local state (never commit)
 .uw/
+
+# Local agent scratch state
+.commandcode/
