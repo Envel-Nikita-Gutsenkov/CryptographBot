@@ -91,7 +91,7 @@ Quotes are served from a local cache (180s TTL) with real-time refresh by the Bi
 * `/top N` — top movers by 24h volume
 * `/convert 100 USD BTC` — converter
 * `/fng` — Fear & Greed Index
-* `/forecast BTC` — deterministic multi-horizon forecast (1/3/5/7/14/30/90/180d) with a 68% cone and live walk-forward accuracy — no AI, no API calls
+* `/forecast BTC` — deterministic multi-horizon forecast (1/3/5/7/14/30/90/180d) with a 68% cone, live walk-forward accuracy and a portfolio-aware bottom line — no AI, no API calls. `/forecast verify BTC` prints the backtest on realized history.
 * `/dip BTC` — dip zones below spot, first-passage touch probabilities and a BUY / SPLIT / WAIT / NO-BUY verdict derived from your average entry
 
 **Portfolio Management**

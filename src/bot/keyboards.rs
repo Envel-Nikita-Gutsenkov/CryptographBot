@@ -315,6 +315,7 @@ pub fn forecast_actions(symbol: &str) -> InlineKeyboardMarkup {
             "🔄 Refresh",
             &format!("fc:fx:{symbol}"),
         ),
+        row1("🪙 Dip zones", &format!("dip:fx:{symbol}")),
         row1("🏠 Main Menu", "menu"),
     ])
 }

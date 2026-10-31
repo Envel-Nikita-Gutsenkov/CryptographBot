@@ -418,6 +418,55 @@ fn needs_web_search(question_lower: &str) -> bool {
     TRIGGERS.iter().any(|t| question_lower.contains(t))
 }
 
+/// True for questions that are fully answerable from the local portfolio,
+/// price history and forecast model — "should I buy more / average down / what
+/// is my average entry". Sending those to a search engine only returns SEO
+/// noise ("BTC price analysis 2026") and burns a planner call.
+///
+/// A question that also asks about news/events is NOT local-only: a breach or a
+/// listing is exactly what the web is for.
+pub(crate) fn is_local_only_question(question_lower: &str) -> bool {
+    const NEWSISH: &[&str] = &[
+        "новост",
+        "news",
+        "случил",
+        "произошл",
+        "happen",
+        "hack",
+        "взлом",
+        "exploit",
+        "listing",
+        "листинг",
+        "sec ",
+        "etf",
+        "lawsuit",
+        "суд",
+    ];
+    if NEWSISH.iter().any(|t| question_lower.contains(t)) {
+        return false;
+    }
+    const LOCAL_ONLY: &[&str] = &[
+        "докупать",
+        "докупи",
+        "усредн",
+        "моя средн",
+        "моей средней",
+        "мою средн",
+        "средняя закуп",
+        "стоит ли покупать",
+        "стоит ли брать",
+        "стоит ли докупать",
+        "should i buy",
+        "should i add",
+        "my average",
+        "my avg",
+        "average entry",
+        "buy the dip",
+        "докупить",
+    ];
+    LOCAL_ONLY.iter().any(|t| question_lower.contains(t))
+}
+
 /// Compose search queries from detected symbols + question topic when the
 /// planner model is unavailable or echoed the raw user question. Never sends
 /// the user's verbatim text to a search engine.
@@ -652,5 +701,23 @@ mod tests {
             filtered,
             vec!["best crypto to buy September 2026".to_string()]
         );
+    }
+
+    #[test]
+    fn local_only_questions_skip_the_web_search() {
+        // Portfolio/decision questions are answered locally (forecast + dip).
+        assert!(is_local_only_question("стоит ли докупать btc?"));
+        assert!(is_local_only_question("что делать, докупить эфир?"));
+        assert!(is_local_only_question("should i buy more sol now?"));
+        assert!(is_local_only_question("какая у меня средняя закупка?"));
+
+        // Anything about news/events still needs the web.
+        assert!(!is_local_only_question(
+            "стоит ли докупать btc на новостях?"
+        ));
+        assert!(!is_local_only_question(
+            "есть ли новости про взлом binance?"
+        ));
+        assert!(!is_local_only_question("what is the best wallet?"));
     }
 }

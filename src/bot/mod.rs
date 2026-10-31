@@ -252,8 +252,8 @@ async fn handle_help(bot: Bot, msg: Message) -> anyhow::Result<()> {
                      • <code>/ai</code> [SYM] — Deep market analysis (e.g. <code>/ai BTC</code>)\n\
                      • <code>/ai set</code> [SYMS] — Set multi-asset watchlist (e.g. <code>/ai set BTC ETH SOL</code>)\n\
                      • <code>/patch</code> [text] — AI portfolio corrector (e.g. <code>/patch I have 0.1 BTC not 0.5</code>)\n\
-                     • <code>/ask [question]</code> — Ask AI about your portfolio + market (e.g. <code>/ask should I buy SOL?</code>)\n\
-                     • <code>/forecast</code> [SYMS] — Deterministic forecast for 1/3/5/7/14/30/90/180 days (e.g. <code>/forecast BTC ETH</code>)\n\
+                     • <code>/ask [question]</code> — Ask AI about your portfolio + market (e.g. <code>/ask should I buy SOL?</code>). Plain text works too; reply to any message (mine or yours) to continue the dialogue\n\
+                     • <code>/forecast</code> [SYMS] — Deterministic forecast for 1/3/5/7/14/30/90/180 days + your avg entry vs the dip band (e.g. <code>/forecast BTC ETH</code>); <code>/forecast verify</code> — backtest on realized history\n\
                      • <code>/dip</code> [SYMS] — Dip zones, P(touch level within 7/14/30/90d) and a buy-the-dip verdict vs your average entry (e.g. <code>/dip BTC</code>)\n\
                      • <code>/memo [text]</code> — AI memory note (e.g. <code>/memo invest 100 USD at a time</code>); <code>/memo list</code> | <code>/memo del N</code>\n\
                      • <code>/goal [text]</code> — Proactive goal; AI alerts you when market conditions fit (e.g. <code>/goal want to spend 400 USD on crypto this month</code>); <code>/goal list</code> | <code>/goal progress N text</code> | <code>/goal done N</code> | <code>/goal del N</code>\n\
@@ -822,8 +822,9 @@ async fn handle_forecast_cb(
     cmc: Arc<CryptoClient>,
     config: Arc<Config>,
     sqlite: Arc<crate::db::SqliteStore>,
+    store: Arc<Store>,
 ) -> anyhow::Result<()> {
-    handlers::handle_forecast_callback(bot, q, cmc, sqlite, config).await
+    handlers::handle_forecast_callback(bot, q, cmc, sqlite, config, store).await
 }
 
 /// Dip callbacks (`dip:ai:SYM`, `dip:fx:SYM`) — needs `store` (average entry)
@@ -1362,15 +1363,13 @@ async fn handle_text(
                     ),
                 )
                 .await?;
-            } else if let Some(reply) = msg.reply_to_message() {
-                // Plain-text reply to a bot message → treat it as a follow-up
-                // /ask question. The replied message becomes the dialogue
-                // context, so "и че когда откат" on top of the bot's analysis
-                // continues the conversation instead of being silently ignored.
-                let replied_by_bot = reply.from().map(|u| u.is_bot).unwrap_or(false);
-                // Cover photo/chart messages too: rich answers arrive as an
-                // image with a caption, and replying to one used to be dropped.
-                if replied_by_bot && (reply.text().is_some() || reply.caption().is_some()) {
+            } else {
+                // Any plain text is a question — with or without a reply. When
+                // the user replies to a message (the bot's forecast/alert card
+                // or their own earlier message), that message becomes the
+                // dialogue context, so "и чё дальше?" continues the thread
+                // instead of being silently dropped.
+                if !text.trim().is_empty() {
                     return handlers::handle_ask_cmd(
                         bot,
                         msg.clone(),

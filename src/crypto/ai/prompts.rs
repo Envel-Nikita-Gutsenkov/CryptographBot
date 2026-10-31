@@ -210,7 +210,9 @@ pub fn build_ask_prompt(
     preferred_lang: &str,
 ) -> String {
     let reply_str = match reply_context {
-        Some(r) => format!("PREVIOUS AI RESPONSE (The user is replying to this):\n\"{r}\"\n\n"),
+        Some(r) => format!(
+            "REPLIED-TO MESSAGE (the user is replying to this — continue from it, do not restate it):\n\"{r}\"\n\n"
+        ),
         None => String::new(),
     };
 

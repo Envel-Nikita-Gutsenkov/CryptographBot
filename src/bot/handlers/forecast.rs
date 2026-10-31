@@ -25,16 +25,15 @@ use crate::{
     },
 };
 
-/// Assemble the daily series for `symbol`:
+/// Load the daily close series for `symbol` from every available source:
 /// 1. the on-disk `data/history/{SYM}.csv` cache (years of daily closes),
 /// 2. intraday rows from SQLite resampled to one close per day (last wins),
 /// 3. provider history as a last resort when the cache is empty.
-pub async fn build_forecast(
+pub async fn load_series(
     symbol: &str,
     cmc: &CryptoClient,
     sqlite: &SqliteStore,
-    live_price: Option<f64>,
-) -> anyhow::Result<Forecast> {
+) -> Vec<(i64, f64)> {
     let sym = symbol.to_uppercase();
 
     let mut series = history_file::load_history(&sym).unwrap_or_default();
@@ -57,6 +56,18 @@ pub async fn build_forecast(
             }
         }
     }
+    series
+}
+
+/// Assemble the daily series for `symbol` and build the deterministic forecast.
+pub async fn build_forecast(
+    symbol: &str,
+    cmc: &CryptoClient,
+    sqlite: &SqliteStore,
+    live_price: Option<f64>,
+) -> anyhow::Result<Forecast> {
+    let sym = symbol.to_uppercase();
+    let series = load_series(&sym, cmc, sqlite).await;
 
     let price = live_price
         .filter(|p| *p > 0.0)
@@ -82,8 +93,21 @@ pub async fn handle_forecast_cmd(
     }
 
     // `/forecast` → the user's watchlist; `/forecast BTC ETH` → those symbols.
-    let mut symbols: Vec<String> = args
-        .split_whitespace()
+    // `/forecast verify [SYM ...]` → walk-forward accuracy of the shipped model
+    // on realized history (this is how "была ли модель точна" is answered).
+    let words: Vec<&str> = args.split_whitespace().collect();
+    let verify = words
+        .first()
+        .map(|w| {
+            matches!(
+                w.to_lowercase().as_str(),
+                "verify" | "accuracy" | "check" | "backtest"
+            )
+        })
+        .unwrap_or(false);
+    let symbol_words: &[&str] = if verify { &words[1..] } else { &words };
+    let mut symbols: Vec<String> = symbol_words
+        .iter()
         .filter(|w| w.chars().all(|c| c.is_ascii_alphanumeric()))
         .map(|w| w.to_uppercase())
         .collect();
@@ -102,6 +126,31 @@ pub async fn handle_forecast_cmd(
         symbols = vec!["BTC".into(), "ETH".into()];
     }
 
+    if verify {
+        for sym in &symbols {
+            let history = load_series(sym, &cmc, &sqlite).await;
+            let text = if history.len() < 200 {
+                format!(
+                    "⚠️ <b>{sym}</b>: мало истории для бэктеста ({} дн.)",
+                    history.len()
+                )
+            } else {
+                format!(
+                    "<pre>{}</pre>",
+                    html_escape::encode_text(&fx::backtest_report(sym, &history))
+                )
+            };
+            if let Err(e) = bot
+                .send_message(ChatId(msg.chat.id.0), &text)
+                .parse_mode(ParseMode::Html)
+                .await
+            {
+                warn!("Forecast verify send failed for {sym}: {e}");
+            }
+        }
+        return Ok(());
+    }
+
     let sym_refs: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
     let quotes = cmc.get_quotes(&sym_refs).await.unwrap_or_default();
     let price_for = |sym: &str| {
@@ -112,20 +161,42 @@ pub async fn handle_forecast_cmd(
     };
 
     for sym in &symbols {
+        let avg_entry = store.read(user_id, |p| p.avg_buy_price(sym));
+        let russian = store
+            .read(user_id, |p| p.settings.preferred_language.clone())
+            .to_lowercase()
+            .starts_with("ru");
         let text = match build_forecast(sym, &cmc, &sqlite, price_for(sym)).await {
-            Ok(f) => f.render_html(),
+            Ok(f) => f.render_markdown(avg_entry, russian),
             Err(e) => {
                 warn!("Forecast for {sym} failed: {e}");
-                format!("⚠️ <b>{sym}</b>: нет данных для прогноза ({e})")
+                format!("⚠️ **{sym}**: нет данных для прогноза ({e})")
             }
         };
-        if let Err(e) = bot
-            .send_message(ChatId(msg.chat.id.0), &text)
-            .parse_mode(ParseMode::Html)
-            .reply_markup(keyboards::forecast_actions(sym))
-            .await
+        let markup = serde_json::to_value(keyboards::forecast_actions(sym)).ok();
+        // Rich messages render the GFM table as a real table; fall back to the
+        // monospace HTML table if the API rejects the rich payload.
+        if let Err(e) = crate::bot::rich_messages::send_rich_message_markdown_with_markup(
+            &config,
+            msg.chat.id.0,
+            &text,
+            markup.clone(),
+        )
+        .await
         {
-            warn!("Forecast send failed for {sym}: {e}");
+            warn!("Rich forecast send failed for {sym} ({e}); falling back to HTML");
+            let html = match build_forecast(sym, &cmc, &sqlite, price_for(sym)).await {
+                Ok(f) => f.render_html_for(avg_entry, russian),
+                Err(_) => text.clone(),
+            };
+            if let Err(e) = bot
+                .send_message(ChatId(msg.chat.id.0), &html)
+                .parse_mode(ParseMode::Html)
+                .reply_markup(keyboards::forecast_actions(sym))
+                .await
+            {
+                warn!("Forecast send failed for {sym}: {e}");
+            }
         }
     }
 
@@ -141,6 +212,7 @@ pub async fn handle_forecast_callback(
     cmc: Arc<CryptoClient>,
     sqlite: Arc<SqliteStore>,
     config: Arc<Config>,
+    store: Arc<Store>,
 ) -> anyhow::Result<()> {
     let _ = bot.answer_callback_query(&q.id).await;
 
@@ -172,6 +244,7 @@ pub async fn handle_forecast_callback(
                 .await?;
             let loading_id = loading.id;
             let bot_task = bot.clone();
+            let store_task = store.clone();
             // The AI call can take tens of seconds; never block the dispatcher.
             tokio::spawn(async move {
                 let quotes = cmc.get_quotes(&[sym.as_str()]).await.unwrap_or_default();
@@ -191,6 +264,19 @@ pub async fn handle_forecast_callback(
                 };
 
                 let ai = GeminiClient::new(&config.gemini_api_key);
+                // Portfolio-aware verdict lines are always shown, even when the
+                // AI read succeeds: the user asked for a clear bottom line.
+                let avg_entry = store_task.read(user_id, |p| p.avg_buy_price(&sym));
+                let russian = store_task
+                    .read(user_id, |p| p.settings.preferred_language.clone())
+                    .to_lowercase()
+                    .starts_with("ru");
+                let verdict = f
+                    .action_lines(avg_entry, russian)
+                    .into_iter()
+                    .map(|l| format!("• {}", html_escape::encode_text(&l)))
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 let commentary = if ai.is_configured() {
                     match tokio::time::timeout(
                         Duration::from_secs(60),
@@ -220,12 +306,14 @@ pub async fn handle_forecast_callback(
 
                 let text = match commentary {
                     Some(t) => format!(
-                        "🧠 <b>{sym} — AI read</b>\n\n{t}\n\n\
-                         <i>Model output, not financial advice.</i>"
+                        "🧠 <b>{sym} — AI read</b>\n\n{t}\n\n🎯 <b>{}</b>\n{verdict}\n\
+                         <i>Model output, not financial advice.</i>",
+                        if russian { "Итог" } else { "Bottom line" }
                     ),
                     None => format!(
-                        "{}\n\n<i>AI commentary unavailable — deterministic summary only.</i>",
-                        f.summary_html()
+                        "{}\n\n🎯 <b>{}</b>\n{verdict}\n<i>AI commentary unavailable — deterministic summary only.</i>",
+                        f.summary_html(),
+                        if russian { "Итог" } else { "Bottom line" }
                     ),
                 };
 
@@ -247,21 +335,34 @@ pub async fn handle_forecast_callback(
         "fx" => {
             let quotes = cmc.get_quotes(&[sym.as_str()]).await.unwrap_or_default();
             let live = quotes.first().map(|q| q.price_usd);
-            let text = match build_forecast(&sym, &cmc, &sqlite, live).await {
-                Ok(f) => f.render_html(),
+            let avg_entry = store.read(user_id, |p| p.avg_buy_price(&sym));
+            let russian = store
+                .read(user_id, |p| p.settings.preferred_language.clone())
+                .to_lowercase()
+                .starts_with("ru");
+            let html = match build_forecast(&sym, &cmc, &sqlite, live).await {
+                Ok(f) => f.render_html_for(avg_entry, russian),
                 Err(e) => {
                     warn!("Forecast refresh for {sym} failed: {e}");
                     format!("⚠️ <b>{sym}</b>: нет данных для прогноза ({e})")
                 }
             };
-            let edited = bot
-                .edit_message_text(chat_id, msg.id, &text)
-                .parse_mode(ParseMode::Html)
-                .reply_markup(keyboards::forecast_actions(&sym))
-                .await;
+            let markdown = match build_forecast(&sym, &cmc, &sqlite, live).await {
+                Ok(f) => f.render_markdown(avg_entry, russian),
+                Err(_) => html.clone(),
+            };
+            let markup = serde_json::to_value(keyboards::forecast_actions(&sym)).ok();
+            let edited = crate::bot::rich_messages::edit_rich_message_markdown(
+                &config,
+                chat_id.0,
+                msg.id.0,
+                &markdown,
+                markup.clone(),
+            )
+            .await;
             if edited.is_err() {
                 let _ = bot
-                    .send_message(chat_id, &text)
+                    .edit_message_text(chat_id, msg.id, &html)
                     .parse_mode(ParseMode::Html)
                     .reply_markup(keyboards::forecast_actions(&sym))
                     .await;

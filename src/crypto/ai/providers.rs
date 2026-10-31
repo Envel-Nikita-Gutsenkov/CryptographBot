@@ -82,6 +82,12 @@ pub async fn call_any_model(
     Err(last_err)
 }
 
+/// Provider name used by the health table and the in-memory circuit breaker,
+/// e.g. `"Cloudflare"`, `"Groq"` (matches `format!("{:?}", provider)`).
+fn provider_id_provider(p: &Provider) -> String {
+    format!("{p:?}")
+}
+
 /// Call exactly ONE provider/model entry (no alias expansion).
 /// Used by the health worker to attribute errors to the correct provider
 /// and as the internal dispatch for `call_any_model`.
@@ -122,6 +128,16 @@ pub async fn call_single_model(
         ));
     }
 
+    // Key-wide free quota already gone (Cloudflare neurons, Groq TPD, …)?
+    // Every model on that provider is dead until the quota resets, so fail fast
+    // instead of paying a network round-trip (and a 10 s timeout) for nothing.
+    if crate::crypto::ai::pools::is_provider_exhausted(&provider_id_provider(&info.provider)) {
+        return Err(anyhow::anyhow!(
+            "Provider {:?} quota exhausted until reset",
+            info.provider
+        ));
+    }
+
     let started = std::time::Instant::now();
     let mut attempts = 0;
     let result = loop {
@@ -146,6 +162,11 @@ pub async fn call_single_model(
         match &res {
             Err(e) if attempts < 3 => {
                 let err_s = e.to_string();
+                // Quota exhaustion (daily neurons/TPD, provider-wide) does not
+                // recover in 500 ms — retrying it wastes the latency budget.
+                if crate::crypto::ai::pools::quota_cooldown_secs(&err_s).is_some() {
+                    break res;
+                }
                 // Transient failures only: timeouts, 5xx, and 429 rate limits.
                 // Anything else (auth, 4xx, bad payload) fails immediately.
                 let transient = err_s.contains("timed out")
@@ -202,6 +223,24 @@ pub async fn call_single_model(
             // banning it would let background workers knock working models out
             // of the pool for interactive /ask calls.
             let err_s = e.to_string();
+            // Quota exhaustion → bench the whole provider until its reset time,
+            // so background workers stop hammering it every minute. Burst 429s
+            // (no quota marker) keep the existing short/1h behaviour.
+            if let Some(secs) = crate::crypto::ai::pools::quota_cooldown_secs(&err_s) {
+                crate::crypto::ai::pools::mark_provider_exhausted(
+                    &provider_str,
+                    std::time::Instant::now() + std::time::Duration::from_secs(secs),
+                );
+                crate::crypto::ai::pools::ban_provider_model(
+                    &info.provider,
+                    info.id.as_str(),
+                    secs,
+                );
+                if let Some(store) = &db {
+                    store.update_model_health(&provider_id, "COOLDOWN", Some(err_s.clone()));
+                }
+                return Err(e);
+            }
             let transient = err_s.contains("timed out")
                 || err_s.contains("502")
                 || err_s.contains("503")
@@ -241,14 +280,26 @@ pub async fn call_last_resort(
 ) -> anyhow::Result<(String, String)> {
     // Each provider is independent and bounded by a short timeout so a hanging
     // provider (e.g. Gemini 2.5-flash) can't stall the whole fallback.
-    async fn try_provider<F, Fut>(label: &str, fut: F) -> Option<(String, String)>
+    async fn try_provider<F, Fut>(label: &str, provider: &str, fut: F) -> Option<(String, String)>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = anyhow::Result<String>>,
     {
+        // Never touch a provider whose key-wide quota is already gone — this is
+        // what turned a quota outage into minutes of pointless timeouts.
+        if crate::crypto::ai::pools::is_provider_exhausted(provider) {
+            return None;
+        }
         match tokio::time::timeout(std::time::Duration::from_secs(20), fut()).await {
             Ok(Ok(res)) => Some((label.to_string(), res)),
             Ok(Err(e)) => {
+                let err_s = e.to_string();
+                if let Some(secs) = crate::crypto::ai::pools::quota_cooldown_secs(&err_s) {
+                    crate::crypto::ai::pools::mark_provider_exhausted(
+                        provider,
+                        std::time::Instant::now() + std::time::Duration::from_secs(secs),
+                    );
+                }
                 tracing::warn!("Last-resort {} failed: {}", label, e);
                 None
             }
@@ -260,14 +311,14 @@ pub async fn call_last_resort(
     }
 
     // Cohere (most reliable free tier in our pool).
-    if let Some(r) = try_provider("command-a-reasoning", || {
+    if let Some(r) = try_provider("command-a-reasoning", "Cohere", || {
         call_cohere_model(client, "command-a-reasoning-08-2025", prompt)
     })
     .await
     {
         return Ok(r);
     }
-    if let Some(r) = try_provider("command-a-plus", || {
+    if let Some(r) = try_provider("command-a-plus", "Cohere", || {
         call_cohere_model(client, "command-a-plus-05-2026", prompt)
     })
     .await
@@ -275,21 +326,21 @@ pub async fn call_last_resort(
         return Ok(r);
     }
     // Groq.
-    if let Some(r) = try_provider("gpt-oss-120b", || {
+    if let Some(r) = try_provider("gpt-oss-120b", "Groq", || {
         call_groq_model(client, "openai/gpt-oss-120b", prompt)
     })
     .await
     {
         return Ok(r);
     }
-    if let Some(r) = try_provider("qwen3.8-27b", || {
+    if let Some(r) = try_provider("qwen3.8-27b", "Groq", || {
         call_groq_model(client, "qwen/qwen3.8-27b", prompt)
     })
     .await
     {
         return Ok(r);
     }
-    if let Some(r) = try_provider("gpt-oss-20b", || {
+    if let Some(r) = try_provider("gpt-oss-20b", "Groq", || {
         call_groq_model(client, "openai/gpt-oss-20b", prompt)
     })
     .await
@@ -297,14 +348,14 @@ pub async fn call_last_resort(
         return Ok(r);
     }
     // Cloudflare Workers AI.
-    if let Some(r) = try_provider("llama-4-scout-cf", || {
+    if let Some(r) = try_provider("llama-4-scout-cf", "Cloudflare", || {
         call_cloudflare_model(client, "@cf/meta/llama-4-scout-17b-16e-instruct", prompt)
     })
     .await
     {
         return Ok(r);
     }
-    if let Some(r) = try_provider("qwen3-30b-cf", || {
+    if let Some(r) = try_provider("qwen3-30b-cf", "Cloudflare", || {
         call_cloudflare_model(client, "@cf/qwen/qwen3-30b-a3b-fp8", prompt)
     })
     .await
@@ -312,14 +363,14 @@ pub async fn call_last_resort(
         return Ok(r);
     }
     // OpenRouter free tier (budgeted internally).
-    if let Some(r) = try_provider("glm-5.2:free", || {
+    if let Some(r) = try_provider("glm-5.2:free", "OpenRouter", || {
         call_openrouter_raw(client, "z-ai/glm-5.2:free", prompt)
     })
     .await
     {
         return Ok(r);
     }
-    if let Some(r) = try_provider("nemotron-3-super:free", || {
+    if let Some(r) = try_provider("nemotron-3-super:free", "OpenRouter", || {
         call_openrouter_raw(client, "nvidia/nemotron-3-super-120b-a12b:free", prompt)
     })
     .await
@@ -330,7 +381,7 @@ pub async fn call_last_resort(
     let fallback_body = serde_json::json!({
         "contents": [{"parts": [{"text": prompt}]}]
     });
-    if let Some(r) = try_provider("gemini-2.5-flash", || {
+    if let Some(r) = try_provider("gemini-2.5-flash", "Gemini", || {
         call_gemini_model(client, gemini_key, "gemini-2.5-flash", &fallback_body)
     })
     .await

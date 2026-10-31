@@ -11,6 +11,13 @@ const SUCCESS_MEMORY: Duration = Duration::from_secs(6 * 3600);
 static LAST_SUCCESSFUL_MODEL: Mutex<Option<(String, Instant)>> = Mutex::new(None);
 pub static CIRCUIT_BREAKER: std::sync::OnceLock<DashMap<String, Instant>> =
     std::sync::OnceLock::new();
+/// Providers whose *key-wide* free quota is exhausted (Cloudflare neurons,
+/// Groq TPD, Gemini daily). Unlike the per-model circuit breaker this is keyed
+/// by provider name: once "daily free allocation" is gone, every model on that
+/// provider is gone, and hammering it every 60 s only burns the /ask latency
+/// budget (and floods the logs). Entries expire at the quota reset time.
+pub static PROVIDER_EXHAUSTED: std::sync::OnceLock<DashMap<String, Instant>> =
+    std::sync::OnceLock::new();
 
 /// Success memory persisted next to the SQLite DB so it survives restarts.
 /// "model_memory.json" in the same directory as SQLITE_DB (default "crypto.db").
@@ -150,6 +157,147 @@ pub fn ban_provider_model(
         .insert(key, Instant::now() + Duration::from_secs(duration_secs));
 }
 
+/// Seconds until the next UTC midnight (when free daily quotas reset).
+pub fn secs_until_utc_midnight() -> u64 {
+    use chrono::{Timelike, Utc};
+    let now = Utc::now();
+    let secs_today = now.num_seconds_from_midnight() as u64;
+    86_400u64.saturating_sub(secs_today)
+}
+
+/// Parse a retry hint out of an error body: `try again in 53m58.272s`,
+/// `retry in 30s`, `"retryDelay": "22s"`. Returns seconds.
+fn parse_retry_after(err_lower: &str) -> Option<u64> {
+    let mut total: u64 = 0;
+    let mut found = false;
+    // Scan for `<number>[hms]` groups after a retry marker.
+    let marker = ["try again in", "retry in", "retrydelay", "retry after"]
+        .iter()
+        .filter_map(|m| err_lower.find(m).map(|i| (i, m.len())))
+        .min_by_key(|(i, _)| *i);
+    let Some((pos, mlen)) = marker else {
+        return None;
+    };
+    let tail = &err_lower[pos + mlen..];
+    let mut num = String::new();
+    for ch in tail.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            num.push(ch);
+        } else if matches!(ch, 'h' | 'm' | 's') {
+            let Ok(v) = num.parse::<f64>() else {
+                return None;
+            };
+            total = total.saturating_add(match ch {
+                'h' => (v * 3600.0) as u64,
+                'm' => (v * 60.0) as u64,
+                _ => v as u64,
+            });
+            found = true;
+            num.clear();
+        } else if found && !ch.is_whitespace() && ch != ',' && ch != '\\' && ch != '"' {
+            break;
+        } else if !found && !ch.is_whitespace() && ch != ':' && ch != '"' {
+            // Ran into some other text before any unit was parsed.
+            if !num.is_empty() {
+                break;
+            }
+        }
+    }
+    found.then_some(total.max(1))
+}
+
+/// How long a provider/model should be benched for this error, if it is a
+/// quota exhaustion rather than a short burst limit.
+///
+/// Free tiers report several shapes of the same thing:
+/// * Cloudflare — "used up your daily free allocation of 10,000 neurons"
+/// * Groq — "tokens per day (TPD): Limit 200000 ... try again in 53m58"
+/// * Gemini — "You exceeded your current quota" / RESOURCE_EXHAUSTED
+///
+/// A generic 429 must NOT bench a model for long: it recovers in seconds. But a
+/// daily quota will not recover for hours, and retrying it is pure waste.
+pub fn quota_cooldown_secs(err: &str) -> Option<u64> {
+    let e = err.to_lowercase();
+    let is_quota = e.contains("429")
+        || e.contains("rate limit")
+        || e.contains("too many requests")
+        || e.contains("quota")
+        || e.contains("resource_exhausted");
+    if !is_quota {
+        return None;
+    }
+    let daily = e.contains("daily free allocation")
+        || e.contains("neurons")
+        || e.contains("tokens per day")
+        || e.contains("(tpd)")
+        || e.contains("per day")
+        || e.contains("perday")
+        || e.contains("daily quota")
+        || e.contains("daily limit");
+    if let Some(secs) = parse_retry_after(&e) {
+        // Trust the provider's own reset hint, with a small safety margin.
+        return Some(secs.saturating_add(30).clamp(60, 86_400));
+    }
+    if daily {
+        return Some(secs_until_utc_midnight().max(120));
+    }
+    // A quota error without a reset hint is still not a 1-second burst: bench
+    // it briefly so a single /ask does not spend 3 retries x N models on it.
+    Some(300)
+}
+
+pub fn provider_exhausted_until(provider: &str) -> Option<Instant> {
+    PROVIDER_EXHAUSTED
+        .get_or_init(DashMap::new)
+        .get(provider)
+        .map(|v| *v.value())
+        .filter(|until| Instant::now() < *until)
+}
+
+pub fn is_provider_exhausted(provider: &str) -> bool {
+    provider_exhausted_until(provider).is_some()
+}
+
+/// Record that a provider's key-wide quota is gone until `until`.
+pub fn mark_provider_exhausted(provider: &str, until: Instant) {
+    let map = PROVIDER_EXHAUSTED.get_or_init(DashMap::new);
+    let keep = map
+        .get(provider)
+        .map(|v| (*v.value()).max(until))
+        .unwrap_or(until);
+    map.insert(provider.to_string(), keep);
+}
+
+/// Human-readable list of exhausted providers and when they reset, e.g.
+/// `Cloudflare (до 00:00 UTC), Groq (до 23:40 UTC)`. `None` when nothing is
+/// benched, so callers can keep the generic error text.
+pub fn quota_report() -> Option<String> {
+    let map = PROVIDER_EXHAUSTED.get_or_init(DashMap::new);
+    let now = Instant::now();
+    let mut rows: Vec<(String, u64)> = map
+        .iter()
+        .filter_map(|e| {
+            let until = *e.value();
+            (until > now).then(|| {
+                let secs = until.saturating_duration_since(now).as_secs();
+                (e.key().clone(), secs)
+            })
+        })
+        .collect();
+    if rows.is_empty() {
+        return None;
+    }
+    rows.sort_by_key(|(_, s)| *s);
+    let parts: Vec<String> = rows
+        .into_iter()
+        .map(|(p, secs)| {
+            let reset = chrono::Utc::now() + chrono::Duration::seconds(secs as i64);
+            format!("{} (до {} UTC)", p, reset.format("%H:%M"))
+        })
+        .collect();
+    Some(parts.join(", "))
+}
+
 pub fn is_banned(provider: &crate::crypto::ai::providers::Provider, model_id: &str) -> bool {
     let key = format!("{:?}:{}", provider, model_id);
     if let Some(until) = CIRCUIT_BREAKER.get_or_init(DashMap::new).get(&key) {
@@ -278,6 +426,49 @@ pub fn get_available_models(role: Option<&str>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quota_cooldown_uses_provider_reset_hint() {
+        // Real Groq TPD body from prod logs.
+        let groq = "Groq openai/gpt-oss-120b HTTP 429: {\"error\":{\"message\":\"Rate limit reached for model `openai/gpt-oss-120b` on tokens per day (TPD): Limit 200000, Used 198697, Requested 8799. Please try again in 53m58.272s.\"}}";
+        let secs = quota_cooldown_secs(groq).expect("TPD must be a quota error");
+        assert!(
+            (3200..=3300).contains(&secs),
+            "TPD cooldown should follow the reset hint, got {secs}"
+        );
+    }
+
+    #[test]
+    fn quota_cooldown_marks_daily_allocations() {
+        // Cloudflare neurons reset at UTC midnight, not in a minute.
+        let cf = "Cloudflare @cf/meta/llama-4-scout-17b-16e-instruct HTTP 429: {\"errors\":[{\"message\":\"you have used up your daily free allocation of 10,000 neurons\"}]}";
+        let secs = quota_cooldown_secs(cf).expect("daily allocation must be a quota error");
+        assert!(
+            secs >= 120 && secs <= 86_400,
+            "daily quota cooldown out of range: {secs}"
+        );
+    }
+
+    #[test]
+    fn quota_cooldown_short_for_plain_quota_and_none_for_5xx() {
+        let gemini = "Gemini gemini-2.5-flash HTTP 429: {\"code\": 429, \"message\": \"You exceeded your current quota, please check your plan\"}";
+        assert_eq!(quota_cooldown_secs(gemini), Some(300));
+        assert_eq!(quota_cooldown_secs("HTTP 500 internal server error"), None);
+        assert_eq!(quota_cooldown_secs("connection timed out"), None);
+    }
+
+    #[test]
+    fn provider_exhaustion_expires() {
+        let until = Instant::now() + Duration::from_secs(3600);
+        mark_provider_exhausted("TestProvider", until);
+        assert!(is_provider_exhausted("TestProvider"));
+        assert!(!is_provider_exhausted("OtherProvider"));
+        assert!(quota_report().unwrap().contains("TestProvider"));
+        // An expired entry is not reported.
+        mark_provider_exhausted("ExpiredProvider", Instant::now() - Duration::from_secs(1));
+        assert!(!is_provider_exhausted("ExpiredProvider"));
+        assert!(!quota_report().unwrap().contains("ExpiredProvider"));
+    }
 
     #[test]
     fn providers_for_single_provider_alias() {

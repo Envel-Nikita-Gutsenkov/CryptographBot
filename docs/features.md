@@ -51,6 +51,10 @@ for the same inputs.
   damping, drift shrink and cone width are **walk-forward calibrated** against
   the symbol's own history; the message also reports the model's real
   out-of-sample direction hit rate, MAPE and cone coverage per horizon.
+  The bottom line is portfolio-aware: it compares spot to your average entry,
+  gives the probability of reaching the dip band / your break-even, and never
+  suggests adding above the average. **`/forecast verify`** prints the full
+  walk-forward backtest (shipped vs calibrated) on realized history.
 - **`/dip SYMBOL`** — support levels below spot taken from SMA50/200, recent
   lows and the forecast cone, each with a first-passage probability of being
   touched within 1/3/7/14/30 days (closed-form Brownian running-minimum
@@ -85,6 +89,33 @@ Deduplication is **per topic** (`ai_security_seen` map with a 7-day window),
 not a single "last topic" slot, so two incidents alternating in the feed can no
 longer re-send the same alert every scan. The first sighting is delivered
 immediately; repeats stay silent for the cooldown.
+
+The AI watcher's own security path is fed **only by articles fetched in the
+last 24 hours** and detects per article — scanning a week of cached summaries
+matched the word "hack" anywhere and re-fired the same "Security incident
+detected" card. Every scan produces **one** digest (one message, AI-written
+when a provider is available, deterministic snippets otherwise) listing all
+fresh incidents, sent as a rich message with an HTML fallback.
+
+---
+
+## 3c. Conversation Continuity & Provider Failover
+
+- **Plain text is a question.** Any non-command text goes to `/ask`, with or
+  without a reply. Replying to *any* message — the bot's forecast/alert card or
+  your own earlier message — injects that message (tagged by author) as
+dialogue context. The last 6 exchanges per user are persisted in SQLite and
+  replayed into the prompt, so the bot remembers the thread across restarts.
+- **Quota-aware circuit breaker.** Daily free-tier exhaustion (Cloudflare
+  neurons, Groq TPD, Gemini quota) benches the whole provider until its reset
+  time instead of being retried every scan; `/ask` also reports which quotas are
+exhausted and when they reset.
+- **`/ask` never hard-fails on quotas.** If every provider is exhausted, the
+  answer is built deterministically from the portfolio, local history and the
+  forecast model, so a question always gets a real answer.
+- **Search only when it helps.** Portfolio/decision questions ("стоит ли
+  докупать", "should I buy more") skip the web-search planner entirely; event
+  questions still get a planner-composed keyword query, never the raw question.
 
 ---
 

@@ -40,9 +40,10 @@ const MIN_SCAN_HOURS: f64 = 2.0;
 /// (overridable via `PROACTIVE_ALERT_COOLDOWN_HOURS`).
 const GOAL_ALERT_COOLDOWN_HOURS: i64 = 24;
 /// How long to suppress re-proposing a goal after the user explicitly declined
-/// ("keep active"). Much longer than the normal alert cooldown so the bot
-/// doesn't nag the same goal every day.
-const GOAL_DECLINE_SUPPRESS_HOURS: i64 = 24 * 7;
+/// ("keep active") *or* after the bot already asked. Deliberately long: the
+/// user was getting the same "this goal may no longer be relevant" card every
+/// week, which is pure nagging. One reminder a month is plenty.
+const GOAL_DECLINE_SUPPRESS_HOURS: i64 = 24 * 30;
 /// How many previously sent alert messages to feed back into the prompt.
 const MAX_ALERT_MEMORY: usize = 5;
 /// Max symbols included in the market snapshot (token/API economy).
@@ -1399,8 +1400,8 @@ mod tests {
         let later = now + ChronoDuration::hours(25);
         assert!(apply_action(&mut g, &a, later).is_none());
         assert_eq!(g.alert_count, 1);
-        // After the 7-day suppression window it may propose again.
-        let much_later = now + ChronoDuration::hours(24 * 7 + 1);
+        // After the 30-day suppression window it may propose again.
+        let much_later = now + ChronoDuration::hours(24 * 30 + 1);
         assert!(apply_action(&mut g, &a, much_later).is_some());
         assert_eq!(g.alert_count, 2);
     }
@@ -1419,8 +1420,8 @@ mod tests {
         // Even after the normal 24h cooldown, the decline suppresses re-proposing.
         let later = Utc::now() + ChronoDuration::hours(25);
         assert!(apply_action(&mut g, &a, later).is_none());
-        // After the suppression window (7 days) it may propose again.
-        let much_later = Utc::now() + ChronoDuration::hours(24 * 7 + 1);
+        // After the suppression window (30 days) it may propose again.
+        let much_later = Utc::now() + ChronoDuration::hours(24 * 30 + 1);
         assert!(apply_action(&mut g, &a, much_later).is_some());
     }
 

@@ -21,8 +21,8 @@ use super::{
     news::build_news_context,
     reflect::{needs_reflection, reflect_and_refine},
     search::{
-        fallback_search_queries, fetch_and_summarize, is_echo_query, is_low_value_query,
-        plan_web_search,
+        fallback_search_queries, fetch_and_summarize, is_echo_query, is_local_only_question,
+        is_low_value_query, plan_web_search,
     },
 };
 
@@ -270,7 +270,14 @@ pub async fn execute_ask_pipeline(
     // Scenario runs are deterministic: skip the web-search planner and live
     // search dispatch entirely (the scenario JSON already carries news/intel).
     if crate::crypto::ai::scenario::active_scenario().is_none() {
-        let planned = plan_web_search(&client, &config.gemini_api_key, question, &detected).await;
+        // Portfolio/decision questions are answered from local data; a web
+        // search would return SEO noise and burn a planner call.
+        let local_only_question = is_local_only_question(&question_lower);
+        let planned = if local_only_question {
+            Vec::new()
+        } else {
+            plan_web_search(&client, &config.gemini_api_key, question, &detected).await
+        };
         // Sanity-filter planner output: weak planner models sometimes echo the
         // user's question verbatim instead of composing an English query, or
         // emit useless generic searches ("why did BTC fall", "crypto forecast
@@ -280,7 +287,10 @@ pub async fn execute_ask_pipeline(
             .into_iter()
             .filter(|q| !is_echo_query(q, question) && !is_low_value_query(q))
             .collect();
-        let search_queries: Vec<String> = if !planned.is_empty() {
+        let search_queries: Vec<String> = if local_only_question {
+            // Local-only question, no planner call, no fallback query.
+            Vec::new()
+        } else if !planned.is_empty() {
             planned
         } else {
             // Planner unavailable/failed/echoed — compose a keyword query from the
@@ -409,6 +419,41 @@ pub async fn execute_ask_pipeline(
         }
     }
 
+    // Never show a bare "AI failed" error when the models are simply out of
+    // free quota (which happens every evening on Cloudflare/Groq/Gemini). We
+    // still have all the real numbers locally, so answer deterministically.
+    let final_answer = match final_answer {
+        Ok(a) => Ok(a),
+        Err(e) => {
+            let msg = e.to_string();
+            let quota = crate::crypto::ai::pools::quota_report();
+            let quota_like = quota.is_some()
+                || msg.contains("429")
+                || msg.contains("Failed to generate any successful drafts")
+                || msg.contains("last-resort")
+                || msg.to_lowercase().contains("quota");
+            if quota_like {
+                tracing::warn!(
+                    "Ask: all AI providers exhausted ({}); answering deterministically",
+                    quota.as_deref().unwrap_or("quota/rate limit")
+                );
+                Ok(build_local_answer(
+                    question,
+                    &detected,
+                    &portfolio_context,
+                    &store,
+                    user_id,
+                    &cmc,
+                    &sqlite,
+                    quota.as_deref(),
+                )
+                .await)
+            } else {
+                Err(e)
+            }
+        }
+    };
+
     // Persist the Q/A pair so replying to a previous answer continues the
     // dialogue (multi-turn memory, bounded to the last 12 exchanges).
     if let Ok(answer) = &final_answer {
@@ -422,4 +467,101 @@ pub async fn execute_ask_pipeline(
     }
 
     final_answer
+}
+
+/// Deterministic answer used when every AI provider is out of free quota.
+///
+/// This is deliberately boring: the user's own portfolio numbers plus the
+/// local forecast model. It never invents anything, so it is safe to send
+/// while the quotas reset.
+async fn build_local_answer(
+    question: &str,
+    detected: &std::collections::HashSet<String>,
+    portfolio_context: &str,
+    store: &Arc<Store>,
+    user_id: u64,
+    cmc: &Arc<CryptoClient>,
+    sqlite: &Arc<crate::db::SqliteStore>,
+    quota: Option<&str>,
+) -> String {
+    let russian = store
+        .read(user_id, |p| p.settings.preferred_language.clone())
+        .to_lowercase()
+        .starts_with("ru");
+    let mut out = String::new();
+    if russian {
+        out.push_str("⚠️ **Все бесплатные AI-провайдеры исчерпали лимит на сегодня.**\n");
+        if let Some(q) = quota {
+            out.push_str(&format!("Лимиты: {q}.\n"));
+        }
+        out.push_str("Отвечаю без AI — по твоим реальным данным и локальной модели:\n\n");
+    } else {
+        out.push_str("⚠️ **Every free AI provider is out of quota for today.**\n");
+        if let Some(q) = quota {
+            out.push_str(&format!("Limits: {q}.\n"));
+        }
+        out.push_str("Answering without AI — from your real data and the local model:\n\n");
+    }
+
+    out.push_str(&format!(
+        "**{}:** {}\n\n",
+        if russian { "Вопрос" } else { "Question" },
+        question
+    ));
+    out.push_str(&format!(
+        "**{}**\n{}\n\n",
+        if russian {
+            "Портфель"
+        } else {
+            "Portfolio"
+        },
+        portfolio_context
+    ));
+
+    // Symbols: what the question mentioned, then the user's core four.
+    let mut syms: Vec<String> = detected.iter().cloned().collect();
+    for core in ["BTC", "ETH", "SOL", "LINK"] {
+        if syms.len() >= 4 {
+            break;
+        }
+        if !syms.iter().any(|s| s.eq_ignore_ascii_case(core)) {
+            syms.push(core.to_string());
+        }
+    }
+
+    let mut forecast_block = String::new();
+    for sym in syms.iter().take(4) {
+        let built = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            crate::bot::handlers::forecast::build_forecast(sym, cmc, sqlite, None),
+        )
+        .await;
+        let Ok(Ok(f)) = built else { continue };
+        let avg = store.read(user_id, |p| p.avg_buy_price(sym));
+        forecast_block.push_str(&format!("**{}**\n", sym));
+        for line in f.action_lines(avg, russian) {
+            forecast_block.push_str(&format!("• {line}\n"));
+        }
+        forecast_block.push('\n');
+    }
+    if !forecast_block.is_empty() {
+        out.push_str(&format!(
+            "**{}**\n{}\n",
+            if russian {
+                "Прогноз (локальная модель, без AI)"
+            } else {
+                "Forecast (local model, no AI)"
+            },
+            forecast_block
+        ));
+    }
+
+    out.push_str(if russian {
+        "**Что делать:** подожди сброса квоты (время выше) — тогда ответы снова будут с AI. \
+         Команды /forecast, /dip, /portfolio работают и сейчас, они не зависят от AI."
+    } else {
+        "**What to do:** wait for the quota reset (times above) — AI answers resume then. \
+         /forecast, /dip and /portfolio already work without AI."
+    });
+    out
 }

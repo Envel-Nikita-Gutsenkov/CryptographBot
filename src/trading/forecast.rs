@@ -943,34 +943,13 @@ impl Forecast {
         }
 
         // ── Bottom line: one horizon, one verdict, one probability ──────────
-        if let Some(h) = self.reference_horizon() {
-            let (word, icon) = verdict(h.change_pct);
-            let mape = self.calibration.mape_for(h.days);
-            out.push('\n');
-            out.push_str("────────────────────────────\n");
-            out.push_str(&format!("{icon} BOTTOM LINE — {word}\n"));
-            out.push_str(&format!(
-                "{}d: {:+.1}% → {} (68%: {}–{})\n",
-                h.days,
-                h.change_pct,
-                fmt_money(h.target, decimals),
-                fmt_money(h.low, decimals),
-                fmt_money(h.high, decimals),
-            ));
-            out.push_str(&format!(
-                "P(higher in {}d): {:.0}% · model confidence {:.0}%\n",
-                h.days,
-                h.prob_up * 100.0,
-                h.confidence * 100.0,
-            ));
-            if let Some(m) = mape {
-                out.push_str(&format!(
-                    "walk-forward error at {}d: ±{:.1}% ({} origins)\n",
-                    h.days, m, self.calibration.samples
-                ));
-            }
-            out.push_str("────────────────────────────\n");
+        out.push('\n');
+        out.push_str("────────────────────────────\n");
+        out.push_str("🎯 BOTTOM LINE\n");
+        for line in self.action_lines(None, false) {
+            out.push_str(&format!("• {line}\n"));
         }
+        out.push_str("────────────────────────────\n");
 
         if !self.calibration.is_default() {
             out.push_str(&format!(
@@ -1001,10 +980,17 @@ impl Forecast {
         out
     }
 
-    /// Telegram HTML rendering: bold header and bottom line, the table (and
-    /// the accuracy block) in `<pre>` so the columns stay aligned, everything
-    /// else as normal text. Only `<b>`, `<i>`, `<code>` and `<pre>` are used.
+    /// Telegram HTML rendering with no portfolio context. Kept for callers that
+    /// only have a [`Forecast`] (CLI, tests); the bot uses [`Self::render_html_for`].
+    #[allow(dead_code)]
     pub fn render_html(&self) -> String {
+        self.render_html_for(None, false)
+    }
+
+    /// Same as [`Self::render_html`], but portfolio-aware: when `avg_entry` is
+    /// given the bottom line says how far spot is from the user's own break-even
+    /// and what to do about it. `russian` localizes the verdict lines.
+    pub fn render_html_for(&self, avg_entry: Option<f64>, russian: bool) -> String {
         let decimals = price_decimals(self.price);
         let esc = html_escape::encode_text;
         let mut out = String::new();
@@ -1037,29 +1023,22 @@ impl Forecast {
         ));
 
         if let Some(h) = self.reference_horizon() {
-            let (word, icon) = verdict(h.change_pct);
-            let mape = self.calibration.mape_for(h.days);
-            out.push_str(&format!("\n{icon} <b>BOTTOM LINE — {word}</b>\n"));
             out.push_str(&format!(
-                "<code>{}d   {:+.1}%  →  {}   (68%: {}–{})</code>\n",
-                h.days,
-                h.change_pct,
-                fmt_money(h.target, decimals),
-                fmt_money(h.low, decimals),
-                fmt_money(h.high, decimals),
+                "\n🎯 <b>{}</b>\n",
+                if russian { "Итог" } else { "Bottom line" }
             ));
-            out.push_str(&format!(
-                "P(higher in {}d): <b>{:.0}%</b> · model confidence {:.0}%\n",
-                h.days,
-                h.prob_up * 100.0,
-                h.confidence * 100.0,
-            ));
-            if let Some(m) = mape {
-                out.push_str(&format!(
-                    "walk-forward error at {}d: ±{:.1}% ({} origins)\n",
-                    h.days, m, self.calibration.samples
-                ));
+            for line in self.action_lines(avg_entry, russian) {
+                out.push_str(&format!("• {}\n", esc(&line)));
             }
+            out.push_str(&format!(
+                "<i>{}: {:.0}%</i>\n",
+                if russian {
+                    "уверенность горизонта"
+                } else {
+                    "horizon confidence"
+                },
+                h.confidence * 100.0
+            ));
         }
 
         if !self.calibration.is_default() {
@@ -1085,6 +1064,255 @@ impl Forecast {
             "<i>Not financial advice. Deterministic model; the 68% cone widens with √h.</i>",
         );
         out
+    }
+
+    /// The lowest cone bound across the 14–90 day horizons — the model's own
+    /// "where a normal dip would end" band. Used for the buy-the-dip read.
+    fn dip_zone(&self) -> Option<(f64, i64)> {
+        self.horizons
+            .iter()
+            .filter(|h| (14..=90).contains(&h.days))
+            .min_by(|a, b| {
+                a.low
+                    .partial_cmp(&b.low)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|h| (h.low, h.days))
+    }
+
+    /// Actionable bottom line: distance to the user's average entry, how likely
+    /// the dip band is to be touched, and a plain buy / scale-in / wait call.
+    ///
+    /// Hard rule (same as the dip-zone command): never suggest adding above the
+    /// average entry. Forecasts are honest coin-flips on direction, so the text
+    /// always carries the walk-forward error instead of a confident claim.
+    pub fn action_lines(&self, avg_entry: Option<f64>, russian: bool) -> Vec<String> {
+        let mut out = Vec::new();
+        let decimals = price_decimals(self.price);
+        let mu = self.drift_daily_pct / 100.0;
+        let sigma = (self.vol_daily_pct / 100.0).max(0.005);
+        use crate::trading::dipzones::{prob_below_at_horizon, touch_probability};
+
+        if let Some(h) = self.reference_horizon() {
+            out.push(if russian {
+                format!(
+                    "{}д: {:+.1}% → {} · 68%: {}–{} · P(выше) {:.0}%",
+                    h.days,
+                    h.change_pct,
+                    fmt_money(h.target, decimals),
+                    fmt_money(h.low, decimals),
+                    fmt_money(h.high, decimals),
+                    h.prob_up * 100.0
+                )
+            } else {
+                format!(
+                    "{}d: {:+.1}% → {} · 68%: {}–{} · P(up) {:.0}%",
+                    h.days,
+                    h.change_pct,
+                    fmt_money(h.target, decimals),
+                    fmt_money(h.low, decimals),
+                    fmt_money(h.high, decimals),
+                    h.prob_up * 100.0
+                )
+            });
+        }
+
+        let avg = avg_entry.filter(|a| a.is_finite() && *a > 0.0);
+        let dip = self.dip_zone();
+
+        // Probability of returning to the user's own break-even level.
+        let p_avg_90 = avg.map(|a| prob_below_at_horizon(self.price, a, mu, sigma, 90));
+        let p_dip_90 = dip.map(|(low, _)| touch_probability(self.price, low, mu, sigma, 90));
+
+        if let Some(avg) = avg {
+            let dist = (self.price / avg - 1.0) * 100.0;
+            out.push(if russian {
+                format!(
+                    "Средний вход: {} · цена {:+.1}% к нему",
+                    fmt_money(avg, decimals),
+                    dist
+                )
+            } else {
+                format!(
+                    "Average entry: {} · price is {:+.1}% vs it",
+                    fmt_money(avg, decimals),
+                    dist
+                )
+            });
+            if let (Some((low, days)), Some(p)) = (dip, p_dip_90) {
+                out.push(if russian {
+                    format!(
+                        "Зона откупа (нижняя граница конуса {}д): {} — шанс задеть за 90д ≈ {:.0}%",
+                        days,
+                        fmt_money(low, decimals),
+                        p * 100.0
+                    )
+                } else {
+                    format!(
+                        "Dip band (cone lower bound at {}d): {} — ~{:.0}% chance to touch within 90d",
+                        days,
+                        fmt_money(low, decimals),
+                        p * 100.0
+                    )
+                });
+            }
+            if let Some(p) = p_avg_90 {
+                // 100% would read like a certainty; the model never is.
+                let pct = (p * 100.0).min(99.0);
+                out.push(if russian {
+                    format!("Шанс снова оказаться ниже средней за 90д ≈ {:.0}%", pct)
+                } else {
+                    format!("~{:.0}% chance to trade below your average within 90d", pct)
+                });
+            }
+        }
+
+        // One action sentence, derived only from the numbers above. Without an
+        // average entry there is nothing to average down against, so say that
+        // instead of pretending we compared it to something.
+        let below_avg = avg.map(|a| self.price <= a).unwrap_or(false);
+        let dip_below_avg = match (dip, avg) {
+            (Some((low, _)), Some(a)) => low < a,
+            _ => false,
+        };
+        let action = if avg.is_none() {
+            if russian {
+                "Действие: средней закупки нет — добавь покупки через /add, и появится сигнал «докупать/ждать»."
+                    .to_string()
+            } else {
+                "Action: no average entry on file — add purchases with /add to get a buy/wait call."
+                    .to_string()
+            }
+        } else if below_avg {
+            if russian {
+                "Действие: цена ниже твоей средней — докупать частями по сетке, не одной суммой."
+                    .to_string()
+            } else {
+                "Action: price is below your average — scale in in tranches, not all at once."
+                    .to_string()
+            }
+        } else if dip_below_avg && p_dip_90.unwrap_or(0.0) >= 0.30 {
+            if russian {
+                "Действие: выше средней не усредняйся — жди откат в зону откупа, она реальна."
+                    .to_string()
+            } else {
+                "Action: do not average up — wait for the dip band; it is a realistic scenario."
+                    .to_string()
+            }
+        } else {
+            if russian {
+                "Действие: цена выше средней, зона откупа маловероятна — держи и не докупай по текущей."
+                    .to_string()
+            } else {
+                "Action: above average with a distant dip band — hold, don't add at these prices."
+                    .to_string()
+            }
+        };
+        out.push(action);
+
+        if let Some(m) = self
+            .calibration
+            .mape_for(self.reference_horizon().map(|h| h.days).unwrap_or(30))
+        {
+            out.push(if russian {
+                format!(
+                    "Точность модели на этом горизонте: ошибка ±{:.1}% (walk-forward)",
+                    m
+                )
+            } else {
+                format!("Model error at this horizon: ±{:.1}% (walk-forward)", m)
+            });
+        }
+        out
+    }
+
+    /// Rich-message markdown rendering: a real GFM table (Telegram renders it
+    /// as a styled table, not monospace text), the portfolio-aware bottom line
+    /// and the accuracy block. Sent via `sendRichMessage`, so it can still
+    /// carry an inline keyboard.
+    pub fn render_markdown(&self, avg_entry: Option<f64>, russian: bool) -> String {
+        let decimals = price_decimals(self.price);
+        // `$` opens LaTeX math in rich markdown, so print bare numbers and put
+        // the unit in the header instead.
+        let money =
+            |v: f64| -> String { fmt_money(v, decimals).trim_start_matches('$').to_string() };
+        let mut out = format!(
+            "📈 **{} forecast** · {} USD\n\n",
+            self.symbol,
+            money(self.price)
+        );
+        out.push_str(&format!(
+            "regime {} · RSI14 {} · vol {:.2}%/day · drift {:+.3}%/day · {} closes\n\n",
+            self.regime,
+            self.rsi14
+                .map(|r| format!("{r:.0}"))
+                .unwrap_or_else(|| "n/a".into()),
+            self.vol_daily_pct,
+            self.drift_daily_pct,
+            self.history_days,
+        ));
+
+        out.push_str("| H | Target, USD | Δ | 68% range, USD | P(up) |\n");
+        out.push_str("|---:|--:|--:|:---|--:|\n");
+        for h in &self.horizons {
+            out.push_str(&format!(
+                "| {}d | {} | {:+.1}% | {}–{} | {:.0}% |\n",
+                h.days,
+                money(h.target),
+                h.change_pct,
+                money(h.low),
+                money(h.high),
+                h.prob_up * 100.0
+            ));
+        }
+
+        out.push_str(&format!(
+            "\n🎯 **{}**\n",
+            if russian { "Итог" } else { "Bottom line" }
+        ));
+        for line in self.action_lines(avg_entry, russian) {
+            out.push_str(&format!("- {line}\n"));
+        }
+        if let Some(h) = self.reference_horizon() {
+            out.push_str(&format!(
+                "- {}: **{:.0}%**\n",
+                if russian {
+                    "уверенность горизонта"
+                } else {
+                    "horizon confidence"
+                },
+                h.confidence * 100.0
+            ));
+        }
+
+        if !self.calibration.is_default() {
+            let lines = self.accuracy_bucket_lines();
+            if !lines.is_empty() {
+                out.push_str(&format!(
+                    "\n**{}** (walk-forward, {} origins)\n",
+                    if russian {
+                        "Точность по горизонтам"
+                    } else {
+                        "Accuracy"
+                    },
+                    self.calibration.samples
+                ));
+                for line in lines {
+                    out.push_str(&format!("- `{line}`\n"));
+                }
+            }
+        }
+        for n in &self.notes {
+            out.push_str(&format!("- {n}\n"));
+        }
+        out.push_str(if russian {
+            "\n*Не финансовый совет. Детерминированная модель; 68%-коридор ширится как √h.*"
+        } else {
+            "\n*Not financial advice. Deterministic model; the 68% cone widens with √h.*"
+        });
+        // Rich markdown treats `$...$` as LaTeX math; drop every currency sign
+        // (units are already spelled out in the headers).
+        out.replace('$', "")
     }
 
     /// Compact, deterministic summary used when the AI commentary is
@@ -1271,9 +1499,10 @@ mod tests {
         let h = series(&rising(700));
         let f = forecast("BTC", h.last().unwrap().1, &h);
         let html = f.render_html();
-        // Header/bottom line are HTML, only the table is monospace.
+        // Header + bottom line are HTML, only the table is monospace.
         assert!(html.starts_with("📈 <b>BTC forecast</b>"));
-        assert!(html.contains("BOTTOM LINE"));
+        assert!(html.contains("Bottom line"));
+        assert!(html.contains('🎯'));
         assert_eq!(
             html.matches("<pre>").count(),
             html.matches("</pre>").count()
@@ -1287,6 +1516,55 @@ mod tests {
         // Dynamic table content is escaped: no raw tag can leak in.
         assert!(!pre.contains('<'));
         assert!(!f.summary_html().is_empty());
+    }
+
+    #[test]
+    fn action_lines_respect_the_average_entry_rule() {
+        let h = series(&rising(700));
+        let f = forecast("BTC", h.last().unwrap().1, &h);
+
+        // Price above the user's average entry → never "average up".
+        let above = f
+            .action_lines(Some(f.price * 0.5), false)
+            .join("\n")
+            .to_lowercase();
+        assert!(above.contains("average entry"));
+        assert!(
+            above.contains("do not average up") || above.contains("hold, don't add"),
+            "above-entry advice must not suggest buying: {above}"
+        );
+
+        // Price below the average → scale in, in tranches.
+        let below = f
+            .action_lines(Some(f.price * 2.0), true)
+            .join("\n")
+            .to_lowercase();
+        assert!(below.contains("средний вход"));
+        assert!(below.contains("докупать частями"), "{below}");
+
+        // No average known → still yields the horizon read and one action.
+        let none = f.action_lines(None, false);
+        assert!(none.len() >= 2);
+    }
+
+    #[test]
+    fn markdown_render_is_a_real_table_without_dollar_math() {
+        let h = series(&rising(700));
+        let f = forecast("BTC", h.last().unwrap().1, &h);
+        let md = f.render_markdown(Some(f.price * 0.5), false);
+        // GFM table header + separator + one row per horizon.
+        assert!(md.contains("| H | Target, USD | Δ | 68% range, USD | P(up) |"));
+        assert!(md.contains("|---:|--:|--:|:---|--:|"));
+        for h in &f.horizons {
+            let row = format!("| {}d |", h.days);
+            assert!(md.contains(&row), "missing table row {row}");
+        }
+        // A lone `$` would be parsed as LaTeX math by Telegram.
+        assert!(!md.contains('$'));
+        assert!(md.contains("Bottom line") || md.contains("Итог"));
+        // Russian variant localizes the verdict.
+        let ru = f.render_markdown(None, true);
+        assert!(ru.contains("Итог"));
     }
 
     #[test]

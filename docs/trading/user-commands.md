@@ -31,15 +31,20 @@ Append `--live` to any command to target the live DB, e.g.
 
 | Command | Description |
 |---|---|
-| `/forecast SYMBOL` | Point target + ~68% cone + P(above spot) per horizon, with walk-forward hit rate / MAPE / cone coverage |
+| `/forecast SYMBOL` | Point target + ~68% cone + P(above spot) per horizon, with walk-forward hit rate / MAPE / cone coverage, plus a portfolio-aware bottom line |
+| `/forecast verify [SYMBOLS]` | Walk-forward backtest on realized history: MAPE / direction hit rate / cone coverage, shipped vs calibrated model |
 
 Ladder: `1/3/5/7/14/30/90/180d` for BTC/ETH, `…60/90d` for SOL/LINK, `…30d`
 for anything else; horizons are also trimmed when the local history is short
 (never beyond a quarter of the observed record). Buttons: **AI Analysis**
-(narrative only — the numbers stay deterministic) and **Refresh**.
+(narrative only — the numbers stay deterministic), **Refresh** and
+**Dip zones**. The bottom line compares spot to your average entry: below it
+it says to scale in, above it never suggests averaging up, and it reports the
+chance of the dip band / your break-even actually being reached.
 
 ```
 /forecast BTC
+/forecast verify BTC ETH
 ```
 
 ## `/dip` — Dip Zones & Buy Verdict

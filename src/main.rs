@@ -178,8 +178,31 @@ async fn main_inner() -> anyhow::Result<()> {
             &config.cryptocompare_api_key,
             Some(sqlite.clone()),
         ));
-        for sym in args[2..].iter() {
+        let mut syms: Vec<String> = args[2..].iter().map(|s| s.to_uppercase()).collect();
+        let verify = syms
+            .first()
+            .map(|s| s == "VERIFY" || s == "BACKTEST" || s == "ACCURACY")
+            .unwrap_or(false);
+        if verify {
+            syms.remove(0);
+            if syms.is_empty() {
+                syms = vec!["BTC".into(), "ETH".into()];
+            }
+        }
+        for sym in syms.iter() {
             let sym = sym.to_uppercase();
+            if verify {
+                let history = bot::handlers::forecast::load_series(&sym, &cmc, &sqlite).await;
+                if history.len() < 200 {
+                    println!(
+                        "{sym}: not enough history for a backtest ({})\n",
+                        history.len()
+                    );
+                } else {
+                    println!("{}\n", trading::forecast::backtest_report(&sym, &history));
+                }
+                continue;
+            }
             match bot::handlers::build_forecast(&sym, &cmc, &sqlite, None).await {
                 Ok(f) => println!("{}\n", f.render()),
                 Err(e) => println!("{sym}: forecast failed — {e}\n"),

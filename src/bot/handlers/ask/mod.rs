@@ -64,19 +64,25 @@ pub async fn handle_ask_cmd(
     let bot_task = bot.clone();
     let chat_id = msg.chat.id;
     let loading_id = loading.id;
-    let reply_context = msg
-        .reply_to_message()
-        .and_then(|m| m.text().or_else(|| m.caption()))
-        .map(|s| {
-            let chars: Vec<char> = s.chars().collect();
+    let reply_context = msg.reply_to_message().and_then(|m| {
+        let body = m.text().or_else(|| m.caption())?;
+        // Replying to your own message is just as valid a follow-up as
+        // replying to the bot's card — mark the author so the model knows
+        // whose words it is continuing.
+        let from_bot = m.from().map(|u| u.is_bot).unwrap_or(false);
+        let who = if from_bot { "assistant (bot)" } else { "user" };
+        let full = format!("[{who}]: {body}");
+        Some({
+            let chars: Vec<char> = full.chars().collect();
             if chars.len() > 2000 {
                 let mut t: String = chars.into_iter().take(2000).collect();
                 t.push_str("... (truncated)");
                 t
             } else {
-                s.to_string()
+                full
             }
-        });
+        })
+    });
 
     tokio::spawn(async move {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -144,10 +150,18 @@ pub async fn handle_ask_cmd(
                 } else {
                     err_str
                 };
-                bot_task
-                    .send_message(chat_id, format!("❌ AI pipeline failed: {safe_err}"))
-                    .await
-                    .ok();
+                // Name the exhausted quotas so the failure is actionable instead
+                // of a generic "AI failed".
+                let quota = crate::crypto::ai::pools::quota_report();
+                let msg = match quota {
+                    Some(q) => format!(
+                        "❌ AI pipeline failed: {safe_err}\n\n\
+                         Исчерпаны бесплатные лимиты: {q}.\n\
+                         /forecast, /dip и /portfolio работают без AI."
+                    ),
+                    None => format!("❌ AI pipeline failed: {safe_err}"),
+                };
+                bot_task.send_message(chat_id, msg).await.ok();
             }
         }
     });

@@ -295,24 +295,14 @@ async fn check_user(
     // provider outage can never hide an incident. Never depend on the LLM to
     // notice security news: on 2026-10-30 the model returned `none` for a $6.3B
     // Binance breach and the user was never told.
-    let mut news_corpus = String::new();
-    // The general summary often carries market-wide incidents (hacks, exchange
-    // halts) that never make it into a single symbol's summary.
-    if let Ok(Some(general)) = sqlite.get_news_summary("GENERAL").await {
-        if !general.contains("Failed to analyze") {
-            news_corpus.push_str(&general);
-            news_corpus.push('\n');
-        }
-    }
-    for sym in &symbols {
-        if let Ok(Some(sum)) = sqlite.get_news_summary(sym).await {
-            if !sum.contains("Failed to analyze") {
-                news_corpus.push_str(&sum);
-                news_corpus.push('\n');
-            }
-        }
-    }
-    let security_topic = detect_security_topic(&news_corpus);
+    //
+    // Only articles fetched in the last 24h count, and detection is per article
+    // (never over a concatenated corpus). The old corpus-wide scan matched the
+    // word "hack" anywhere in a week of cached summaries and re-fired the same
+    // "Security incident detected" card over and over.
+    let incidents = fresh_security_incidents(sqlite, store, user_id).await;
+    let security_topic = incidents.first().map(|(t, _)| t.clone());
+    let security_text = incidents.first().map(|(_, t)| t.clone());
     let now = Utc::now();
     let fresh_security = security_topic
         .as_deref()
@@ -341,7 +331,15 @@ async fn check_user(
         Err(e) => {
             warn!("Watcher: CMC error: {e}");
             if fresh_security {
-                send_security_alert(bot, store, user_id, now, security_topic, &news_corpus).await;
+                send_security_alert(
+                    bot,
+                    store,
+                    user_id,
+                    now,
+                    security_topic,
+                    security_text.as_deref().unwrap_or(""),
+                )
+                .await;
             }
             return Ok(());
         }
@@ -349,7 +347,15 @@ async fn check_user(
 
     if quotes.is_empty() {
         if fresh_security {
-            send_security_alert(bot, store, user_id, now, security_topic, &news_corpus).await;
+            send_security_alert(
+                bot,
+                store,
+                user_id,
+                now,
+                security_topic,
+                security_text.as_deref().unwrap_or(""),
+            )
+            .await;
         }
         return Ok(());
     }
@@ -508,7 +514,9 @@ async fn check_user(
     let (headline, detail) = if result.severity == WatcherSeverity::None {
         (
             "⚠️ Security incident detected".to_string(),
-            extract_security_snippet(&news_corpus)
+            security_text
+                .as_deref()
+                .and_then(extract_security_snippet)
                 .unwrap_or_else(|| "A security incident was reported in the news feed.".into()),
         )
     } else {
@@ -627,14 +635,71 @@ pub async fn run_security_scan(bot: &Bot, store: &Store, sqlite: &SqliteStore, c
             delivered.len(),
             delivered.join(", ")
         );
-        if let Err(e) = bot
-            .send_message(ChatId(user_id as i64), &digest)
-            .parse_mode(teloxide::types::ParseMode::Html)
-            .await
-        {
-            warn!("Security scan: failed to notify user {user_id}: {e}");
+        // One pretty rich message (Telegram renders headings/lists nicely); the
+        // old HTML send stays as a fallback.
+        let rich = crate::bot::rich_messages::send_rich_message_markdown(
+            config,
+            user_id as i64,
+            &richify(&digest),
+        )
+        .await;
+        if let Err(e) = rich {
+            warn!("Security scan: rich send failed for {user_id} ({e}); using HTML");
+            if let Err(e) = bot
+                .send_message(ChatId(user_id as i64), &digest)
+                .parse_mode(teloxide::types::ParseMode::Html)
+                .await
+            {
+                warn!("Security scan: failed to notify user {user_id}: {e}");
+            }
         }
     }
+}
+
+/// Fresh (last 24h) per-article security incidents for one user, deduplicated
+/// by topic and ordered so named entities (exchanges, wallets) come first.
+///
+/// This is the only input for the AI watcher's security path: scanning a week
+/// of cached summaries made every old "hack" headline look new.
+async fn fresh_security_incidents(
+    sqlite: &SqliteStore,
+    store: &Store,
+    user_id: u64,
+) -> Vec<(String, String)> {
+    let symbols = collect_symbols(store, user_id);
+    let mut out: Vec<(String, String)> = Vec::new();
+    for sym in &symbols {
+        let Ok(articles) = sqlite.get_news_articles(sym, 1).await else {
+            continue;
+        };
+        for (_source, title, body, _url, _fetched_at) in articles {
+            let body: String = body.chars().take(SECURITY_ARTICLE_CHARS).collect();
+            let text = format!("{title}. {body}");
+            if let Some(topic) = detect_security_topic(&text) {
+                if !out.iter().any(|(t, _)| *t == topic) {
+                    out.push((topic, text));
+                }
+            }
+        }
+    }
+    prioritize_candidates(out)
+}
+
+/// Convert the `• ` bullets the security prompts produce into rich-markdown
+/// list items, so the digest renders as a proper list instead of hanging
+/// bullets. Everything else (inline `<b>`) is valid rich markdown already.
+fn richify(digest: &str) -> String {
+    digest
+        .lines()
+        .map(|l| {
+            let t = l.trim_start();
+            match t.strip_prefix("• ") {
+                Some(rest) => format!("- {rest}"),
+                None => l.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// One nicely written alert for every fresh incident, instead of one message per
@@ -754,6 +819,17 @@ mod tests {
         close: f64,
     ) -> (i64, Option<f64>, Option<f64>, Option<f64>, f64) {
         (0, Some(close), high, low, close)
+    }
+
+    #[test]
+    fn richify_turns_bullets_into_list_items() {
+        let d = "🚨 <b>Security alert</b>\n\n• Binance: $40M drained\n• Ledger: firmware implant";
+        let r = richify(d);
+        assert!(r.contains("- Binance: $40M drained"));
+        assert!(r.contains("- Ledger: firmware implant"));
+        assert!(!r.contains("• "));
+        // Header untouched.
+        assert!(r.starts_with("🚨 <b>Security alert</b>"));
     }
 
     #[test]
