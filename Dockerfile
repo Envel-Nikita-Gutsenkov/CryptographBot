@@ -6,7 +6,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
+# Commit hash baked into `/ver`; empty means build.rs falls back to a
+# digest of the sources (a plain `docker compose build` still works).
+ARG GIT_HASH=""
+ENV GIT_HASH=${GIT_HASH}
 COPY Cargo.toml Cargo.lock ./
+COPY build.rs ./build.rs
 # Cache deps layer
 RUN mkdir src && echo 'fn main(){}' > src/main.rs \
     && cargo build --release 2>/dev/null || true \

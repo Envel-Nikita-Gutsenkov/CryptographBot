@@ -137,6 +137,12 @@ fn main() -> anyhow::Result<()> {
 async fn main_inner() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     let args: Vec<String> = std::env::args().collect();
+    // `cryptograph version` — same identity `/ver` reports, usable from the
+    // container to confirm which build is actually deployed.
+    if args.len() > 1 && matches!(args[1].as_str(), "version" | "--version" | "-V") {
+        println!("{}", bot::build_summary());
+        return Ok(());
+    }
     if args.len() > 2 && (args[1] == "analyze" || args[1] == "--analyze") {
         let config = Arc::new(config::Config::from_env()?);
         if let Some(parent) = std::path::Path::new(&config.sqlite_db).parent() {

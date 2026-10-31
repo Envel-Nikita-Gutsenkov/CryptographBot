@@ -576,11 +576,53 @@ async fn handle_cancel(bot: Bot, msg: Message, dialogue: MyDialogue) -> anyhow::
     Ok(())
 }
 
+/// Build identity stamped by `build.rs` (hash + build time, two lines).
+const BUILD_INFO: &str = include_str!(concat!(env!("OUT_DIR"), "/build_info.txt"));
+
+/// Short hash of the running build (git commit, or a source digest when the
+/// binary was built without `.git`).
+pub fn build_hash() -> &'static str {
+    BUILD_INFO
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|hash| !hash.is_empty())
+        .unwrap_or("unknown")
+}
+
+/// When this binary was compiled, if the build script recorded it.
+pub fn build_timestamp() -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::TimeZone;
+    let secs: i64 = BUILD_INFO.lines().nth(1)?.trim().parse().ok()?;
+    chrono::Utc.timestamp_opt(secs, 0).single()
+}
+
+/// Single-line build identity, shared by `/ver` and `cryptograph version`.
+pub fn build_summary() -> String {
+    let built = build_timestamp()
+        .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    format!(
+        "v{} · build {} · built {}",
+        env!("CARGO_PKG_VERSION"),
+        build_hash(),
+        built
+    )
+}
+
 async fn handle_ver(bot: Bot, msg: Message) -> anyhow::Result<()> {
-    let hash = include_str!("version.txt").trim();
-    let display_hash = if hash.is_empty() { "unknown" } else { hash };
-    bot.send_message(msg.chat.id, format!("🤖 Build Hash: `{}`", display_hash))
-        .parse_mode(ParseMode::MarkdownV2)
+    let built = build_timestamp()
+        .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let text = format!(
+        "🤖 <b>Cryptograph</b> <code>v{}</code>\nBuild hash: <code>{}</code>\nBuilt: {}",
+        env!("CARGO_PKG_VERSION"),
+        build_hash(),
+        built
+    );
+    bot.send_message(msg.chat.id, text)
+        .parse_mode(ParseMode::Html)
+        .reply_markup(keyboards::main_menu())
         .await?;
     Ok(())
 }
@@ -1385,4 +1427,33 @@ async fn handle_text(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod build_identity_tests {
+    use super::*;
+
+    /// Guards the `/ver` regression: the reported hash used to be the literal
+    /// `dev` because only the Windows packaging script refreshed version.txt.
+    #[test]
+    fn build_hash_is_real() {
+        let hash = build_hash();
+        assert_ne!(
+            hash, "dev",
+            "build.rs must stamp a real hash, not the placeholder"
+        );
+        assert_ne!(hash, "unknown", "build.rs must always produce a hash");
+        assert!(!hash.is_empty());
+        assert!(
+            build_timestamp().is_some(),
+            "build time must be stamped too"
+        );
+    }
+
+    #[test]
+    fn build_summary_contains_hash() {
+        let summary = build_summary();
+        assert!(summary.contains(build_hash()), "{summary}");
+        assert!(summary.contains(env!("CARGO_PKG_VERSION")), "{summary}");
+    }
 }

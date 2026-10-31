@@ -1,6 +1,11 @@
 services:
   cryptograph:
-    build: .
+    build:
+      context: .
+      args:
+        # `GIT_HASH=$(git rev-parse --short HEAD) docker compose build` stamps
+        # the real commit into /ver; empty falls back to a source digest.
+        GIT_HASH: ${GIT_HASH:-}
     image: cryptograph:latest
     container_name: cryptograph
     restart: unless-stopped
