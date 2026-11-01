@@ -62,6 +62,10 @@ pub enum Command {
     Forecast(String),
     #[command(description = "Dip zones & buy-the-dip verdict: /dip BTC")]
     Dip(String),
+    #[command(
+        description = "Tail-risk accumulation: /sniper BTC | cash 1000 | protect on|off | alerts on|off"
+    )]
+    Sniper(String),
     #[command(description = "AI memory notes: /memo text | list | del N")]
     Memo(String),
     #[command(description = "Proactive goals: /goal text | list | del N | done N | resume N")]

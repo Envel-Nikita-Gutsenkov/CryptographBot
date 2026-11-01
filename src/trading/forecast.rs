@@ -84,7 +84,7 @@ const CALIBRATION_VOL_MULTS: [f64; 6] = [0.7, 0.85, 1.0, 1.15, 1.3, 1.45];
 
 /// Degrees of freedom of the Student-t cone. ν=4 gives ±14% wider 1σ bounds
 /// than the Gaussian and matches the fat-tailed daily returns of crypto.
-const STUDENT_DF: f64 = 4.0;
+pub(crate) const STUDENT_DF: f64 = 4.0;
 /// EWMA decay for the volatility estimate (RiskMetrics daily λ).
 const EWMA_LAMBDA: f64 = 0.94;
 
@@ -381,7 +381,7 @@ fn build_horizons(
 /// They add in quadrature. At `h=1` the second term is negligible, at `h=90` it
 /// adds ~20% width, at `h=180` ~38% — which is exactly where the Gaussian cone
 /// used to under-cover.
-fn cone_sigma_h(sigma: f64, h: f64) -> f64 {
+pub(crate) fn cone_sigma_h(sigma: f64, h: f64) -> f64 {
     let diffusion = sigma * sigma * h;
     let drift_err = sigma * sigma / DRIFT_ESTIMATE_DAYS * h * h;
     (diffusion + drift_err).sqrt()
@@ -492,7 +492,7 @@ pub(crate) fn student_t_cdf(t: f64, df: f64) -> f64 {
 
 /// Inverse Student-t CDF by bisection. The tails are monotone and bounded in
 /// practice, so ~120 halvings reach machine precision.
-fn student_t_quantile(p: f64, df: f64) -> f64 {
+pub(crate) fn student_t_quantile(p: f64, df: f64) -> f64 {
     let p = p.clamp(1e-9, 1.0 - 1e-9);
     let (mut lo, mut hi) = (-1e3, 1e3);
     for _ in 0..120 {

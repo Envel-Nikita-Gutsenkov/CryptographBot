@@ -48,6 +48,21 @@ pub struct UserSettings {
     /// regression that caused the security-alert spam.
     #[serde(default)]
     pub dip_seen: std::collections::HashMap<String, DateTime<Utc>>,
+    /// "Hardcore Dip Sniper": cash parked in stablecoins, waiting for a
+    /// left-tail anomaly. One pool shared across symbols.
+    #[serde(default)]
+    pub sniper_cash_usdt: f64,
+    /// Warn when a bucket fill would raise the average entry by >10% while the
+    /// position is already in strong profit.
+    #[serde(default = "default_true")]
+    pub sniper_protect_avg_entry: bool,
+    /// Daily bucket/capitulation pings for the sniper.
+    #[serde(default = "default_true")]
+    pub sniper_alerts_enabled: bool,
+    /// `symbol:event` → last delivery time. Map, not a single slot, so
+    /// alternating symbols/buckets can never re-send the same event.
+    #[serde(default)]
+    pub sniper_seen: std::collections::HashMap<String, DateTime<Utc>>,
 }
 
 fn default_true() -> bool {
@@ -79,6 +94,10 @@ impl Default for UserSettings {
             dip_alert_enabled: true,
             dip_cooldown_hours: 168,
             dip_seen: std::collections::HashMap::new(),
+            sniper_cash_usdt: 0.0,
+            sniper_protect_avg_entry: true,
+            sniper_alerts_enabled: true,
+            sniper_seen: std::collections::HashMap::new(),
         }
     }
 }

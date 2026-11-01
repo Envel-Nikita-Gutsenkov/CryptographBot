@@ -20,7 +20,7 @@ use crate::{
     config::Config,
     crypto::CryptoClient,
     db::{SqliteStore, Store},
-    trading::DipVerdict,
+    trading::{sniper::CapBand, DipVerdict},
 };
 
 /// Daily cadence. The first scan waits a little so it does not compete with the
@@ -156,23 +156,25 @@ async fn scan(
 ) -> anyhow::Result<()> {
     let now = Utc::now();
     for user_id in store.all_user_ids() {
-        let (enabled, quiet_start, quiet_end, symbols) = store.read(user_id, |p| {
-            let mut watch = p.settings.default_watchlist.clone();
-            watch.extend(p.holdings_by_symbol().into_keys());
-            watch.sort();
-            watch.dedup();
-            watch.truncate(MAX_SYMBOLS);
-            (
-                p.settings.dip_alert_enabled,
-                p.settings.alert_quiet_hours_start,
-                p.settings.alert_quiet_hours_end,
-                watch,
-            )
-        });
-        if !enabled
-            || symbols.is_empty()
-            || in_quiet_hours(now.hour() as u8, quiet_start, quiet_end)
-        {
+        let (dip_enabled, sniper_enabled, quiet_start, quiet_end, symbols) =
+            store.read(user_id, |p| {
+                let mut watch = p.settings.default_watchlist.clone();
+                watch.extend(p.holdings_by_symbol().into_keys());
+                watch.sort();
+                watch.dedup();
+                watch.truncate(MAX_SYMBOLS);
+                (
+                    p.settings.dip_alert_enabled,
+                    p.settings.sniper_alerts_enabled,
+                    p.settings.alert_quiet_hours_start,
+                    p.settings.alert_quiet_hours_end,
+                    watch,
+                )
+            });
+        if symbols.is_empty() || (!dip_enabled && !sniper_enabled) {
+            continue;
+        }
+        if in_quiet_hours(now.hour() as u8, quiet_start, quiet_end) {
             continue;
         }
 
@@ -186,61 +188,190 @@ async fn scan(
             }
         };
 
-        for sym in &symbols {
-            let avg = store.read(user_id, |p| p.avg_buy_price(sym));
-            // Entry-relative alerts only. Without a cost basis we cannot say
-            // "below your average", and a plain zone ping would be noise.
-            let Some(avg) = avg.filter(|a| *a > 0.0) else {
-                continue;
-            };
-            let Some(price) = quotes
-                .iter()
-                .find(|q| q.symbol.eq_ignore_ascii_case(sym))
-                .map(|q| q.price_usd)
-            else {
-                continue;
-            };
-            if price > avg * 1.0001 {
-                continue;
-            }
-
-            let report = match build_dip_report(sym, cmc, sqlite, Some(price), Some(avg)).await {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!("Dip worker: report for {sym} failed: {e}");
-                    continue;
-                }
-            };
-            if !report.verdict.is_buy() {
-                continue;
-            }
-
-            let zone_key = match &report.verdict {
-                DipVerdict::BuyNow => format!("{sym}:now"),
-                DipVerdict::ScaleIn { zone_price, .. } => format!("{sym}:{zone_price:.0}"),
-                _ => continue,
-            };
-
-            let should_send = store.write(user_id, |p| {
-                let cooldown_hours = p.settings.dip_cooldown_hours.max(1) as i64;
-                allow_send(&mut p.settings.dip_seen, &zone_key, now, cooldown_hours)
-            });
-            if !should_send {
-                continue;
-            }
-
-            let text = format!("🔔 <b>Proactive dip alert</b>\n\n{}", report.render_html());
-            let sent = bot
-                .send_message(ChatId(user_id as i64), &text)
-                .parse_mode(teloxide::types::ParseMode::Html)
-                .reply_markup(keyboards::dip_actions(sym))
-                .await;
-            if let Err(e) = sent {
-                warn!("Dip worker: send to {user_id} failed: {e}");
-            } else {
-                info!("Dip worker: alert for {sym} (zone {zone_key}) sent to {user_id}");
-            }
+        if dip_enabled {
+            scan_dips(bot, store, cmc, sqlite, user_id, &symbols, &quotes, now).await;
+        }
+        if sniper_enabled {
+            scan_sniper(bot, store, cmc, sqlite, user_id, &symbols, &quotes, now).await;
         }
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn scan_dips(
+    bot: &Bot,
+    store: &Store,
+    cmc: &CryptoClient,
+    sqlite: &SqliteStore,
+    user_id: u64,
+    symbols: &[String],
+    quotes: &[crate::models::CmcQuote],
+    now: DateTime<Utc>,
+) {
+    for sym in symbols {
+        let avg = store.read(user_id, |p| p.avg_buy_price(sym));
+        // Entry-relative alerts only. Without a cost basis we cannot say
+        // "below your average", and a plain zone ping would be noise.
+        let Some(avg) = avg.filter(|a| *a > 0.0) else {
+            continue;
+        };
+        let Some(price) = quotes
+            .iter()
+            .find(|q| q.symbol.eq_ignore_ascii_case(sym))
+            .map(|q| q.price_usd)
+        else {
+            continue;
+        };
+        if price > avg * 1.0001 {
+            continue;
+        }
+
+        let report = match build_dip_report(sym, cmc, sqlite, Some(price), Some(avg)).await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Dip worker: report for {sym} failed: {e}");
+                continue;
+            }
+        };
+        if !report.verdict.is_buy() {
+            continue;
+        }
+
+        let zone_key = match &report.verdict {
+            DipVerdict::BuyNow => format!("{sym}:now"),
+            DipVerdict::ScaleIn { zone_price, .. } => format!("{sym}:{zone_price:.0}"),
+            _ => continue,
+        };
+
+        let should_send = store.write(user_id, |p| {
+            let cooldown_hours = p.settings.dip_cooldown_hours.max(1) as i64;
+            allow_send(&mut p.settings.dip_seen, &zone_key, now, cooldown_hours)
+        });
+        if !should_send {
+            continue;
+        }
+
+        let text = format!("🔔 <b>Proactive dip alert</b>\n\n{}", report.render_html());
+        let sent = bot
+            .send_message(ChatId(user_id as i64), &text)
+            .parse_mode(teloxide::types::ParseMode::Html)
+            .reply_markup(keyboards::dip_actions(sym))
+            .await;
+        if let Err(e) = sent {
+            warn!("Dip worker: send to {user_id} failed: {e}");
+        } else {
+            info!("Dip worker: alert for {sym} (zone {zone_key}) sent to {user_id}");
+        }
+    }
+}
+
+/// Hardcore Dip Sniper pass: fires when spot reaches one of the three limit
+/// buckets (cash configured) or when the capitulation score spikes. Dedup lives
+/// in `sniper_seen`, keyed by symbol+bucket/band, so alternating symbols can
+/// never re-send the same event — the bug the security watcher used to have.
+#[allow(clippy::too_many_arguments)]
+async fn scan_sniper(
+    bot: &Bot,
+    store: &Store,
+    cmc: &CryptoClient,
+    sqlite: &SqliteStore,
+    user_id: u64,
+    symbols: &[String],
+    quotes: &[crate::models::CmcQuote],
+    now: DateTime<Utc>,
+) {
+    let (cash, protect, russian, cooldown_hours) = store.read(user_id, |p| {
+        (
+            p.settings.sniper_cash_usdt,
+            p.settings.sniper_protect_avg_entry,
+            p.settings
+                .preferred_language
+                .to_lowercase()
+                .starts_with("ru"),
+            p.settings.dip_cooldown_hours.max(1) as i64,
+        )
+    });
+
+    for sym in symbols {
+        let Some(price) = quotes
+            .iter()
+            .find(|q| q.symbol.eq_ignore_ascii_case(sym))
+            .map(|q| q.price_usd)
+        else {
+            continue;
+        };
+        let (avg, position) = store.read(user_id, |p| {
+            (
+                p.avg_buy_price(sym),
+                p.holdings_by_symbol().get(sym).copied().unwrap_or(0.0),
+            )
+        });
+        let report = match crate::bot::handlers::build_sniper_report(
+            sym,
+            cmc,
+            sqlite,
+            Some(price),
+            avg,
+            position,
+            cash,
+            protect,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Sniper worker: report for {sym} failed: {e}");
+                continue;
+            }
+        };
+
+        // A reached bucket is the most actionable signal: spot is already inside
+        // the limit order. Only useful when there is cash to deploy.
+        let event = if cash > 0.0 {
+            report
+                .triggered_bucket()
+                .map(|b| (format!("{sym}:snp:b{}", b.index), "bucket"))
+        } else {
+            None
+        }
+        .or_else(|| {
+            let cap = report.capitulation;
+            let fire =
+                cap.band == CapBand::Capitulation || (cap.band == CapBand::Alert && cash > 0.0);
+            fire.then(|| {
+                (
+                    format!("{sym}:snp:{}", cap.band.label().to_lowercase()),
+                    "cap",
+                )
+            })
+        });
+
+        let Some((key, kind)) = event else {
+            continue;
+        };
+        let should_send = store.write(user_id, |p| {
+            allow_send(&mut p.settings.sniper_seen, &key, now, cooldown_hours)
+        });
+        if !should_send {
+            continue;
+        }
+
+        let title = if russian {
+            "🩸 Dip Sniper: сигнал"
+        } else {
+            "🩸 Dip Sniper signal"
+        };
+        let text = format!("<b>{title}</b>\n\n{}", report.render_html(russian));
+        let sent = bot
+            .send_message(ChatId(user_id as i64), &text)
+            .parse_mode(teloxide::types::ParseMode::Html)
+            .reply_markup(keyboards::sniper_actions(sym))
+            .await;
+        if let Err(e) = sent {
+            warn!("Sniper worker: send to {user_id} failed: {e}");
+        } else {
+            info!("Sniper worker: {kind} alert for {sym} ({key}) sent to {user_id}");
+        }
+    }
 }

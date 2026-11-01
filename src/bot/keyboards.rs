@@ -315,7 +315,12 @@ pub fn forecast_actions(symbol: &str) -> InlineKeyboardMarkup {
             "🔄 Refresh",
             &format!("fc:fx:{symbol}"),
         ),
-        row1("🪙 Dip zones", &format!("dip:fx:{symbol}")),
+        row2(
+            "🪙 Dip zones",
+            &format!("dip:fx:{symbol}"),
+            "🩸 Sniper",
+            &format!("snp:cmd:{symbol}"),
+        ),
         row1("🏠 Main Menu", "menu"),
     ])
 }
@@ -329,6 +334,27 @@ pub fn dip_actions(symbol: &str) -> InlineKeyboardMarkup {
             &format!("dip:ai:{symbol}"),
             "🔄 Refresh",
             &format!("dip:fx:{symbol}"),
+        ),
+        row1("🩸 Sniper", &format!("snp:cmd:{symbol}")),
+        row1("🏠 Main Menu", "menu"),
+    ])
+}
+
+/// Actions attached to every Dip Sniper report: AI narration, refresh, and a
+/// jump to the two reports it is built on.
+pub fn sniper_actions(symbol: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new([
+        row2(
+            "🧠 AI Analysis",
+            &format!("snp:ai:{symbol}"),
+            "🔄 Refresh",
+            &format!("snp:fx:{symbol}"),
+        ),
+        row2(
+            "🪙 Dip zones",
+            &format!("dip:fx:{symbol}"),
+            "📈 Forecast",
+            &format!("fc:fx:{symbol}"),
         ),
         row1("🏠 Main Menu", "menu"),
     ])

@@ -30,6 +30,7 @@ pub mod history_file;
 pub mod market_calendar;
 pub mod nlp;
 pub mod regime;
+pub mod sniper;
 pub mod store;
 pub mod strategies;
 pub mod tuner;
@@ -79,6 +80,8 @@ pub use market_calendar::{
 pub use nlp::{parse_trade_report, ParsedTradeReport};
 #[allow(unused_imports)]
 pub use regime::{classify_closes, classify_history, MarketRegime};
+#[allow(unused_imports)]
+pub use sniper::{sniper_report, Candle, DipSniperReport, SniperBucket};
 #[allow(unused_imports)]
 pub use store::{
     AgentDebate, AllocationStatus, BacktestRun, EngineConfigRecord, LotStatus, NewAllocation,
