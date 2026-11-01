@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use teloxide::{
     prelude::*,
-    types::{CallbackQuery, ChatId, ParseMode},
+    types::{CallbackQuery, ChatId, MessageId, ParseMode},
 };
 use tracing::warn;
 
@@ -203,6 +203,19 @@ pub async fn handle_forecast_cmd(
     Ok(())
 }
 
+/// Where a callback should be answered and whether it can be edited in place.
+///
+/// Rich messages (`sendRichMessage`) come back to teloxide 0.12 without a
+/// parseable `message`, so requiring one made every inline button on a rich
+/// forecast a silent no-op. Falling back to the caller's private chat and
+/// sending a fresh message keeps the button alive either way.
+pub(crate) fn callback_target(q: &CallbackQuery) -> (ChatId, Option<MessageId>) {
+    match q.message.as_ref() {
+        Some(m) => (m.chat.id, Some(m.id)),
+        None => (ChatId(q.from.id.0 as i64), None),
+    }
+}
+
 /// Callbacks attached to a forecast message:
 /// * `fc:ai:SYM` — ask the AI to narrate the deterministic table.
 /// * `fc:fx:SYM` — rebuild the forecast from the freshest data, in place.
@@ -217,16 +230,7 @@ pub async fn handle_forecast_callback(
     let _ = bot.answer_callback_query(&q.id).await;
 
     let data = q.data.clone().unwrap_or_default();
-    // Rich messages (`sendRichMessage`) come back to teloxide 0.12 without a
-    // parseable `message`, so requiring it made every button on a rich
-    // forecast message a silent no-op. Fall back to the caller's private chat
-    // and send a fresh message instead of editing in place.
-    let chat_id = q
-        .message
-        .as_ref()
-        .map(|m| m.chat.id)
-        .unwrap_or(ChatId(q.from.id.0 as i64));
-    let message_id = q.message.as_ref().map(|m| m.id);
+    let (chat_id, message_id) = callback_target(&q);
     let user_id = q.from.id.0;
     tracing::info!(
         "forecast callback: data={data} chat={} in_place={}",
@@ -401,4 +405,45 @@ pub async fn handle_forecast_callback(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::callback_target;
+    use teloxide::types::CallbackQuery;
+
+    fn query(json: &str) -> CallbackQuery {
+        serde_json::from_str(json).expect("valid CallbackQuery")
+    }
+
+    #[test]
+    fn callback_without_a_message_still_has_a_target() {
+        // The prod bug: a button on a rich message arrives with no `message`,
+        // and requiring it turned every tap into a silent no-op.
+        let q = query(
+            r#"{"id":"1","from":{"id":123456789,"is_bot":false,"first_name":"N"},
+                "chat_instance":"x","data":"fc:fx:BTC"}"#,
+        );
+        assert!(q.message.is_none());
+        let (chat_id, message_id) = callback_target(&q);
+        assert_eq!(chat_id.0, 123456789, "must answer in the caller's chat");
+        assert!(
+            message_id.is_none(),
+            "nothing to edit — send a fresh message"
+        );
+    }
+
+    #[test]
+    fn callback_with_a_message_edits_in_place() {
+        let q = query(
+            r#"{"id":"2","from":{"id":1,"is_bot":false,"first_name":"A"},
+                "message":{"message_id":42,"date":1700000000,
+                  "chat":{"id":777,"type":"private","first_name":"A"},
+                  "text":"forecast"},
+                "chat_instance":"y","data":"fc:ai:ETH"}"#,
+        );
+        let (chat_id, message_id) = callback_target(&q);
+        assert_eq!(chat_id.0, 777);
+        assert_eq!(message_id.expect("message id").0, 42);
+    }
 }

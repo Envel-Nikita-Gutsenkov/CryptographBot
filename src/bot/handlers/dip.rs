@@ -139,12 +139,7 @@ pub async fn handle_dip_callback(
     let data = q.data.clone().unwrap_or_default();
     // Same as forecast: rich-message callbacks arrive without a parseable
     // `message`, so fall back to the caller's chat instead of going silent.
-    let chat_id = q
-        .message
-        .as_ref()
-        .map(|m| m.chat.id)
-        .unwrap_or(ChatId(q.from.id.0 as i64));
-    let message_id = q.message.as_ref().map(|m| m.id);
+    let (chat_id, message_id) = super::forecast::callback_target(&q);
     let user_id = q.from.id.0;
     tracing::info!(
         "dip callback: data={data} chat={} in_place={}",
