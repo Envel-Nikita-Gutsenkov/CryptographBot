@@ -55,12 +55,23 @@ pub async fn send_rich_message_markdown_with_markup(
 
     let res = client.post(&url).json(&req).send().await?;
 
-    if !res.status().is_success() {
-        let text = res.text().await?;
-        return Err(anyhow::anyhow!("Failed to send rich message: {}", text));
+    let status = res.status();
+    let body = res.text().await.unwrap_or_default();
+    // Telegram returns HTTP 200 with `{"ok":false,...}` for some rejections,
+    // so a bare status check reports success on a message that never rendered.
+    if !status.is_success() || !is_ok(&body) {
+        return Err(anyhow::anyhow!("Failed to send rich message: {body}"));
     }
 
     Ok(())
+}
+
+/// True when the Bot API response body says `"ok": true`.
+fn is_ok(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("ok").and_then(|ok| ok.as_bool()))
+        .unwrap_or(false)
 }
 
 /// Edit an existing message into a rich (markdown) one, keeping/replacing the
@@ -89,10 +100,28 @@ pub async fn edit_rich_message_markdown(
 
     let res = client.post(&url).json(&req).send().await?;
 
-    if !res.status().is_success() {
-        let text = res.text().await?;
-        return Err(anyhow::anyhow!("Failed to edit rich message: {}", text));
+    let status = res.status();
+    let body = res.text().await.unwrap_or_default();
+    if !status.is_success() || !is_ok(&body) {
+        return Err(anyhow::anyhow!("Failed to edit rich message: {body}"));
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_ok;
+
+    #[test]
+    fn ok_flag_is_parsed_from_the_response_body() {
+        assert!(is_ok(r#"{"ok":true,"result":{"message_id":1}}"#));
+        // Whitespace must not defeat the check.
+        assert!(is_ok("{ \"ok\" : true }"));
+        // HTTP 200 + rejected payload: the case that used to look like success.
+        assert!(!is_ok(
+            r#"{"ok":false,"error_code":400,"description":"Bad Request: can't parse rich message"}"#
+        ));
+        assert!(!is_ok("<html>502 Bad Gateway</html>"));
+    }
 }

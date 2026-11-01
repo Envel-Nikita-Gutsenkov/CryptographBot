@@ -9,13 +9,22 @@
 //! Model (per horizon `h` days):
 //! * `mu` — daily log drift, a blend of the 20/50/200-day log returns,
 //!   adjusted for the current regime, RSI extremes and monthly seasonality,
-//!   clamped to ±0.5%/day so a parabolic week cannot produce nonsense.
-//! * `sigma` — daily volatility (stddev of log returns over 20 closes).
+//!   clamped to ±0.5%/day so a parabolic week cannot produce nonsense. In a
+//!   `SIDEWAYS` regime the momentum term is zeroed: a flat market has no trend
+//!   to extrapolate, and letting a 20-day slope leak in as -0.1%/day turned a
+//!   coin-flip into a fake 30-day downtrend.
+//! * `sigma` — daily volatility: the 20-close stddev of log returns blended
+//!   50/50 with a RiskMetrics EWMA (λ=0.94) so recent shocks weigh more.
 //! * target = price · e^(mu·s·h / sqrt(1 + h/decay)) — momentum decays with
 //!   the horizon so a hot week is not extrapolated into a fantasy year.
-//! * range  = target · e^(±sigma·√h) — the ~68% cone, widening with √h.
-//! * P(up)  = Φ(mu·s·√h / sigma) — the model's own probability the price is
-//!   higher at that horizon.
+//! * range  = target · e^(±q·sigma·√h) where `q` is the Student-t quantile
+//!   (ν=4, q≈1.14) instead of the normal 1σ: crypto has fat tails, and a pure
+//!   Gaussian cone under-covered the 90-day horizon (48–58% inside vs 68%).
+//! * P(up)  = 1 − T(−mu·s·√h / sigma) — same Student-t distribution.
+//!
+//! Cone width and the drift term are then re-fitted per symbol by
+//! [`calibrate`], so the wider t-quantile is not double-counted with the
+//! volatility multiplier.
 //!
 //! ## Adaptivity
 //!
@@ -36,7 +45,7 @@
 //! 90 days. Anything else is capped at 30 days and at `history_days / 4`.
 
 use crate::crypto::ai::indicators::{rsi, sma, volatility};
-use crate::trading::market_calendar::monthly_seasonality_detailed;
+use crate::trading::market_calendar::monthly_seasonality_stats;
 use crate::trading::regime::{classify_closes, MarketRegime};
 
 const DAY_MS: i64 = 86_400_000;
@@ -53,6 +62,12 @@ const DRIFT_DECAY_DAYS: f64 = 30.0;
 /// confidence identical at every horizon. Crypto never moves in a straight line,
 /// so we keep a conservative 0.3%/day floor.
 const MIN_DAILY_SIGMA: f64 = 0.003;
+/// Effective sample size behind the drift estimate. The drift is fitted to the
+/// last few hundred closes, so it carries an estimation error of ~sigma/√N that
+/// compounds *linearly* with the horizon — the term a pure random-walk cone
+/// ignores, and the reason a 90-day cone built from sigma·√h covered only
+/// ~50% of outcomes instead of 68%.
+const DRIFT_ESTIMATE_DAYS: f64 = 200.0;
 
 /// Calibration looks back this far and samples every `CALIBRATION_STEP_DAYS`.
 const CALIBRATION_WINDOW_DAYS: usize = 400;
@@ -62,8 +77,16 @@ const CALIBRATION_DECAYS: [f64; 8] = [10.0, 20.0, 30.0, 45.0, 60.0, 90.0, 180.0,
 /// Candidate drift shrink factors. Zero is excluded: a model that always
 /// predicts "no change" is useless even if its MAPE is slightly lower.
 const CALIBRATION_SCALES: [f64; 4] = [0.3, 0.5, 0.75, 1.0];
-/// Candidate cone-width multipliers around the measured volatility.
-const CALIBRATION_VOL_MULTS: [f64; 4] = [0.85, 1.0, 1.15, 1.3];
+/// Candidate cone-width multipliers around the measured volatility. The range
+/// reaches below 0.8 so calibration can *narrow* the cone after the Student-t
+/// quantile widened it — otherwise the two effects would double-count.
+const CALIBRATION_VOL_MULTS: [f64; 6] = [0.7, 0.85, 1.0, 1.15, 1.3, 1.45];
+
+/// Degrees of freedom of the Student-t cone. ν=4 gives ±14% wider 1σ bounds
+/// than the Gaussian and matches the fat-tailed daily returns of crypto.
+const STUDENT_DF: f64 = 4.0;
+/// EWMA decay for the volatility estimate (RiskMetrics daily λ).
+const EWMA_LAMBDA: f64 = 0.94;
 
 /// Full ladder for majors with a decade of daily closes.
 pub const HORIZONS_MAJOR: [i64; 8] = [1, 3, 5, 7, 14, 30, 90, 180];
@@ -203,6 +226,26 @@ fn window_daily_log_return(closes: &[f64], days: usize) -> Option<f64> {
     Some((to / from).ln() / days as f64)
 }
 
+/// RiskMetrics EWMA volatility of daily log returns (λ=0.94), as a fraction
+/// per day. Seeded from the first 20 squared returns so the recursion does not
+/// start from zero variance. `None` when there are too few usable closes.
+fn ewma_vol(closes: &[f64], lambda: f64) -> Option<f64> {
+    let rets: Vec<f64> = closes
+        .windows(2)
+        .filter(|w| w[0] > 0.0 && w[1] > 0.0)
+        .map(|w| (w[1] / w[0]).ln())
+        .collect();
+    if rets.len() < 20 {
+        return None;
+    }
+    let seed = rets[..20].iter().map(|r| r * r).sum::<f64>() / 20.0;
+    let mut var = seed;
+    for r in &rets {
+        var = lambda * var + (1.0 - lambda) * r * r;
+    }
+    Some(var.sqrt())
+}
+
 /// Deterministic drift for the day-`h` horizon, before horizon-specific terms.
 /// `has_movement` gates the RSI-extreme adjustment: a flat series reads RSI=100
 /// (an artifact of zero losses), and treating that as "overbought" would invent
@@ -230,13 +273,17 @@ fn daily_drift(
     }
 
     match regime {
+        // A flat market has no trend to extrapolate. Extrapolating a 20-day
+        // slope here is what produced "SIDEWAYS · drift -0.097%/day" and a
+        // fabricated -2% 30-day target; zero it and let RSI carry the only
+        // tilt below.
+        MarketRegime::Sideways => mu = 0.0,
         // Near the ATH with hot momentum: mean reversion risk dominates.
         MarketRegime::Euphoria => mu *= 0.5,
         // Buying-the-fear zone: expect a bounce, but keep it modest.
         MarketRegime::Dip => mu += 0.0008,
         MarketRegime::Bear => mu -= 0.0003,
         MarketRegime::Bull => mu += 0.0002,
-        MarketRegime::Sideways => {}
     }
 
     if has_movement {
@@ -265,10 +312,20 @@ struct CoreStats {
 fn core_stats(closes: &[f64]) -> CoreStats {
     let regime = classify_closes(closes);
     let rsi14 = rsi(closes, 14);
+    // Blend the 20-day sample stddev (stable, slow) with the EWMA estimate
+    // (responsive, weights the latest shocks). Either alone has a known bias:
+    // the sample stddev lags a regime change, the EWMA overreacts to one spike.
     let raw_vol = volatility(closes, 20).unwrap_or(0.0);
+    let ewma_pct = ewma_vol(closes, EWMA_LAMBDA)
+        .map(|v| v * 100.0)
+        .unwrap_or(0.0);
+    let blended_vol = match (raw_vol > 0.0, ewma_pct > 0.0) {
+        (true, true) => 0.5 * raw_vol + 0.5 * ewma_pct,
+        _ => raw_vol.max(ewma_pct),
+    };
     CoreStats {
         mu: daily_drift(closes, regime, rsi14, raw_vol > 0.0),
-        sigma: (raw_vol / 100.0).clamp(MIN_DAILY_SIGMA, 10.0),
+        sigma: (blended_vol / 100.0).clamp(MIN_DAILY_SIGMA, 10.0),
         regime,
         rsi14,
     }
@@ -284,20 +341,23 @@ fn build_horizons(
     vol_mult: f64,
 ) -> Vec<HorizonForecast> {
     let sigma = stats.sigma * vol_mult;
+    // Student-t instead of Gaussian: one quantile, computed once per call.
+    let q68 = t68_mult();
     horizons
         .iter()
         .map(|&days| {
             let h = days as f64;
-            let sigma_h = sigma * h.sqrt();
+            let sigma_h = cone_sigma_h(sigma, h);
             // Momentum decays with the horizon instead of compounding linearly:
             // a 0.5%/day recent run is credible for a week, not for half a year.
             let mu_h = stats.mu * drift_scale / (1.0 + h / decay_days).sqrt();
             let total_drift = (mu_h * h).clamp(-MAX_CUM_DRIFT, MAX_CUM_DRIFT);
             let target = price * total_drift.exp();
-            let low = target * (-sigma_h).exp();
-            let high = target * sigma_h.exp();
+            let low = target * (-q68 * sigma_h).exp();
+            let high = target * (q68 * sigma_h).exp();
             let confidence = (1.0 / (1.0 + 4.0 * sigma_h)).clamp(0.05, 0.95);
-            let prob_up = norm_cdf(mu_h * h / sigma_h.max(f64::EPSILON));
+            let z = mu_h * h / sigma_h.max(f64::EPSILON);
+            let prob_up = 1.0 - student_t_cdf(-z, STUDENT_DF);
             HorizonForecast {
                 days,
                 target,
@@ -311,6 +371,22 @@ fn build_horizons(
         .collect()
 }
 
+/// Width of the ~68% cone in log-space for a `days` horizon.
+///
+/// Two independent sources of uncertainty:
+/// * diffusion — `sigma·√h`, the classic random-walk term;
+/// * drift estimation error — `(sigma/√N)·h`, because the fitted drift is only
+///   known to that precision and its error grows with the horizon, not its
+///   square root.
+/// They add in quadrature. At `h=1` the second term is negligible, at `h=90` it
+/// adds ~20% width, at `h=180` ~38% — which is exactly where the Gaussian cone
+/// used to under-cover.
+fn cone_sigma_h(sigma: f64, h: f64) -> f64 {
+    let diffusion = sigma * sigma * h;
+    let drift_err = sigma * sigma / DRIFT_ESTIMATE_DAYS * h * h;
+    (diffusion + drift_err).sqrt()
+}
+
 /// Standard normal CDF via Abramowitz–Stegun 7.1.26 (|error| < 1.5e-7).
 pub(crate) fn norm_cdf(x: f64) -> f64 {
     let z = x / std::f64::consts::SQRT_2;
@@ -321,6 +397,120 @@ pub(crate) fn norm_cdf(x: f64) -> f64 {
     let erf = 1.0 - poly * (-z * z).exp();
     let erf = if z >= 0.0 { erf } else { -erf };
     0.5 * (1.0 + erf)
+}
+
+/// Lanczos approximation of ln Γ(x) for x > 0 (g=7, n=9). Accurate to ~1e-13,
+/// which is far beyond what a quantile bisection needs.
+fn ln_gamma(x: f64) -> f64 {
+    const COF: [f64; 9] = [
+        0.999_999_999_999_809_9,
+        676.520_368_121_885_1,
+        -1_259.139_216_722_402_8,
+        771.323_428_777_653_1,
+        -176.615_029_162_140_6,
+        12.507_343_278_686_905,
+        -0.138_571_095_265_720_12,
+        9.984_369_578_019_572e-6,
+        1.505_632_735_149_311_6e-7,
+    ];
+    if x < 0.5 {
+        // Reflection: Γ(x)Γ(1-x) = π / sin(πx)
+        return (std::f64::consts::PI / (std::f64::consts::PI * x).sin()).ln() - ln_gamma(1.0 - x);
+    }
+    let x = x - 1.0;
+    let mut a = COF[0];
+    let t = x + 7.5;
+    for (i, &c) in COF.iter().enumerate().skip(1) {
+        a += c / (x + i as f64);
+    }
+    0.5 * (2.0 * std::f64::consts::PI).ln() + (x + 0.5) * t.ln() - t + a.ln()
+}
+
+/// Continued fraction for the incomplete beta:
+/// `I_x(a,b) = x^a(1-x)^b / (a·B(a,b)) · CF` with
+/// `CF = 1/(1 + d₁/(1 + d₂/(1 + …)))`.
+///
+/// Evaluated backwards from a deep term, which is unconditionally stable for
+/// fractional `b` (the forward Lentz variant drifted by up to 2× for b=0.5 and
+/// even went negative — and that is the exact case the t-distribution uses).
+fn beta_cf(a: f64, b: f64, x: f64) -> f64 {
+    const DEPTH: usize = 400;
+    fn d_term(a: f64, b: f64, x: f64, m: usize) -> f64 {
+        if m % 2 == 1 {
+            let k = ((m - 1) / 2) as f64;
+            -(a + k) * (a + b + k) * x / ((a + 2.0 * k) * (a + 2.0 * k + 1.0))
+        } else {
+            let k = (m / 2) as f64;
+            k * (b - k) * x / ((a + 2.0 * k - 1.0) * (a + 2.0 * k))
+        }
+    }
+    let mut f = 1.0;
+    for m in (1..=DEPTH).rev() {
+        f = 1.0 / (1.0 + d_term(a, b, x, m) * f);
+    }
+    f
+}
+
+/// Regularised incomplete beta I_x(a, b), 0..1.
+fn beta_regularized(a: f64, b: f64, x: f64) -> f64 {
+    if !(0.0..=1.0).contains(&x) {
+        return f64::NAN;
+    }
+    if x <= 0.0 {
+        return 0.0;
+    }
+    if x >= 1.0 {
+        return 1.0;
+    }
+    // ln B(a,b) = lnΓ(a)+lnΓ(b)-lnΓ(a+b); the beta function is exp(-ln_beta).
+    let ln_beta = ln_gamma(a + b) - ln_gamma(a) - ln_gamma(b);
+    let cf = beta_cf(a, b, x);
+    let log_front = a * x.ln() + b * (1.0 - x).ln() + ln_beta - a.ln();
+    (log_front.exp() * cf).clamp(0.0, 1.0)
+}
+
+/// Student-t CDF with `df` degrees of freedom, via the incomplete beta:
+/// `F(t) = 1 − ½·I_{ν/(ν+t²)}(ν/2, ½)` for `t ≥ 0`.
+pub(crate) fn student_t_cdf(t: f64, df: f64) -> f64 {
+    if t.is_nan() {
+        return f64::NAN;
+    }
+    if t == f64::INFINITY {
+        return 1.0;
+    }
+    if t == f64::NEG_INFINITY {
+        return 0.0;
+    }
+    let x = df / (df + t * t);
+    let tail = 0.5 * beta_regularized(df / 2.0, 0.5, x);
+    if t >= 0.0 {
+        1.0 - tail
+    } else {
+        tail
+    }
+}
+
+/// Inverse Student-t CDF by bisection. The tails are monotone and bounded in
+/// practice, so ~120 halvings reach machine precision.
+fn student_t_quantile(p: f64, df: f64) -> f64 {
+    let p = p.clamp(1e-9, 1.0 - 1e-9);
+    let (mut lo, mut hi) = (-1e3, 1e3);
+    for _ in 0..120 {
+        let mid = 0.5 * (lo + hi);
+        if student_t_cdf(mid, df) < p {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+/// The ~68% Student-t quantile (q ≈ 1.14 for ν=4), cached: it only depends on
+/// the fixed `STUDENT_DF`, but it is used inside calibration loops.
+pub(crate) fn t68_mult() -> f64 {
+    static CACHE: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| student_t_quantile(0.841_344_7, STUDENT_DF))
 }
 
 /// Walk-forward calibration of decay / drift shrink / cone width against the
@@ -352,23 +542,28 @@ pub fn calibrate(symbol: &str, history: &[(i64, f64)]) -> Calibration {
     }
 
     let mut best: Option<(f64, f64, f64, f64)> = None;
+    let q68 = t68_mult();
     for &decay in &CALIBRATION_DECAYS {
         for &scale in &CALIBRATION_SCALES {
             for &vol_mult in &CALIBRATION_VOL_MULTS {
                 let mut sum_err = 0.0;
                 let mut count = 0usize;
                 let mut cone_miss = 0usize;
+                // Per-horizon counts, so a well-covered 1-day cone cannot hide an
+                // under-covered 90-day one behind a single global average.
+                let mut h_count = vec![0usize; horizons.len()];
+                let mut h_miss = vec![0usize; horizons.len()];
 
                 for &(origin, stats) in &origins {
                     let price = closes[origin];
-                    for &days in horizons {
+                    for (k, &days) in horizons.iter().enumerate() {
                         let j = origin + days as usize;
                         if j >= n {
                             continue;
                         }
                         let actual = closes[j];
                         let h = days as f64;
-                        let sigma_h = stats.sigma * vol_mult * h.sqrt();
+                        let sigma_h = cone_sigma_h(stats.sigma * vol_mult, h);
                         let mu_h = stats.mu * scale / (1.0 + h / decay).sqrt();
                         let total = (mu_h * h).clamp(-MAX_CUM_DRIFT, MAX_CUM_DRIFT);
                         let target = price * total.exp();
@@ -376,8 +571,12 @@ pub fn calibrate(symbol: &str, history: &[(i64, f64)]) -> Calibration {
                         let err = (target / actual - 1.0).abs();
                         sum_err += err;
                         count += 1;
-                        if actual < target * (-sigma_h).exp() || actual > target * sigma_h.exp() {
+                        h_count[k] += 1;
+                        if actual < target * (-q68 * sigma_h).exp()
+                            || actual > target * (q68 * sigma_h).exp()
+                        {
                             cone_miss += 1;
+                            h_miss[k] += 1;
                         }
                     }
                 }
@@ -390,9 +589,23 @@ pub fn calibrate(symbol: &str, history: &[(i64, f64)]) -> Calibration {
                 // A model that is 2% off but wrong about its own uncertainty is
                 // worse than one that is 3% off with an honest cone. Penalise
                 // both directions: under-coverage hides risk, over-coverage
-                // makes every horizon look equally uncertain.
+                // makes every horizon look equally uncertain. The per-horizon
+                // term is what pushes the 90-day cone from ~50% to ~68% instead
+                // of letting five short horizons satisfy the average.
                 let coverage = 1.0 - miss_rate;
-                let score = mape + 0.5 * miss_rate + 1.0 * (coverage - 0.68).abs();
+                let mut coverage_dev = 0.0;
+                let mut used = 0usize;
+                for k in 0..horizons.len() {
+                    if h_count[k] == 0 {
+                        continue;
+                    }
+                    let cov = 1.0 - h_miss[k] as f64 / h_count[k] as f64;
+                    coverage_dev += (cov - 0.68).abs();
+                    used += 1;
+                }
+                let coverage_dev = coverage_dev / used.max(1) as f64;
+                let score =
+                    mape + 0.5 * miss_rate + 1.0 * (coverage - 0.68).abs() + 2.0 * coverage_dev;
 
                 if best.as_ref().map(|b| score < b.0).unwrap_or(true) {
                     best = Some((score, decay, scale, vol_mult));
@@ -433,6 +646,7 @@ fn measure_accuracy(
     vol_mult: f64,
 ) -> Vec<HorizonAccuracy> {
     let n = closes.len();
+    let q68 = t68_mult();
     // (abs_err_sum, samples, direction_hits, cone_hits)
     let mut acc: Vec<(f64, usize, usize, usize)> =
         horizons.iter().map(|_| (0.0, 0, 0, 0)).collect();
@@ -446,7 +660,7 @@ fn measure_accuracy(
             }
             let actual = closes[j];
             let h = days as f64;
-            let sigma_h = stats.sigma * vol_mult * h.sqrt();
+            let sigma_h = cone_sigma_h(stats.sigma * vol_mult, h);
             let mu_h = stats.mu * drift_scale / (1.0 + h / decay_days).sqrt();
             let total = (mu_h * h).clamp(-MAX_CUM_DRIFT, MAX_CUM_DRIFT);
             let target = price * total.exp();
@@ -456,7 +670,8 @@ fn measure_accuracy(
             if (target - price).signum() == (actual - price).signum() {
                 acc[k].2 += 1;
             }
-            if actual >= target * (-sigma_h).exp() && actual <= target * sigma_h.exp() {
+            if actual >= target * (-q68 * sigma_h).exp() && actual <= target * (q68 * sigma_h).exp()
+            {
                 acc[k].3 += 1;
             }
         }
@@ -504,22 +719,26 @@ pub fn forecast_with(
     let mut notes = Vec::new();
 
     // Monthly seasonality: only trust a month with at least two observations,
-    // and cap its influence at ±0.05%/day. Applied on top of the calibrated
-    // drift so the seasonality note stays truthful about what moved the number.
-    let seasonality = monthly_seasonality_detailed(history);
+    // and cap its influence at ±0.02%/day (≈0.6% over a month). The *median*
+    // drives the adjustment — with N≈8 a single parabolic year owns the mean
+    // (`Nov avg +7.2%`) while the median says what a typical November did — and
+    // the cap keeps a 7-sample statistic from meaningfully moving the drift.
+    let seasonality = monthly_seasonality_stats(history);
     let month = current_month();
-    if let Some((_, avg_pct, count)) = seasonality
+    if let Some(s) = seasonality
         .iter()
-        .copied()
-        .find(|(m, _, count)| *m == month && *count >= 2)
+        .find(|s| s.month == month && s.count >= 2)
     {
-        let adj = (avg_pct / 100.0 / 30.0).clamp(-0.0005, 0.0005);
+        let adj = (s.median_pct / 100.0 / 30.0).clamp(-0.0002, 0.0002);
         mu = (mu + adj).clamp(-MAX_DAILY_DRIFT, MAX_DAILY_DRIFT);
         notes.push(format!(
-            "seasonality: {} averages {:+.1}% ({} samples)",
+            "seasonality: {} median {:+.1}% · {:.0}% of {} months up · mean {:+.1}% (N={}, ignore)",
             month_name(month),
-            avg_pct,
-            count
+            s.median_pct,
+            s.win_rate * 100.0,
+            s.count,
+            s.avg_pct,
+            s.count
         ));
     }
     if history.len() < 200 {
@@ -593,6 +812,16 @@ pub struct BacktestHorizon {
 }
 
 #[derive(Debug, Clone)]
+pub struct RegimeAccuracy {
+    pub regime: String,
+    pub samples: usize,
+    /// Direction hit rate across every horizon in this regime.
+    pub hit_pct: f64,
+    /// Share of outcomes inside the 68% cone in this regime.
+    pub coverage_pct: f64,
+}
+
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Backtest {
     pub symbol: String,
@@ -600,6 +829,9 @@ pub struct Backtest {
     pub from_ts: i64,
     pub to_ts: i64,
     pub horizons: Vec<BacktestHorizon>,
+    /// Same metrics split by the regime at each origin, so it is visible where
+    /// the model actually holds and where it does not.
+    pub by_regime: Vec<RegimeAccuracy>,
 }
 
 /// Walk-forward backtest over the last `window_days`. Each origin only uses
@@ -617,6 +849,9 @@ pub fn backtest(
 
     let mut acc: Vec<(f64, f64, usize, usize, usize)> =
         horizons.iter().map(|_| (0.0, 0.0, 0, 0, 0)).collect();
+    // regime -> (samples, hits, inside)
+    let mut by_regime: std::collections::BTreeMap<&'static str, (usize, usize, usize)> =
+        std::collections::BTreeMap::new();
 
     for origin in start..n {
         let stats = core_stats(&closes[..=origin]);
@@ -648,6 +883,14 @@ pub fn backtest(
             if in_cone {
                 acc[k].4 += 1;
             }
+            let entry = by_regime.entry(stats.regime.as_str()).or_default();
+            entry.0 += 1;
+            if dir_ok {
+                entry.1 += 1;
+            }
+            if in_cone {
+                entry.2 += 1;
+            }
         }
     }
 
@@ -667,6 +910,18 @@ pub fn backtest(
                     samples,
                     mape_pct: abs_sum / s,
                     bias_pct: signed_sum / s,
+                    hit_pct: hits as f64 / s * 100.0,
+                    coverage_pct: inside as f64 / s * 100.0,
+                }
+            })
+            .collect(),
+        by_regime: by_regime
+            .into_iter()
+            .map(|(regime, (samples, hits, inside))| {
+                let s = samples.max(1) as f64;
+                RegimeAccuracy {
+                    regime: regime.to_string(),
+                    samples,
                     hit_pct: hits as f64 / s * 100.0,
                     coverage_pct: inside as f64 / s * 100.0,
                 }
@@ -693,7 +948,7 @@ pub fn backtest_report(symbol: &str, history: &[(i64, f64)]) -> String {
         history.len()
     ));
     out.push_str(&format!(
-        "legacy: decay {:.0}d · drift×1.00 · vol×1.00\n",
+        "uncalibrated: decay {:.0}d · drift×1.00 · vol×1.00\n",
         DRIFT_DECAY_DAYS
     ));
     out.push_str(&format!(
@@ -729,9 +984,23 @@ pub fn backtest_report(symbol: &str, history: &[(i64, f64)]) -> String {
         }
         out.push('\n');
     }
+
+    // Where the model actually holds: cone coverage and direction by regime.
+    // A regime with 60% coverage is where the cone lies; a 45% direction hit
+    // rate is a coin flip and the text should never be read as a signal.
+    out.push_str("by regime (365d window, all horizons):\n");
+    for r in &long_new.by_regime {
+        out.push_str(&format!(
+            "  {:<8} n={:<5} hit {:>3.0}% · cone {:>3.0}%\n",
+            r.regime, r.samples, r.hit_pct, r.coverage_pct
+        ));
+    }
+    out.push('\n');
+
     out.push_str(
         "MAPE = mean absolute error of the target · hit = direction accuracy ·\n\
-         cone = share of outcomes inside the 68% cone (ideal ≈ 68%) · bias > 0 = over-forecast.",
+         cone = share of outcomes inside the 68% cone (ideal ≈ 68%) · bias > 0 = over-forecast.\n\
+         Cone uses a Student-t quantile (ν=4) instead of the Gaussian 1σ.",
     );
     out
 }
@@ -1090,7 +1359,9 @@ impl Forecast {
         let mut out = Vec::new();
         let decimals = price_decimals(self.price);
         let mu = self.drift_daily_pct / 100.0;
-        let sigma = (self.vol_daily_pct / 100.0).max(0.005);
+        // Match the drawn cone: its half-width is q·σ·√h, so the diffusion used
+        // for touch probabilities must carry the same effective sigma.
+        let sigma = (self.vol_daily_pct / 100.0).max(0.005) * t68_mult();
         use crate::trading::dipzones::{prob_below_at_horizon, touch_probability};
 
         if let Some(h) = self.reference_horizon() {
@@ -1565,6 +1836,56 @@ mod tests {
         // Russian variant localizes the verdict.
         let ru = f.render_markdown(None, true);
         assert!(ru.contains("Итог"));
+    }
+
+    #[test]
+    fn student_t_helpers_match_known_values() {
+        // F(0) = 0.5 for any symmetric t.
+        assert!((student_t_cdf(0.0, 4.0) - 0.5).abs() < 1e-9);
+        // Reference: t_{0.975, 4} = 2.776445, t_{0.84135, 4} = 1.1424.
+        assert!((student_t_cdf(2.776_445, 4.0) - 0.975).abs() < 1e-5);
+        assert!((student_t_cdf(1.0, 4.0) - 0.813_0).abs() < 2e-3);
+        // Symmetry.
+        assert!((student_t_cdf(-1.5, 4.0) - (1.0 - student_t_cdf(1.5, 4.0))).abs() < 1e-9);
+        let q = t68_mult();
+        assert!((q - 1.142).abs() < 0.005, "q68 = {q}");
+        // And it must stay a probability everywhere.
+        for t in [-50.0, -1.0, 0.0, 1.0, 50.0] {
+            assert!((0.0..=1.0).contains(&student_t_cdf(t, 4.0)));
+        }
+    }
+
+    #[test]
+    fn sideways_regime_does_not_invent_a_downtrend() {
+        // Choppy around a flat level: classification says SIDEWAYS and the model
+        // must not extrapolate a slope into the 30-day target.
+        let mut prices = Vec::new();
+        for i in 0..600 {
+            prices.push(100.0 + if i % 2 == 0 { 0.6 } else { -0.6 });
+        }
+        let h = series(&prices);
+        let f = forecast("BTC", *prices.last().unwrap(), &h);
+        assert_eq!(f.regime, "SIDEWAYS");
+        // RSI may add at most ±0.08%/day; momentum is not allowed to leak in.
+        assert!(
+            f.drift_daily_pct.abs() <= 8.0,
+            "drift={}",
+            f.drift_daily_pct
+        );
+    }
+
+    #[test]
+    fn ewma_vol_is_between_sample_and_recent_shock() {
+        // A calm series then a violent last week: EWMA must sit above the
+        // long-run dispersion after the shock.
+        let mut closes = vec![100.0; 200];
+        for i in 0..20 {
+            closes.push(if i % 2 == 0 { 90.0 } else { 110.0 });
+        }
+        let fold = 0.5 * volatility(&closes[..180], 20).unwrap();
+        let ewma = ewma_vol(&closes, EWMA_LAMBDA).unwrap() * 100.0;
+        assert!(ewma > fold, "ewma={ewma} pre-shock={fold}");
+        assert!(ewma.is_finite() && ewma > 0.0);
     }
 
     #[test]

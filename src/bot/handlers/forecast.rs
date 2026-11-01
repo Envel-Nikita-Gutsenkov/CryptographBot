@@ -217,12 +217,22 @@ pub async fn handle_forecast_callback(
     let _ = bot.answer_callback_query(&q.id).await;
 
     let data = q.data.clone().unwrap_or_default();
-    let msg = match q.message {
-        Some(m) => m,
-        None => return Ok(()),
-    };
-    let chat_id = msg.chat.id;
+    // Rich messages (`sendRichMessage`) come back to teloxide 0.12 without a
+    // parseable `message`, so requiring it made every button on a rich
+    // forecast message a silent no-op. Fall back to the caller's private chat
+    // and send a fresh message instead of editing in place.
+    let chat_id = q
+        .message
+        .as_ref()
+        .map(|m| m.chat.id)
+        .unwrap_or(ChatId(q.from.id.0 as i64));
+    let message_id = q.message.as_ref().map(|m| m.id);
     let user_id = q.from.id.0;
+    tracing::info!(
+        "forecast callback: data={data} chat={} in_place={}",
+        chat_id.0,
+        message_id.is_some()
+    );
     if !config.is_admin(user_id) {
         bot.send_message(chat_id, "⛔ Unauthorized").await?;
         return Ok(());
@@ -352,20 +362,39 @@ pub async fn handle_forecast_callback(
                 Err(_) => html.clone(),
             };
             let markup = serde_json::to_value(keyboards::forecast_actions(&sym)).ok();
-            let edited = crate::bot::rich_messages::edit_rich_message_markdown(
-                &config,
-                chat_id.0,
-                msg.id.0,
-                &markdown,
-                markup.clone(),
-            )
-            .await;
-            if edited.is_err() {
-                let _ = bot
-                    .edit_message_text(chat_id, msg.id, &html)
-                    .parse_mode(ParseMode::Html)
-                    .reply_markup(keyboards::forecast_actions(&sym))
+            match message_id {
+                Some(mid) => {
+                    let edited = crate::bot::rich_messages::edit_rich_message_markdown(
+                        &config,
+                        chat_id.0,
+                        mid.0,
+                        &markdown,
+                        markup.clone(),
+                    )
                     .await;
+                    if edited.is_err() {
+                        let _ = bot
+                            .edit_message_text(chat_id, mid, &html)
+                            .parse_mode(ParseMode::Html)
+                            .reply_markup(keyboards::forecast_actions(&sym))
+                            .await;
+                    }
+                }
+                // No message to edit (rich-message callback): send a fresh one.
+                None => {
+                    if crate::bot::rich_messages::send_rich_message_markdown_with_markup(
+                        &config, chat_id.0, &markdown, markup,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        let _ = bot
+                            .send_message(chat_id, &html)
+                            .parse_mode(ParseMode::Html)
+                            .reply_markup(keyboards::forecast_actions(&sym))
+                            .await;
+                    }
+                }
             }
         }
         _ => {}

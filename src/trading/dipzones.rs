@@ -40,6 +40,10 @@ pub struct DipZone {
     pub label: String,
     /// Distance from spot, percent (always negative).
     pub distance_pct: f64,
+    /// `distance_pct` is from spot to [`Self::price`]; `band_top` is the nearest
+    /// raw level inside the same support band, so a caller can tell whether spot
+    /// is already sitting in the band even when the representative price is deeper.
+    pub band_top: f64,
     /// `(days, P(touch within days))` for every horizon in [`TOUCH_HORIZONS`].
     pub touches: Vec<(i64, f64)>,
     /// `P(close below this level at the longest tracked horizon)`.
@@ -234,24 +238,35 @@ fn candidates(forecast: &Forecast, history: &[(i64, f64)]) -> Vec<(f64, String)>
     out
 }
 
-/// Sort ascending and collapse levels within [`ZONE_MERGE_BAND`].
-fn merge_levels(mut levels: Vec<(f64, String)>) -> Vec<(f64, String)> {
+/// Sort ascending and collapse levels within [`ZONE_MERGE_BAND`] of the cluster's
+/// *deepest* member.
+///
+/// Returns `(deepest, mean, nearest, label)` per cluster. Comparing against the
+/// deepest member — rather than against a running average, as this used to —
+/// stops a chain of sub-1% steps from crawling upward (98.8 → 99.0 → 99.9 →
+/// 100.0) until the "dip zone" sits above spot and every zone is filtered away.
+fn merge_levels(mut levels: Vec<(f64, String)>) -> Vec<(f64, f64, f64, String)> {
     levels.retain(|(p, _)| p.is_finite() && *p > 0.0);
     levels.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let mut out: Vec<(f64, String)> = Vec::new();
+    // (deepest, sum, count, nearest, label)
+    let mut out: Vec<(f64, f64, usize, f64, String)> = Vec::new();
     for (price, label) in levels {
         if let Some(last) = out.last_mut() {
             if (price - last.0) / last.0 < ZONE_MERGE_BAND {
-                last.0 = (last.0 + price) / 2.0;
-                if !last.1.split('+').any(|part| part == label) {
-                    last.1 = format!("{}+{}", last.1, label);
+                last.1 += price;
+                last.2 += 1;
+                last.3 = price;
+                if !last.4.split('+').any(|part| part == label) {
+                    last.4 = format!("{}+{}", last.4, label);
                 }
                 continue;
             }
         }
-        out.push((price, label));
+        out.push((price, price, 1, price, label));
     }
-    out
+    out.into_iter()
+        .map(|(deepest, sum, n, nearest, label)| (deepest, sum / n as f64, nearest, label))
+        .collect()
 }
 
 fn touch_horizons(history_days: usize) -> Vec<i64> {
@@ -283,18 +298,22 @@ pub fn dip_report(
 
     let mut zones: Vec<DipZone> = merge_levels(candidates(forecast, history))
         .into_iter()
-        // Keep only levels that are actually below spot — above-spot "zones"
-        // are resistance, not a dip.
-        .filter(|(p, _)| *p < price * 0.999)
-        .map(|(level, label)| DipZone {
-            price: level,
-            label,
-            distance_pct: (level / price - 1.0) * 100.0,
-            touches: horizons
-                .iter()
-                .map(|&d| (d, touch_probability(price, level, mu, sigma, d)))
-                .collect(),
-            prob_below_long: prob_below_at_horizon(price, level, mu, sigma, long_h),
+        // Keep the band if its *deepest* member is below spot: a band that
+        // straddles spot still contains real support the price is sitting in.
+        .filter(|(deepest, _, _, _)| *deepest < price * 0.999)
+        .map(|(deepest, mean, nearest, label)| {
+            let level = mean.min(price * 0.999).max(deepest);
+            DipZone {
+                price: level,
+                label,
+                distance_pct: (level / price - 1.0) * 100.0,
+                band_top: nearest,
+                touches: horizons
+                    .iter()
+                    .map(|&d| (d, touch_probability(price, level, mu, sigma, d)))
+                    .collect(),
+                prob_below_long: prob_below_at_horizon(price, level, mu, sigma, long_h),
+            }
         })
         .collect();
     // Ascending order, so the nearest zone is the last element.
@@ -363,10 +382,15 @@ fn decide(
     let below_average = avg_entry.is_some_and(|a| a > 0.0 && price <= a * 1.0001);
     let cheap_oscillator = rsi.is_some_and(|r| r < 40.0);
     let below_trend = sma200.is_some_and(|s| s > 0.0 && price < s);
-    // "At a zone" = a level within 1% below spot; "next" = the next level at
-    // least 1% down. A 0.4% gap is not a dip worth waiting for — treating it as
-    // one produced nonsense advice like "wait for a 0.4% drop".
-    let at_zone = zones.iter().rev().find(|z| z.distance_pct >= -1.0);
+    // "At a zone" = a level within 1% below spot, or a band whose *nearest*
+    // member is within 1% (spot is already inside that support band); "next" =
+    // the next level at least 1% down. A 0.4% gap is not a dip worth waiting
+    // for — treating it as one produced nonsense advice like "wait for a 0.4%
+    // drop".
+    let at_zone = zones
+        .iter()
+        .rev()
+        .find(|z| z.distance_pct >= -1.0 || z.band_top >= price * 0.99);
     let next = zones.iter().rev().find(|z| z.distance_pct < -1.0);
 
     let Some(next) = next else {
@@ -428,7 +452,7 @@ fn decide(
                     zone_price: next.price,
                 },
                 format!(
-                    "spot sits at {zone_desc}, but {next_desc} is likely next: P(7d) {p7_txt} · buy 1/3 now, 2/3 there"
+                    "spot is sitting at {zone_desc}, but {next_desc} is likely next: P(7d) {p7_txt} · buy 1/3 now, 2/3 there"
                 ),
             );
         }
@@ -436,7 +460,7 @@ fn decide(
             return (
                 DipVerdict::BuyNow,
                 format!(
-                    "spot sits at {zone_desc} and is {:+.1}% vs your average; next zone {next_desc} is only P(7d) {p7_txt} — buy now",
+                    "spot is sitting at {zone_desc} and is {:+.1}% vs your average; next zone {next_desc} is only P(7d) {p7_txt} — buy now",
                     avg_entry.map(|a| (price / a - 1.0) * 100.0).unwrap_or(0.0)
                 ),
             );
@@ -447,7 +471,7 @@ fn decide(
                 zone_price: z.price,
             },
             format!(
-                "spot sits at {zone_desc}; next meaningful zone {next_desc} is only P(7d) {p7_txt} — split the buy (no average entry configured)"
+                "spot is sitting at {zone_desc}; next meaningful zone {next_desc} is only P(7d) {p7_txt} — split the buy (no average entry configured)"
             ),
         );
     }
@@ -828,6 +852,16 @@ mod tests {
             "verdict = {:?} reason = {}",
             no_avg.verdict,
             no_avg.reason
+        );
+        eprintln!(
+            "no_avg verdict={:?} reason={} zones={:?}",
+            no_avg.verdict,
+            no_avg.reason,
+            no_avg
+                .zones
+                .iter()
+                .map(|z| (z.label.clone(), z.price, z.distance_pct))
+                .collect::<Vec<_>>()
         );
         assert!(
             no_avg.reason.contains("sitting at"),

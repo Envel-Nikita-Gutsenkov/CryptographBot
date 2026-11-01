@@ -137,12 +137,20 @@ pub async fn handle_dip_callback(
     let _ = bot.answer_callback_query(&q.id).await;
 
     let data = q.data.clone().unwrap_or_default();
-    let msg = match q.message {
-        Some(m) => m,
-        None => return Ok(()),
-    };
-    let chat_id = msg.chat.id;
+    // Same as forecast: rich-message callbacks arrive without a parseable
+    // `message`, so fall back to the caller's chat instead of going silent.
+    let chat_id = q
+        .message
+        .as_ref()
+        .map(|m| m.chat.id)
+        .unwrap_or(ChatId(q.from.id.0 as i64));
+    let message_id = q.message.as_ref().map(|m| m.id);
     let user_id = q.from.id.0;
+    tracing::info!(
+        "dip callback: data={data} chat={} in_place={}",
+        chat_id.0,
+        message_id.is_some()
+    );
     if !config.is_admin(user_id) {
         bot.send_message(chat_id, "⛔ Unauthorized").await?;
         return Ok(());
@@ -240,12 +248,16 @@ pub async fn handle_dip_callback(
                     format!("⚠️ <b>{sym}</b>: нет данных ({e})")
                 }
             };
-            let edited = bot
-                .edit_message_text(chat_id, msg.id, &text)
-                .parse_mode(ParseMode::Html)
-                .reply_markup(keyboards::dip_actions(&sym))
-                .await;
-            if edited.is_err() {
+            let edited = match message_id {
+                Some(mid) => bot
+                    .edit_message_text(chat_id, mid, &text)
+                    .parse_mode(ParseMode::Html)
+                    .reply_markup(keyboards::dip_actions(&sym))
+                    .await
+                    .is_ok(),
+                None => false,
+            };
+            if !edited {
                 let _ = bot
                     .send_message(chat_id, &text)
                     .parse_mode(ParseMode::Html)

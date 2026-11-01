@@ -72,7 +72,8 @@ pub use forecast::{
 #[allow(unused_imports)]
 pub use market_calendar::{
     days_to_next_halving, halving_phase, monthly_seasonality, monthly_seasonality_detailed,
-    seasonality_block, seasonality_block_from_stats, HalvingPhase, HALVING_DATES,
+    monthly_seasonality_stats, seasonality_block, seasonality_block_from_stats, HalvingPhase,
+    MonthStat, HALVING_DATES,
 };
 #[allow(unused_imports)]
 pub use nlp::{parse_trade_report, ParsedTradeReport};

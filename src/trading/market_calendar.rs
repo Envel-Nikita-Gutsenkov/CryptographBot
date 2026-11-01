@@ -134,9 +134,76 @@ pub fn monthly_seasonality(history: &[(i64, f64)]) -> Vec<(u32, f64)> {
         .collect()
 }
 
+/// One calendar month of seasonality statistics.
+///
+/// `avg_pct` alone is misleading on crypto: a symbol has at most a handful of
+/// observations per month, so one parabolic year drags the mean far away from
+/// what a typical year did. `median_pct` and `win_rate` are what a caller should
+/// actually look at; the mean is kept only for backwards compatibility and for
+/// the honest "N is tiny" disclaimer.
+#[derive(Debug, Clone, Copy)]
+pub struct MonthStat {
+    pub month: u32,
+    pub avg_pct: f64,
+    pub median_pct: f64,
+    /// Share of month-pairs that closed higher, 0..1.
+    pub win_rate: f64,
+    pub count: u32,
+}
+
 /// Like [`monthly_seasonality`], but also returns how many month-pairs each
 /// average is based on, so callers can store the sample count alongside.
 pub fn monthly_seasonality_detailed(history: &[(i64, f64)]) -> Vec<(u32, f64, u32)> {
+    monthly_seasonality_stats(history)
+        .into_iter()
+        .map(|s| (s.month, s.avg_pct, s.count))
+        .collect()
+}
+
+/// Median + win rate + mean per calendar month. Prefer this over the raw
+/// average: with `N ≈ 8` (the whole life of an alt) a single outlier month owns
+/// the mean while the median stays near what actually happened most years.
+pub fn monthly_seasonality_stats(history: &[(i64, f64)]) -> Vec<MonthStat> {
+    let mut samples: [Vec<f64>; 12] = Default::default();
+    for (m, ret) in monthly_return_pairs(history) {
+        samples[m as usize - 1].push(ret);
+    }
+    (1..=12)
+        .map(|m| {
+            let v = &samples[m as usize - 1];
+            let count = v.len() as u32;
+            if v.is_empty() {
+                return MonthStat {
+                    month: m,
+                    avg_pct: 0.0,
+                    median_pct: 0.0,
+                    win_rate: 0.0,
+                    count: 0,
+                };
+            }
+            let avg = v.iter().sum::<f64>() / v.len() as f64;
+            let mut sorted = v.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let mid = sorted.len() / 2;
+            let median = if sorted.len() % 2 == 0 {
+                0.5 * (sorted[mid - 1] + sorted[mid])
+            } else {
+                sorted[mid]
+            };
+            let wins = v.iter().filter(|r| **r > 0.0).count() as f64;
+            MonthStat {
+                month: m,
+                avg_pct: avg,
+                median_pct: median,
+                win_rate: wins / v.len() as f64,
+                count,
+            }
+        })
+        .collect()
+}
+
+/// Month-over-month percent returns, tagged with the month they close.
+fn monthly_return_pairs(history: &[(i64, f64)]) -> Vec<(u32, f64)> {
     // Bucket closes by calendar month: (year, month) -> last close.
     let mut by_month: std::collections::BTreeMap<(i32, u32), f64> =
         std::collections::BTreeMap::new();
@@ -147,8 +214,7 @@ pub fn monthly_seasonality_detailed(history: &[(i64, f64)]) -> Vec<(u32, f64, u3
             by_month.insert((d.year(), d.month()), price);
         }
     }
-    let mut sums = [0.0f64; 12];
-    let mut counts = [0u32; 12];
+    let mut out = Vec::new();
     let mut prev: Option<((i32, u32), f64)> = None;
     for ((ym, m), close) in by_month {
         if let Some(((py, pm), pclose)) = prev {
@@ -156,23 +222,12 @@ pub fn monthly_seasonality_detailed(history: &[(i64, f64)]) -> Vec<(u32, f64, u3
             // data — skip rather than measure a multi-month jump).
             let gap = (ym * 12 + m as i32) - (py * 12 + pm as i32);
             if gap == 1 && pclose > 0.0 {
-                let ret = (close - pclose) / pclose * 100.0;
-                sums[m as usize - 1] += ret;
-                counts[m as usize - 1] += 1;
+                out.push((m, (close - pclose) / pclose * 100.0));
             }
         }
         prev = Some(((ym, m), close));
     }
-    (1..=12)
-        .map(|m| {
-            let avg = if counts[m as usize - 1] > 0 {
-                sums[m as usize - 1] / counts[m as usize - 1] as f64
-            } else {
-                0.0
-            };
-            (m, avg, counts[m as usize - 1])
-        })
-        .collect()
+    out
 }
 
 /// Compact AI-ready block: halving phase + per-month seasonality.
@@ -323,5 +378,45 @@ mod tests {
         for (_, r) in &season {
             assert!(r.is_finite());
         }
+    }
+
+    #[test]
+    fn seasonality_median_resists_a_single_outlier() {
+        // 2019-12 -> 2020-01..2024-01: four flat Januaries and one +100% year.
+        // The mean is pulled to +20%, the median stays at 0%: that is exactly
+        // the misleading-average case the forecast now avoids.
+        let mut h = Vec::new();
+        for (year, jump) in [
+            (2019, 1.0),
+            (2020, 2.0),
+            (2021, 1.0),
+            (2022, 1.0),
+            (2023, 1.0),
+        ] {
+            let dec = NaiveDate::from_ymd_opt(year, 12, 31).unwrap();
+            let jan = NaiveDate::from_ymd_opt(year + 1, 1, 31).unwrap();
+            h.push((
+                dec.and_hms_opt(0, 0, 0)
+                    .unwrap()
+                    .and_utc()
+                    .timestamp_millis(),
+                100.0,
+            ));
+            h.push((
+                jan.and_hms_opt(0, 0, 0)
+                    .unwrap()
+                    .and_utc()
+                    .timestamp_millis(),
+                100.0 * jump,
+            ));
+        }
+        let jan = monthly_seasonality_stats(&h)
+            .into_iter()
+            .find(|s| s.month == 1)
+            .unwrap();
+        assert_eq!(jan.count, 5);
+        assert!((jan.avg_pct - 20.0).abs() < 1e-6, "avg {}", jan.avg_pct);
+        assert!(jan.median_pct.abs() < 1e-6, "median {}", jan.median_pct);
+        assert!((jan.win_rate - 0.2).abs() < 1e-9, "win {}", jan.win_rate);
     }
 }
