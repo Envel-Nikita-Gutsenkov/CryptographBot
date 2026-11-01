@@ -48,13 +48,21 @@ for the same inputs.
 - **`/forecast SYMBOL`** — a horizon ladder (`1/3/5/7/14/30/90/180d` for BTC/ETH,
   shortened for younger alts) built from log-drift with horizon damping, a
   volatility-scaled ~68% cone, and probabilities of finishing above spot. The
-  damping, drift shrink and cone width are **walk-forward calibrated** against
-  the symbol's own history; the message also reports the model's real
-  out-of-sample direction hit rate, MAPE and cone coverage per horizon.
+  cone uses a Student-t quantile (ν=4) instead of the Gaussian 1σ and adds the
+  drift's own estimation error in quadrature, so long horizons are not
+  artificially tight; volatility blends the 20-close stddev with a RiskMetrics
+  EWMA. In a `SIDEWAYS` regime the momentum term is zeroed — a flat market has
+  no trend to extrapolate. Seasonality is reported as median + win rate and may
+  move the drift by at most 0.02%/day (a month sample is ~8 points: ignore it
+  for decisions). Damping, drift shrink and cone width are **walk-forward
+  calibrated** against the symbol's own history; the message also reports the
+  model's real out-of-sample direction hit rate, MAPE and cone coverage per
+  horizon.
   The bottom line is portfolio-aware: it compares spot to your average entry,
   gives the probability of reaching the dip band / your break-even, and never
   suggests adding above the average. **`/forecast verify`** prints the full
-  walk-forward backtest (shipped vs calibrated) on realized history.
+  walk-forward backtest (shipped vs calibrated) on realized history, including a
+  per-regime breakdown of direction hit rate and cone coverage.
 - **`/dip SYMBOL`** — support levels below spot taken from SMA50/200, recent
   lows and the forecast cone, each with a first-passage probability of being
   touched within 1/3/7/14/30 days (closed-form Brownian running-minimum
