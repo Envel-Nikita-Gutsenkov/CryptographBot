@@ -165,41 +165,65 @@ pub async fn handle_forecast_cmd(
         // Forecast reports are English-only by product decision; do not localise
         // them from `preferred_language` (chat language is a separate setting).
         let russian = false;
-        let text = match build_forecast(sym, &cmc, &sqlite, price_for(sym)).await {
-            Ok(f) => f.render_markdown(avg_entry, russian),
+        let (markdown, html) = match build_forecast(sym, &cmc, &sqlite, price_for(sym)).await {
+            Ok(f) => (
+                f.render_markdown(avg_entry, russian),
+                f.render_html_for(avg_entry, russian),
+            ),
             Err(e) => {
                 warn!("Forecast for {sym} failed: {e}");
-                format!("⚠️ **{sym}**: нет данных для прогноза ({e})")
+                let text = format!("⚠️ **{sym}**: нет данных для прогноза ({e})");
+                (text.clone(), html_escape::encode_text(&text).to_string())
             }
         };
-        let markup = serde_json::to_value(keyboards::forecast_actions(sym)).ok();
-        // Rich messages render the GFM table as a real table; fall back to the
-        // monospace HTML table if the API rejects the rich payload.
-        if let Err(e) = crate::bot::rich_messages::send_rich_message_markdown_with_markup(
-            &config,
-            msg.chat.id.0,
-            &text,
-            markup.clone(),
-        )
-        .await
-        {
-            warn!("Rich forecast send failed for {sym} ({e}); falling back to HTML");
-            let html = match build_forecast(sym, &cmc, &sqlite, price_for(sym)).await {
-                Ok(f) => f.render_html_for(avg_entry, russian),
-                Err(_) => text.clone(),
-            };
-            if let Err(e) = bot
-                .send_message(ChatId(msg.chat.id.0), &html)
-                .parse_mode(ParseMode::Html)
-                .reply_markup(keyboards::forecast_actions(sym))
-                .await
-            {
-                warn!("Forecast send failed for {sym}: {e}");
-            }
-        }
+        send_forecast_report(&bot, &config, ChatId(msg.chat.id.0), sym, &markdown, &html).await;
     }
 
     Ok(())
+}
+
+/// Send one forecast: the rich markdown table (with an HTML fallback), then the
+/// action keyboard on its own small message.
+///
+/// The keyboard deliberately does not ride on the rich message. Bot API 10.1
+/// rich messages come back to teloxide 0.12 as a message kind its `Update`
+/// deserializer does not know, so the whole `callback_query` is discarded inside
+/// the polling stream — before any handler, log line or filter can see it. That
+/// is why every button on the forecast table looked dead while the table itself
+/// rendered fine. A regular `sendMessage` strip always parses.
+pub(crate) async fn send_forecast_report(
+    bot: &Bot,
+    config: &Config,
+    chat_id: ChatId,
+    sym: &str,
+    markdown: &str,
+    html: &str,
+) {
+    if let Err(e) =
+        crate::bot::rich_messages::send_rich_message_markdown(config, chat_id.0, markdown).await
+    {
+        warn!("Rich forecast send failed for {sym} ({e}); falling back to HTML");
+        if let Err(e) = bot
+            .send_message(chat_id, html)
+            .parse_mode(ParseMode::Html)
+            .await
+        {
+            warn!("Forecast send failed for {sym}: {e}");
+            return;
+        }
+    }
+    if let Err(e) = send_actions_strip(bot, chat_id, sym).await {
+        warn!("Forecast action strip failed for {sym}: {e}");
+    }
+}
+
+/// The one-line message that carries the forecast buttons.
+async fn send_actions_strip(bot: &Bot, chat_id: ChatId, sym: &str) -> anyhow::Result<Message> {
+    let b = bot
+        .send_message(chat_id, format!("⚡ <b>{sym}</b> · actions"))
+        .parse_mode(ParseMode::Html)
+        .reply_markup(keyboards::forecast_actions(sym));
+    Ok(b.await?)
 }
 
 /// Where a callback should be answered and whether it can be edited in place.
@@ -348,52 +372,23 @@ pub async fn handle_forecast_callback(
             let avg_entry = store.read(user_id, |p| p.avg_buy_price(&sym));
             // Forecast is English-only.
             let russian = false;
-            let html = match build_forecast(&sym, &cmc, &sqlite, live).await {
-                Ok(f) => f.render_html_for(avg_entry, russian),
+            let (markdown, html) = match build_forecast(&sym, &cmc, &sqlite, live).await {
+                Ok(f) => (
+                    f.render_markdown(avg_entry, russian),
+                    f.render_html_for(avg_entry, russian),
+                ),
                 Err(e) => {
                     warn!("Forecast refresh for {sym} failed: {e}");
-                    format!("⚠️ <b>{sym}</b>: нет данных для прогноза ({e})")
+                    let text = format!("⚠️ <b>{sym}</b>: нет данных для прогноза ({e})");
+                    (text.clone(), text)
                 }
             };
-            let markdown = match build_forecast(&sym, &cmc, &sqlite, live).await {
-                Ok(f) => f.render_markdown(avg_entry, russian),
-                Err(_) => html.clone(),
-            };
-            let markup = serde_json::to_value(keyboards::forecast_actions(&sym)).ok();
-            match message_id {
-                Some(mid) => {
-                    let edited = crate::bot::rich_messages::edit_rich_message_markdown(
-                        &config,
-                        chat_id.0,
-                        mid.0,
-                        &markdown,
-                        markup.clone(),
-                    )
-                    .await;
-                    if edited.is_err() {
-                        let _ = bot
-                            .edit_message_text(chat_id, mid, &html)
-                            .parse_mode(ParseMode::Html)
-                            .reply_markup(keyboards::forecast_actions(&sym))
-                            .await;
-                    }
-                }
-                // No message to edit (rich-message callback): send a fresh one.
-                None => {
-                    if crate::bot::rich_messages::send_rich_message_markdown_with_markup(
-                        &config, chat_id.0, &markdown, markup,
-                    )
-                    .await
-                    .is_err()
-                    {
-                        let _ = bot
-                            .send_message(chat_id, &html)
-                            .parse_mode(ParseMode::Html)
-                            .reply_markup(keyboards::forecast_actions(&sym))
-                            .await;
-                    }
-                }
+            // Drop the message the button sat on (the strip, the old table or the
+            // AI read) so a refresh never stacks three copies of the same report.
+            if let Some(mid) = message_id {
+                let _ = bot.delete_message(chat_id, mid).await;
             }
+            send_forecast_report(&bot, &config, chat_id, &sym, &markdown, &html).await;
         }
         _ => {}
     }

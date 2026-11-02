@@ -63,14 +63,35 @@ fn build_handler() -> UpdateHandler<anyhow::Error> {
     use dptree::case;
 
     let acl_filter = dptree::entry().filter(|update: Update, acl: Arc<AccessControl>| {
-        tracing::debug!("Incoming update ID: {}", update.id);
-        if let Some(user) = update.user() {
-            let allowed = acl.is_allowed(user.id.0);
-            tracing::debug!("User ID: {} - Allowed: {}", user.id, allowed);
-            allowed
-        } else {
-            tracing::debug!("Update has no user: {:?}", update);
-            false
+        // One INFO line per update: without it a silently dropped update looks
+        // identical to a button that was never pressed, which is how the
+        // rich-message callback bug stayed invisible for days.
+        let (kind, data) = match &update.kind {
+            teloxide::types::UpdateKind::Message(_) => ("message", String::new()),
+            teloxide::types::UpdateKind::CallbackQuery(q) => {
+                ("callback", q.data.clone().unwrap_or_default())
+            }
+            teloxide::types::UpdateKind::EditedMessage(_) => ("edited", String::new()),
+            _ => ("other", String::new()),
+        };
+        match update.user() {
+            Some(user) => {
+                let allowed = acl.is_allowed(user.id.0);
+                if allowed {
+                    tracing::info!("update {} {kind} user={} data={data:?}", update.id, user.id);
+                } else {
+                    tracing::warn!(
+                        "update {} {kind} user={} REJECTED by ACL data={data:?}",
+                        update.id,
+                        user.id
+                    );
+                }
+                allowed
+            }
+            None => {
+                tracing::warn!("update {} {kind} has no user — dropped", update.id);
+                false
+            }
         }
     });
 
@@ -163,6 +184,29 @@ fn build_handler() -> UpdateHandler<anyhow::Error> {
     let dialogue_callbacks = Update::filter_callback_query().branch(
         dialogue::enter::<Update, InMemStorage<State>, State, _>().endpoint(handle_callback),
     );
+    // Last resort: a callback that no branch above recognised (or that the
+    // dialogue filter dropped) must still answer Telegram and explain itself,
+    // otherwise the client keeps a dead spinner and the user sees nothing.
+    let callback_fallback = Update::filter_callback_query()
+        .filter(|q: CallbackQuery| {
+            tracing::warn!(
+                "unhandled callback data={:?} in_place={}",
+                q.data,
+                q.message.is_some()
+            );
+            true
+        })
+        .endpoint(|bot: Bot, q: CallbackQuery| async move {
+            let _ = bot.answer_callback_query(&q.id).await;
+            let (chat, _) = handlers::forecast::callback_target(&q);
+            let _ = bot
+                .send_message(
+                    chat,
+                    format!("⚠️ Unhandled button: {}", q.data.as_deref().unwrap_or("?")),
+                )
+                .await;
+            Ok::<(), anyhow::Error>(())
+        });
     let documents = Message::filter_document().endpoint(handle_document);
     let text_msgs = Message::filter_text().endpoint(handle_text);
 
@@ -192,6 +236,7 @@ fn build_handler() -> UpdateHandler<anyhow::Error> {
 
     let main_chain = callbacks
         .branch(dialogue_callbacks)
+        .branch(callback_fallback)
         .branch(dialogue::enter::<Update, InMemStorage<State>, State, _>().branch(messages));
 
     acl_filter.branch(main_chain)

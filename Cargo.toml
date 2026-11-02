@@ -56,7 +56,7 @@ dotenvy = "0.15"
 
 # Logging (structured, async-friendly)
 tracing             = "0.1"
-tracing-subscriber  = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "ansi"] }
+tracing-subscriber  = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "ansi", "tracing-log"] }
 
 # Performance
 dashmap     = { version = "5.5", default-features = false }
