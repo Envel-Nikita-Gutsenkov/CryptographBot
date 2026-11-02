@@ -118,6 +118,12 @@ fn build_handler() -> UpdateHandler<anyhow::Error> {
         .branch(case![Command::Cancel].endpoint(handle_cancel))
         .branch(case![Command::Ver].endpoint(handle_ver));
 
+    // Callbacks that do not need a `Dialogue` must be branched **before**
+    // `dialogue::enter` below. Rich-message callbacks (`sendRichMessage`) arrive
+    // with `q.message == None`, so teloxide's `GetChatId` cannot resolve a chat
+    // and `dialogue::enter` — a `filter_map` — silently drops the entire update.
+    // That is why every button on a rich forecast/dip/sniper message did nothing:
+    // the handler was never reached and nothing was logged.
     let callbacks = Update::filter_callback_query()
         .branch(
             dptree::filter(|q: CallbackQuery| {
@@ -150,38 +156,43 @@ fn build_handler() -> UpdateHandler<anyhow::Error> {
         .branch(
             dptree::filter(|q: CallbackQuery| q.data.as_deref().unwrap_or("").starts_with("snp:"))
                 .endpoint(handle_sniper_cb),
-        )
-        .branch(dptree::endpoint(handle_callback));
+        );
+    // The generic callback handler needs `MyDialogue` (alert/wallet/AI wizard
+    // flows), so it stays inside a dialogue context. Those buttons always sit on
+    // regular messages, which do carry a `message`.
+    let dialogue_callbacks = Update::filter_callback_query().branch(
+        dialogue::enter::<Update, InMemStorage<State>, State, _>().endpoint(handle_callback),
+    );
     let documents = Message::filter_document().endpoint(handle_document);
     let text_msgs = Message::filter_text().endpoint(handle_text);
 
-    let main_chain = dialogue::enter::<Update, InMemStorage<State>, State, _>()
-        .branch(callbacks)
+    let messages = Update::filter_message()
+        .branch(documents)
+        .branch(case![State::Idle].branch(commands).branch(text_msgs))
+        .branch(case![State::AiWizard].endpoint(handlers::ai::handle_ai_wizard))
+        .branch(case![State::AlertStep1].endpoint(handlers::alert::handle_alert_step1))
         .branch(
-            Update::filter_message()
-                .branch(documents)
-                .branch(case![State::Idle].branch(commands).branch(text_msgs))
-                .branch(case![State::AiWizard].endpoint(handlers::ai::handle_ai_wizard))
-                .branch(case![State::AlertStep1].endpoint(handlers::alert::handle_alert_step1))
-                .branch(
-                    case![State::AlertStep2 { symbol, condition }]
-                        .endpoint(handlers::alert::handle_alert_step2),
-                )
-                .branch(
-                    case![State::AlertStep3 {
-                        symbol,
-                        condition,
-                        threshold,
-                        period
-                    }]
-                    .endpoint(handlers::alert::handle_alert_step3),
-                )
-                .branch(case![State::WalletStep1].endpoint(handlers::wallet::handle_wallet_step1))
-                .branch(
-                    case![State::WalletStep2 { name, kind }]
-                        .endpoint(handlers::wallet::handle_wallet_step2),
-                ),
+            case![State::AlertStep2 { symbol, condition }]
+                .endpoint(handlers::alert::handle_alert_step2),
+        )
+        .branch(
+            case![State::AlertStep3 {
+                symbol,
+                condition,
+                threshold,
+                period
+            }]
+            .endpoint(handlers::alert::handle_alert_step3),
+        )
+        .branch(case![State::WalletStep1].endpoint(handlers::wallet::handle_wallet_step1))
+        .branch(
+            case![State::WalletStep2 { name, kind }]
+                .endpoint(handlers::wallet::handle_wallet_step2),
         );
+
+    let main_chain = callbacks
+        .branch(dialogue_callbacks)
+        .branch(dialogue::enter::<Update, InMemStorage<State>, State, _>().branch(messages));
 
     acl_filter.branch(main_chain)
 }

@@ -1245,7 +1245,6 @@ impl Forecast {
                 out.push_str(&format!("• {n}\n"));
             }
         }
-        out.push_str("Not financial advice. Deterministic model, 68% cone widens with √h.");
         out
     }
 
@@ -1329,9 +1328,6 @@ impl Forecast {
         for n in &self.notes {
             out.push_str(&format!("• {}\n", esc(n)));
         }
-        out.push_str(
-            "<i>Not financial advice. Deterministic model; the 68% cone widens with √h.</i>",
-        );
         out
     }
 
@@ -1576,11 +1572,6 @@ impl Forecast {
         for n in &self.notes {
             out.push_str(&format!("- {n}\n"));
         }
-        out.push_str(if russian {
-            "\n*Не финансовый совет. Детерминированная модель; 68%-коридор ширится как √h.*"
-        } else {
-            "\n*Not financial advice. Deterministic model; the 68% cone widens with √h.*"
-        });
         // Rich markdown treats `$...$` as LaTeX math; drop every currency sign
         // (units are already spelled out in the headers).
         out.replace('$', "")

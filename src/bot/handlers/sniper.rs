@@ -393,15 +393,9 @@ pub async fn handle_sniper_callback(
                 let table = html_escape::encode_text(&report.table_lines().join("\n")).to_string();
                 let text = match commentary {
                     Some(t) => format!(
-                        "🧠 <b>{sym} — AI read</b>\n\n{t}\n\n🎯 <b>{}</b>\n{}\n\n<pre>{table}</pre>\n\
-                         <i>{}</i>",
+                        "🧠 <b>{sym} — AI read</b>\n\n{t}\n\n🎯 <b>{}</b>\n{}\n\n<pre>{table}</pre>",
                         if russian { "Итог" } else { "Bottom line" },
                         verdict,
-                        html_escape::encode_text(if russian {
-                            "Модель, не финансовый совет."
-                        } else {
-                            "Model output, not financial advice."
-                        })
                     ),
                     None => format!(
                         "{}\n\n🎯 <b>{}</b>\n{}",

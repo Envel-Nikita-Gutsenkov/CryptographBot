@@ -674,8 +674,7 @@ impl DipReport {
             esc(&self.reason)
         ));
         out.push_str(
-            "<i>Touch probabilities from a drift/volatility diffusion over the local closes. \
-             Not financial advice; no model can guarantee a bottom.</i>",
+            "<i>Touch probabilities from a drift/volatility diffusion over the local closes.</i>",
         );
         out
     }
@@ -724,7 +723,7 @@ impl DipReport {
             self.verdict.label(),
             self.reason
         ));
-        out.push_str("Not financial advice. Touch probability ≠ prediction.\n");
+        out.push_str("Touch probability ≠ prediction.\n");
         out
     }
 }

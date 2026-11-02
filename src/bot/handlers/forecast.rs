@@ -162,10 +162,9 @@ pub async fn handle_forecast_cmd(
 
     for sym in &symbols {
         let avg_entry = store.read(user_id, |p| p.avg_buy_price(sym));
-        let russian = store
-            .read(user_id, |p| p.settings.preferred_language.clone())
-            .to_lowercase()
-            .starts_with("ru");
+        // Forecast reports are English-only by product decision; do not localise
+        // them from `preferred_language` (chat language is a separate setting).
+        let russian = false;
         let text = match build_forecast(sym, &cmc, &sqlite, price_for(sym)).await {
             Ok(f) => f.render_markdown(avg_entry, russian),
             Err(e) => {
@@ -281,10 +280,8 @@ pub async fn handle_forecast_callback(
                 // Portfolio-aware verdict lines are always shown, even when the
                 // AI read succeeds: the user asked for a clear bottom line.
                 let avg_entry = store_task.read(user_id, |p| p.avg_buy_price(&sym));
-                let russian = store_task
-                    .read(user_id, |p| p.settings.preferred_language.clone())
-                    .to_lowercase()
-                    .starts_with("ru");
+                // Forecast is English-only.
+                let russian = false;
                 let verdict = f
                     .action_lines(avg_entry, russian)
                     .into_iter()
@@ -320,8 +317,7 @@ pub async fn handle_forecast_callback(
 
                 let text = match commentary {
                     Some(t) => format!(
-                        "🧠 <b>{sym} — AI read</b>\n\n{t}\n\n🎯 <b>{}</b>\n{verdict}\n\
-                         <i>Model output, not financial advice.</i>",
+                        "🧠 <b>{sym} — AI read</b>\n\n{t}\n\n🎯 <b>{}</b>\n{verdict}",
                         if russian { "Итог" } else { "Bottom line" }
                     ),
                     None => format!(
@@ -350,10 +346,8 @@ pub async fn handle_forecast_callback(
             let quotes = cmc.get_quotes(&[sym.as_str()]).await.unwrap_or_default();
             let live = quotes.first().map(|q| q.price_usd);
             let avg_entry = store.read(user_id, |p| p.avg_buy_price(&sym));
-            let russian = store
-                .read(user_id, |p| p.settings.preferred_language.clone())
-                .to_lowercase()
-                .starts_with("ru");
+            // Forecast is English-only.
+            let russian = false;
             let html = match build_forecast(&sym, &cmc, &sqlite, live).await {
                 Ok(f) => f.render_html_for(avg_entry, russian),
                 Err(e) => {

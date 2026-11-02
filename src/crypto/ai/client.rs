@@ -215,6 +215,7 @@ impl GeminiClient {
              catalysts or news. If direction accuracy is near 50%, say plainly that \
              the model has no directional edge and the range matters more.\n\
              - Never present this as financial advice or a guarantee.\n\
+             - Reply in English only.\n\
              - Plain text with only <b> tags; no markdown, no code blocks.\n\
              - Keep it under 900 characters.\n\n\
              FORECAST:\n{forecast_text}"

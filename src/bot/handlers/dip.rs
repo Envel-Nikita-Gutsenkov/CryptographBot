@@ -211,8 +211,7 @@ pub async fn handle_dip_callback(
                 let text = match commentary {
                     Some(t) => format!(
                         "🧠 <b>{sym} — AI read</b>\n\n{t}\n\n\
-                         <i>Model output, not financial advice. The probabilities above are \
-                         deterministic.</i>"
+                         <i>The probabilities above are deterministic.</i>"
                     ),
                     None => format!(
                         "{}\n\n<i>AI commentary unavailable — deterministic report only.</i>",

@@ -681,9 +681,9 @@ impl DipSniperReport {
         text.push_str(&format!(
             "\n<i>{}</i>",
             html_escape::encode_text(if russian {
-                "Детерминированная модель. P(touch) — вероятность касания при случайном блуждании, не прогноз. Не финансовый совет."
+                "Детерминированная модель. P(touch) — вероятность касания при случайном блуждании, не прогноз."
             } else {
-                "Deterministic model. P(touch) is a random-walk touch probability, not a prediction. Not financial advice."
+                "Deterministic model. P(touch) is a random-walk touch probability, not a prediction."
             })
         ));
         let tails = self
