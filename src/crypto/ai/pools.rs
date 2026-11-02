@@ -366,6 +366,14 @@ pub fn get_available_models(role: Option<&str>) -> Vec<String> {
         }
     }
 
+    /// A model on a provider whose key-wide quota is gone can only fail; skip it
+    /// at selection time so every worker stops logging one "failed" line per
+    /// parked model per cycle (Gemini + Cloudflare carry four models between
+    /// them). The reset is recorded by the provider layer in [`PROVIDER_EXHAUSTED`].
+    fn usable(m: &ModelConfig) -> bool {
+        key_available(&m.provider.to_lowercase()) && !is_provider_exhausted(&m.provider)
+    }
+
     let mut available: Vec<String> = Vec::new();
     // Tier 1: exact role match (models built for this task)
     for m in &models_file.models {
@@ -381,7 +389,7 @@ pub fn get_available_models(role: Option<&str>) -> Vec<String> {
                 continue;
             }
         }
-        if key_available(&m.provider.to_lowercase()) {
+        if usable(m) {
             available.push(m.alias.clone());
         }
     }
@@ -393,7 +401,7 @@ pub fn get_available_models(role: Option<&str>) -> Vec<String> {
             if fast_mode && !is_fast_model(m) {
                 continue;
             }
-            if available.contains(&m.alias) || !key_available(&m.provider.to_lowercase()) {
+            if available.contains(&m.alias) || !usable(m) {
                 continue;
             }
             let tier = m.roles.iter().map(|mr| role_tier(mr)).min().unwrap_or(3);
