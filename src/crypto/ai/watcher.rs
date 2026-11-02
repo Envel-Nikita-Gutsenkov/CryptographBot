@@ -26,12 +26,25 @@ const SECURITY_TOPIC_COOLDOWN_DAYS: i64 = 7;
 
 /// The AI watcher ticks every 2–4 h, and its boot tick races the news worker
 /// (summaries are written ~10 s later), so a breach could go unnoticed for
-/// hours. This deterministic scan runs on its own short cadence; news articles
-/// are refreshed every ~10 min, so an incident is surfaced within ~15 min.
-const SECURITY_SCAN_INTERVAL_SECS: u64 = 300;
+/// hours. This deterministic scan runs on its own cadence; news articles are
+/// refreshed every ~10 min, so a major incident is still surfaced within ~25 min.
+/// 15 min keeps that guarantee while cutting the number of DB/news passes 3x.
+const SECURITY_SCAN_INTERVAL_SECS: u64 = 900;
 
 /// Cap alerts per scan: a noisy feed must not turn into a wall of messages.
-const SECURITY_MAX_ALERTS_PER_SCAN: usize = 3;
+/// One incident per message; the next scan picks up anything that is still fresh.
+const SECURITY_MAX_ALERTS_PER_SCAN: usize = 1;
+
+/// Never send more than one security digest per user inside this window,
+/// regardless of how many distinct topics the feed surfaced. Without this a
+/// burst of unrelated headlines (a hack, a wallet bug, a Linux CVE) produced a
+/// message every few minutes.
+const SECURITY_MIN_GAP_HOURS: i64 = 6;
+
+/// Losses below this are background noise for a portfolio holder: small
+/// protocol exploits, hot-wallet thefts, individual scam drains. Only an
+/// incident on a named custody provider or a headline-sized loss is surfaced.
+const MAJOR_SECURITY_USD: f64 = 100_000_000.0;
 
 /// Max characters of an article body fed to the detector — enough to catch the
 /// incident sentence without scanning whole feeds every 5 minutes.
@@ -68,6 +81,53 @@ const INCIDENT_WORDS: &[(&str, &str)] = &[
 
 /// Entities we track as a security topic. Order matters: the first match wins,
 /// so specific brands come before generic infrastructure words.
+/// Entities whose compromise can directly cost the user money (exchanges,
+/// bridges, stablecoin issuers). These always warrant an alert.
+const FUND_CUSTODY_ENTITIES: &[&str] = &[
+    "binance",
+    "coinbase",
+    "bybit",
+    "kraken",
+    "kucoin",
+    "bitfinex",
+    "okx",
+    "htx",
+    "huobi",
+    "gate.io",
+    "tether",
+    "usdt",
+    "usdc",
+    "circle",
+    "ronin",
+    "wormhole",
+    "nomad",
+    "poly network",
+    "bridge",
+];
+
+/// Hardware/software wallet brands. A bug here matters, but only when the text
+/// describes an actual compromise — product news like "Trezor lifts password
+/// ceiling after Coldcard's thefts" must not page the user.
+const WALLET_BRANDS: &[&str] = &["ledger", "trezor", "metamask", "phantom", "safepal"];
+
+/// Words that describe an active compromise (as opposed to a mere mention).
+const ACTIVE_COMPROMISE_WORDS: &[&str] = &[
+    "hack",
+    "breach",
+    "exploit",
+    "stolen",
+    "stole",
+    "drained",
+    "compromised",
+    "vulnerabilit",
+    "backdoor",
+    "malware",
+    "взлом",
+    "украд",
+    "похит",
+    "эксплойт",
+];
+
 const SECURITY_ENTITIES: &[&str] = &[
     "binance",
     "coinbase",
@@ -117,6 +177,79 @@ pub fn detect_security_topic(text: &str) -> Option<String> {
     }
 }
 
+/// True when `topic` is worth a Telegram message.
+///
+/// Detecting an incident word is cheap and produces far too many hits: over two
+/// days a real Binance breach was followed by alerts for a $138k DeFi drain, a
+/// BTCPay hot-wallet theft, Coldcard wallet news and a Linux CVE affecting
+/// Solana validators. The rule now is:
+/// - custody entities (exchange/bridge/stablecoin) → always;
+/// - wallet brands → only on an active compromise word;
+/// - generic classes (`theft`, `vulnerability`, ...) → only for losses of
+///   `MAJOR_SECURITY_USD` or more.
+fn incident_is_significant(topic: &str, text: &str) -> bool {
+    if FUND_CUSTODY_ENTITIES.contains(&topic) {
+        return true;
+    }
+    let lower = text.to_lowercase();
+    if WALLET_BRANDS.contains(&topic) {
+        return ACTIVE_COMPROMISE_WORDS
+            .iter()
+            .any(|needle| lower.contains(needle));
+    }
+    incident_amount_usd(text)
+        .map(|amount| amount >= MAJOR_SECURITY_USD)
+        .unwrap_or(false)
+}
+
+/// Largest USD figure mentioned in `text` (`$6.3B`, `$100M`, `$5,800,000`,
+/// `$2.65 million`). Suffixes may be attached or separated by a space.
+fn incident_amount_usd(text: &str) -> Option<f64> {
+    let bytes = text.as_bytes();
+    let mut best: Option<f64> = None;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'$' {
+            let mut j = i + 1;
+            let mut digits = String::new();
+            while j < bytes.len()
+                && (bytes[j].is_ascii_digit() || bytes[j] == b',' || bytes[j] == b'.')
+            {
+                if bytes[j] != b',' {
+                    digits.push(bytes[j] as char);
+                }
+                j += 1;
+            }
+            if let Ok(value) = digits.parse::<f64>() {
+                let attached = bytes.get(j).map(|b| b.to_ascii_lowercase());
+                let mut k = j;
+                while k < bytes.len() && bytes[k] == b' ' {
+                    k += 1;
+                }
+                let word: String = text[k..]
+                    .chars()
+                    .take_while(|c| c.is_alphabetic())
+                    .collect::<String>()
+                    .to_lowercase();
+                let mult = match attached {
+                    Some(b'b') => 1e9,
+                    Some(b'm') => 1e6,
+                    Some(b'k') => 1e3,
+                    _ if word.starts_with("trillion") => 1e12,
+                    _ if word.starts_with("billion") => 1e9,
+                    _ if word.starts_with("million") => 1e6,
+                    _ if word.starts_with("thousand") => 1e3,
+                    _ => 1.0,
+                };
+                let total = value * mult;
+                best = Some(best.map_or(total, |current: f64| current.max(total)));
+            }
+        }
+        i += 1;
+    }
+    best
+}
+
 /// True when this topic has not been delivered (or was delivered more than
 /// `SECURITY_TOPIC_COOLDOWN_DAYS` ago). Uses the per-topic history, not a single
 /// "last topic" slot, so alternating incidents cannot re-trigger each other.
@@ -127,6 +260,15 @@ fn topic_is_fresh(
 ) -> bool {
     seen.get(topic)
         .map(|ts| now.signed_duration_since(*ts).num_days() >= SECURITY_TOPIC_COOLDOWN_DAYS)
+        .unwrap_or(true)
+}
+
+/// True when the per-user security digest gap has elapsed. Keeps a burst of
+/// unrelated headlines to one message per `SECURITY_MIN_GAP_HOURS`.
+fn security_gap_elapsed(p: &crate::models::Portfolio, now: chrono::DateTime<Utc>) -> bool {
+    p.settings
+        .ai_last_security_notify
+        .map(|t| now.signed_duration_since(t).num_hours() >= SECURITY_MIN_GAP_HOURS)
         .unwrap_or(true)
 }
 
@@ -446,6 +588,9 @@ async fn check_user(
     let can_notify = if fresh_security {
         let topic = security_topic.clone();
         store.write(user_id, |p| {
+            if !security_gap_elapsed(p, now) {
+                return false;
+            }
             // Re-check atomically: the fast security scanner may have already
             // delivered this incident while the AI analysis was running.
             let fresh = topic
@@ -564,7 +709,9 @@ pub async fn run_security_scan(bot: &Bot, store: &Store, sqlite: &SqliteStore, c
         if let Ok(Some(general)) = sqlite.get_news_summary("GENERAL").await {
             if !general.contains("Failed to analyze") {
                 if let Some(topic) = detect_security_topic(&general) {
-                    push_unique(&mut candidates, topic, general);
+                    if incident_is_significant(&topic, &general) {
+                        push_unique(&mut candidates, topic, general);
+                    }
                 }
             }
         }
@@ -579,7 +726,9 @@ pub async fn run_security_scan(bot: &Bot, store: &Store, sqlite: &SqliteStore, c
                 let body: String = body.chars().take(SECURITY_ARTICLE_CHARS).collect();
                 let text = format!("{title}. {body}");
                 if let Some(topic) = detect_security_topic(&text) {
-                    push_unique(&mut candidates, topic, text);
+                    if incident_is_significant(&topic, &text) {
+                        push_unique(&mut candidates, topic, text);
+                    }
                 }
                 if candidates.len() >= SECURITY_MAX_ALERTS_PER_SCAN {
                     break 'symbols;
@@ -613,9 +762,14 @@ pub async fn run_security_scan(bot: &Bot, store: &Store, sqlite: &SqliteStore, c
         let digest = compose_security_digest(&ai, &fresh, &lang, sqlite).await;
 
         // Mark exactly the topics we are about to report, atomically, so the AI
-        // watcher path cannot deliver the same incident concurrently.
+        // watcher path cannot deliver the same incident concurrently. The global
+        // gap check happens in the same critical section, so a burst of fresh
+        // topics still yields a single message per `SECURITY_MIN_GAP_HOURS`.
         let topics: Vec<String> = fresh.iter().map(|(t, _)| t.clone()).collect();
         let delivered: Vec<String> = store.write(user_id, |p| {
+            if !security_gap_elapsed(p, now) {
+                return Vec::new();
+            }
             let still_fresh: Vec<String> = topics
                 .iter()
                 .filter(|t| topic_is_fresh(&p.settings.ai_security_seen, t, now))
@@ -668,6 +822,19 @@ async fn fresh_security_incidents(
 ) -> Vec<(String, String)> {
     let symbols = collect_symbols(store, user_id);
     let mut out: Vec<(String, String)> = Vec::new();
+
+    // Market-wide incidents (exchange hacks, stablecoin depegs) often only
+    // appear in the general summary, not in a single symbol's feed.
+    if let Ok(Some(general)) = sqlite.get_news_summary("GENERAL").await {
+        if !general.contains("Failed to analyze") {
+            if let Some(topic) = detect_security_topic(&general) {
+                if incident_is_significant(&topic, &general) {
+                    out.push((topic, general));
+                }
+            }
+        }
+    }
+
     for sym in &symbols {
         let Ok(articles) = sqlite.get_news_articles(sym, 1).await else {
             continue;
@@ -676,7 +843,7 @@ async fn fresh_security_incidents(
             let body: String = body.chars().take(SECURITY_ARTICLE_CHARS).collect();
             let text = format!("{title}. {body}");
             if let Some(topic) = detect_security_topic(&text) {
-                if !out.iter().any(|(t, _)| *t == topic) {
+                if incident_is_significant(&topic, &text) && !out.iter().any(|(t, _)| *t == topic) {
                     out.push((topic, text));
                 }
             }
@@ -768,6 +935,9 @@ async fn send_security_alert(
     // Re-check atomically: the fast security scanner may have already delivered
     // this incident while the AI analysis was running.
     let deliver = store.write(user_id, |p| {
+        if !security_gap_elapsed(p, now) {
+            return false;
+        }
         if !topic_is_fresh(&p.settings.ai_security_seen, &topic, now) {
             return false;
         }
@@ -964,8 +1134,76 @@ mod tests {
     #[test]
     fn snippet_covers_the_incident_sentence() {
         let text = "BTC flat. Binance hack drains $6.3B. ETH follows.";
-        let snippet = extract_security_snippet(text).unwrap();
+        let snippet = extract_security_snippet(&text).unwrap();
         assert!(snippet.contains("Binance hack"));
         assert!(snippet.contains("$6.3B"));
+    }
+
+    #[test]
+    fn parses_usd_amounts() {
+        assert_eq!(incident_amount_usd("Binance drained $6.3B"), Some(6.3e9));
+        assert_eq!(incident_amount_usd("a $100M wallet theft"), Some(1.0e8));
+        assert_eq!(incident_amount_usd("lost $5,800,000 total"), Some(5.8e6));
+        assert_eq!(
+            incident_amount_usd("Polymarket $2.65 million exploit"),
+            Some(2.65e6)
+        );
+        assert_eq!(incident_amount_usd("no numbers here"), None);
+    }
+
+    #[test]
+    fn custody_entity_always_significant() {
+        // The 2026-10-30 Binance breach is exactly what the alert exists for.
+        let text = "Binance investigating hack as suspicious outflows reach $5.8 billion";
+        let topic = detect_security_topic(text).unwrap();
+        assert_eq!(topic, "binance");
+        assert!(incident_is_significant(&topic, text));
+    }
+
+    #[test]
+    fn small_generic_incidents_are_ignored() {
+        // Real 2026-11-02 noise that paged the user: BTCPay hot wallets, a Linux
+        // CVE affecting Solana validators and a $138k DeFi drain.
+        for text in [
+            "BTCPay Server warns of hot wallet thefts running on outdated software",
+            "Solana validators told to act immediately as critical Linux vulnerability emerges",
+            "Hackers hijack a dozen DeFi websites and steal about $138,000",
+        ] {
+            let topic = detect_security_topic(text).unwrap();
+            assert!(
+                !incident_is_significant(&topic, text),
+                "should be filtered: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn headline_sized_generic_loss_is_significant() {
+        let text = "Unknown DeFi protocol hacked for $6.3B in the largest heist this year";
+        let topic = detect_security_topic(text).unwrap();
+        assert!(incident_is_significant(&topic, text));
+    }
+
+    #[test]
+    fn wallet_brand_requires_active_compromise() {
+        let product_news = "Trezor lifts password ceiling after Coldcard's $100M wallet thefts";
+        let topic = detect_security_topic(product_news).unwrap();
+        assert_eq!(topic, "trezor");
+        assert!(!incident_is_significant(&topic, product_news));
+
+        let active = "Ledger users drained after malicious firmware vulnerability";
+        assert_eq!(detect_security_topic(active).as_deref(), Some("ledger"));
+        assert!(incident_is_significant("ledger", active));
+    }
+
+    #[test]
+    fn security_gap_suppresses_bursts() {
+        let now = Utc::now();
+        let mut p = crate::models::Portfolio::default();
+        assert!(security_gap_elapsed(&p, now));
+        p.settings.ai_last_security_notify = Some(now - chrono::Duration::hours(1));
+        assert!(!security_gap_elapsed(&p, now));
+        p.settings.ai_last_security_notify = Some(now - chrono::Duration::hours(7));
+        assert!(security_gap_elapsed(&p, now));
     }
 }
