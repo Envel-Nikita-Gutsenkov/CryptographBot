@@ -209,10 +209,17 @@ fn build_handler() -> UpdateHandler<anyhow::Error> {
         });
     let documents = Message::filter_document().endpoint(handle_document);
     let text_msgs = Message::filter_text().endpoint(handle_text);
+    // Last resort for plain text in a state that has no wizard branch
+    // (`TransferStep*`, `AwaitingRestoreConfirm`, `Correcting*`). Without it
+    // those states silently swallow every message forever.
+    let stuck_text = Message::filter_text().endpoint(handle_stuck_state);
 
     let messages = Update::filter_message()
         .branch(documents)
-        .branch(case![State::Idle].branch(commands).branch(text_msgs))
+        // Commands live OUTSIDE `State::Idle`: a wizard waiting for input must
+        // never lock the user out of `/cancel`, `/reset`, `/ver` and friends.
+        .branch(commands)
+        .branch(case![State::Idle].branch(text_msgs))
         .branch(case![State::AiWizard].endpoint(handlers::ai::handle_ai_wizard))
         .branch(case![State::AlertStep1].endpoint(handlers::alert::handle_alert_step1))
         .branch(
@@ -232,9 +239,16 @@ fn build_handler() -> UpdateHandler<anyhow::Error> {
         .branch(
             case![State::WalletStep2 { name, kind }]
                 .endpoint(handlers::wallet::handle_wallet_step2),
-        );
+        )
+        .branch(stuck_text);
 
-    let main_chain = callbacks
+    // dptree branching: `a.branch(b)` runs `b` only when `a` *succeeds*. So the
+    // root must be `entry()` (which always succeeds) — branching directly off
+    // `Update::filter_callback_query()` meant that any *message* update (which
+    // fails that filter) never reached the branches after it, i.e. the whole
+    // bot went mute.
+    let main_chain = dptree::entry()
+        .branch(callbacks)
         .branch(dialogue_callbacks)
         .branch(callback_fallback)
         .branch(dialogue::enter::<Update, InMemStorage<State>, State, _>().branch(messages));
@@ -646,6 +660,46 @@ async fn handle_cancel(bot: Bot, msg: Message, dialogue: MyDialogue) -> anyhow::
     bot.send_message(msg.chat.id, "❌ Cancelled")
         .reply_markup(keyboards::main_menu())
         .await?;
+    Ok(())
+}
+
+/// Name of a dialogue state, without its payload (payloads may contain the
+/// whole portfolio snapshot, which must not end up in logs or in a chat).
+fn state_name(state: &State) -> &'static str {
+    match state {
+        State::Idle => "Idle",
+        State::AlertStep1 => "AlertStep1",
+        State::AlertStep2 { .. } => "AlertStep2",
+        State::AlertStep3 { .. } => "AlertStep3",
+        State::TransferStep1 { .. } => "TransferStep1",
+        State::TransferStep2 { .. } => "TransferStep2",
+        State::TransferStep3 { .. } => "TransferStep3",
+        State::WalletStep1 => "WalletStep1",
+        State::WalletStep2 { .. } => "WalletStep2",
+        State::AwaitingRestoreConfirm { .. } => "AwaitingRestoreConfirm",
+        State::CorrectingPurchase { .. } => "CorrectingPurchase",
+        State::CorrectingHolding { .. } => "CorrectingHolding",
+        State::AiWizard => "AiWizard",
+    }
+}
+
+/// Reached only when a text message matches none of the wizard states that have
+/// a branch (`TransferStep*`, `AwaitingRestoreConfirm`, `Correcting*` have none).
+/// Instead of swallowing the message — which looks exactly like a dead bot — we
+/// log the state, drop it and tell the user to retry.
+async fn handle_stuck_state(bot: Bot, msg: Message, dialogue: MyDialogue) -> anyhow::Result<()> {
+    let state = dialogue.get().await.ok().flatten();
+    let name = state.as_ref().map(state_name).unwrap_or("none");
+    tracing::warn!("text in a dialogue state without a branch: {name} — dialogue reset");
+    dialogue.exit().await?;
+    bot.send_message(
+        msg.chat.id,
+        format!(
+            "⚠️ Your previous dialog step ({name}) was not continued by this build — \
+             I reset it instead of ignoring you. Please repeat the command."
+        ),
+    )
+    .await?;
     Ok(())
 }
 
@@ -1512,6 +1566,147 @@ async fn handle_text(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod handler_smoke_tests {
+    use super::*;
+
+    /// Regression for the 2026-11-02 outage: the branch tree started with
+    /// `Update::filter_callback_query().branch(..)`, and because `a.branch(b)`
+    /// only runs `b` when `a` succeeds, *every* message update was dropped as
+    /// "Unhandled update" — the bot looked dead. A message must reach an
+    /// endpoint (which then fails on the fake token, i.e. `Break`, not
+    /// `Continue`).
+    #[tokio::test]
+    async fn message_update_is_dispatched() {
+        std::env::set_var("TELOXIDE_TOKEN", "123456:AAHfake");
+        std::env::set_var("CMC_API_KEY", "dummy");
+        std::env::set_var("ALLOWED_ADMIN_IDS", "123456789");
+
+        let config = Arc::new(crate::config::Config::from_env().unwrap());
+        let sqlite = Arc::new(crate::db::SqliteStore::new(":memory:").unwrap());
+        let cmc = Arc::new(crate::crypto::CryptoClient::new(
+            "k",
+            "",
+            "",
+            "",
+            Some(sqlite.clone()),
+        ));
+        let blockchain = Arc::new(crate::crypto::BlockchainClient::new("", ""));
+        let acl = Arc::new(crate::access::AccessControl::new(vec![123456789]));
+        let store = Arc::new(crate::db::Store::new());
+        let storage = InMemStorage::<State>::new();
+        let patch_store = handlers::new_patch_store();
+        let bot = Bot::new("123456:AAHfake");
+        let me: teloxide::types::Me = serde_json::from_str(
+            r#"{"id":123456,"is_bot":true,"first_name":"Cryptograph","username":"CryptographAppBot","can_join_groups":true,"can_read_all_group_messages":false,"supports_inline_queries":false,"can_connect_to_business":false,"has_main_web_app":false}"#,
+        )
+        .unwrap();
+
+        let handler = build_handler();
+
+        for text in ["/ver", "/b", "/sniper", "/forecast BTC", "просто текст"] {
+            let mut deps = dptree::deps![
+                bot.clone(),
+                me.clone(),
+                store.clone(),
+                cmc.clone(),
+                blockchain.clone(),
+                acl.clone(),
+                config.clone(),
+                storage.clone(),
+                patch_store.clone(),
+                sqlite.clone()
+            ];
+            let raw = format!(
+                r#"{{"update_id":1,"message":{{"message_id":1,"date":0,"chat":{{"id":123456789,"type":"private","first_name":"a"}},"text":"{text}","from":{{"id":123456789,"is_bot":false,"first_name":"a"}}}}}}"#
+            );
+            let upd: Update = serde_json::from_str(&raw).unwrap();
+            deps.insert(upd);
+            let res = handler.dispatch(deps).await;
+            assert!(
+                !matches!(res, dptree::prelude::ControlFlow::Continue(_)),
+                "{text:?} was dropped by the handler tree"
+            );
+        }
+    }
+
+    /// A wizard state must not lock the user out of commands. Before the fix,
+    /// `/cancel` and `/reset` lived behind `case![State::Idle]`, so a stuck
+    /// dialog made the bot permanently mute.
+    #[tokio::test]
+    async fn commands_work_outside_idle() {
+        use teloxide::dispatching::dialogue::Storage;
+
+        std::env::set_var("TELOXIDE_TOKEN", "123456:AAHfake");
+        std::env::set_var("CMC_API_KEY", "dummy");
+        std::env::set_var("ALLOWED_ADMIN_IDS", "123456789");
+
+        let config = Arc::new(crate::config::Config::from_env().unwrap());
+        let sqlite = Arc::new(crate::db::SqliteStore::new(":memory:").unwrap());
+        let cmc = Arc::new(crate::crypto::CryptoClient::new(
+            "k",
+            "",
+            "",
+            "",
+            Some(sqlite.clone()),
+        ));
+        let blockchain = Arc::new(crate::crypto::BlockchainClient::new("", ""));
+        let acl = Arc::new(crate::access::AccessControl::new(vec![123456789]));
+        let store = Arc::new(crate::db::Store::new());
+        let storage = InMemStorage::<State>::new();
+        let patch_store = handlers::new_patch_store();
+        let bot = Bot::new("123456:AAHfake");
+        let me: teloxide::types::Me = serde_json::from_str(
+            r#"{"id":123456,"is_bot":true,"first_name":"Cryptograph","username":"CryptographAppBot","can_join_groups":true,"can_read_all_group_messages":false,"supports_inline_queries":false,"can_connect_to_business":false,"has_main_web_app":false}"#,
+        )
+        .unwrap();
+        let handler = build_handler();
+
+        // Every state: a command must be dispatched, not swallowed.
+        let states = [
+            State::AlertStep2 {
+                symbol: "BTC".into(),
+                condition: AlertCondition::PriceBelow,
+            },
+            State::WalletStep1,
+            State::TransferStep1 {
+                symbol: "BTC".into(),
+            },
+            State::AiWizard,
+        ];
+        for state in states {
+            storage
+                .clone()
+                .update_dialogue(teloxide::types::ChatId(123456789), state.clone())
+                .await
+                .unwrap();
+            let mut deps = dptree::deps![
+                bot.clone(),
+                me.clone(),
+                store.clone(),
+                cmc.clone(),
+                blockchain.clone(),
+                acl.clone(),
+                config.clone(),
+                storage.clone(),
+                patch_store.clone(),
+                sqlite.clone()
+            ];
+            let upd: Update = serde_json::from_str(
+                r#"{"update_id":1,"message":{"message_id":1,"date":0,"chat":{"id":123456789,"type":"private","first_name":"a"},"text":"/cancel","from":{"id":123456789,"is_bot":false,"first_name":"a"}}}"#,
+            )
+            .unwrap();
+            deps.insert(upd);
+            let res = handler.dispatch(deps).await;
+            assert!(
+                !matches!(res, dptree::prelude::ControlFlow::Continue(_)),
+                "/cancel was dropped in state {:?}",
+                state_name(&state)
+            );
+        }
+    }
 }
 
 #[cfg(test)]
