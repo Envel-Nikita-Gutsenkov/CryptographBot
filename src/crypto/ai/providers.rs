@@ -209,6 +209,21 @@ pub async fn call_single_model(
             Ok(cleaned)
         }
         Err(e) => {
+            let err_s = e.to_string();
+            // A prompt that does not fit a free tier's TPM gate is not a provider
+            // fault: smaller interactive prompts still work, so neither the model
+            // nor the provider should be benched for it. Debug level because this
+            // is expected for the big news prompts (Groq allows 8k TPM).
+            if err_s.contains("prompt too large") {
+                crate::crypto::ai::metrics::record_error(&provider_id);
+                tracing::debug!(
+                    "Provider {:?} skipped for model {}: {}",
+                    info.provider,
+                    info.id,
+                    err_s
+                );
+                return Err(e);
+            }
             tracing::warn!(
                 "Provider {:?} failed for model {}: {}",
                 info.provider,
@@ -221,13 +236,6 @@ pub async fn call_single_model(
             // 5xx, 429, Cohere 422) get NO ban: the model is fine, just busy —
             // banning it would let background workers knock working models out
             // of the pool for interactive /ask calls.
-            let err_s = e.to_string();
-            // A prompt that does not fit a free tier's TPM gate is not a provider
-            // fault: smaller interactive prompts still work, so neither the model
-            // nor the provider should be benched for it.
-            if err_s.contains("prompt too large") {
-                return Err(e);
-            }
             // Quota exhaustion → bench the whole provider until its reset time,
             // so background workers stop hammering it every minute. Burst 429s
             // (no quota marker) keep the existing short/1h behaviour.

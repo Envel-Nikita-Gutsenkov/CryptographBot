@@ -83,7 +83,12 @@ pub async fn run_news_cycle(
 
         let mut news_text = String::new();
         let mut char_count = 0;
-        let max_chars = 60_000;
+        // Cap the batch at ~36k chars (~12k tokens). The old 60k budget pushed
+        // the news prompt past every free tier's TPM gate (Groq 8k, Gemini
+        // flash 250k but quota-starved), so it was paid for in latency and
+        // rate limits on each of the 5 symbols every hour. 36k still fits ~45
+        // articles, far more than a cycle ever produces for one coin.
+        let max_chars = 36_000;
         for (i, article) in articles.iter().enumerate() {
             let body_snippet = if article.body.len() > 800 {
                 crate::format::truncate_chars(&article.body, 800)
