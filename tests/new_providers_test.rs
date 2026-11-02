@@ -43,16 +43,20 @@ async fn test_coinbase_provider_real() {
 async fn test_rss_provider_real() {
     let p = RssProvider::new();
 
-    let ct = p
-        .get_news_cointelegraph()
-        .await
-        .expect("CoinTelegraph RSS failed");
-    assert!(!ct.is_empty(), "CoinTelegraph RSS returned 0 articles");
-    println!("CoinTelegraph RSS first article: {}", ct[0].title);
+    let all = p.get_all_news().await.expect("Merged RSS feeds failed");
+    assert!(!all.is_empty(), "Merged RSS feeds returned 0 articles");
+    println!(
+        "RSS merged: {} articles, first: [{}] {}",
+        all.len(),
+        all[0].source,
+        all[0].title
+    );
 
-    let cd = p.get_news_coindesk().await.expect("CoinDesk RSS failed");
-    assert!(!cd.is_empty(), "CoinDesk RSS returned 0 articles");
-    println!("CoinDesk RSS first article: {}", cd[0].title);
+    // The merged feed must contain something from more than one publisher,
+    // otherwise a single source is silently carrying the whole news pipeline.
+    let sources: std::collections::HashSet<&str> = all.iter().map(|a| a.source.as_str()).collect();
+    println!("RSS sources alive: {:?}", sources);
+    assert!(sources.len() >= 2, "only one RSS source answered");
 }
 
 #[tokio::test]

@@ -123,56 +123,46 @@ fn strip_html_light(s: &str) -> String {
     out
 }
 
-/// Official crypto RSS feeds (CoinTelegraph, CoinDesk, Decrypt, Blockworks,
-/// TheBlock, BitcoinMagazine) — free, keyless, no captcha. Items are ranked by
-/// how many query keywords appear in title+body.
+/// Official crypto RSS feeds (CoinTelegraph, Decrypt, Blockworks, TheBlock,
+/// CryptoSlate, AMBCrypto, BeInCrypto, CryptoPotato) — free, keyless, no
+/// captcha. Items are ranked by how many query keywords appear in title+body.
 pub async fn crypto_rss_search(
     _client: &Client,
     query: &str,
     max_results: usize,
 ) -> Vec<SearchResult> {
     let provider = crate::crypto::providers::rss::RssProvider::new();
-    let futs: Vec<
-        futures::future::BoxFuture<
-            '_,
-            crate::error::Result<Vec<crate::crypto::providers::cryptocompare::NewsArticle>>,
-        >,
-    > = vec![
-        Box::pin(provider.get_news_cointelegraph()),
-        Box::pin(provider.get_news_coindesk()),
-        Box::pin(provider.get_news_decrypt()),
-        Box::pin(provider.get_news_blockworks()),
-        Box::pin(provider.get_news_theblock()),
-        Box::pin(provider.get_news_bitcoinmagazine()),
-    ];
-    let all = futures::future::join_all(futs).await;
+    let all = match provider.get_all_news().await {
+        Ok(articles) => articles,
+        Err(e) => {
+            tracing::debug!("RSS search unavailable: {e}");
+            return vec![];
+        }
+    };
     let q_lower = query.to_lowercase();
     let q_words: std::collections::HashSet<&str> = q_lower.split_whitespace().collect();
     if q_words.is_empty() {
         return vec![];
     }
     let mut scored: Vec<(usize, SearchResult)> = Vec::new();
-    for res in all {
-        let Ok(articles) = res else { continue };
-        for a in articles {
-            if is_ru_domain(&a.url) {
-                continue; // RU domains are untrusted
-            }
-            let hay = format!("{} {}", a.title, a.body).to_lowercase();
-            let overlap = q_words.iter().filter(|w| hay.contains(*w)).count();
-            if overlap == 0 {
-                continue;
-            }
-            scored.push((
-                overlap,
-                SearchResult {
-                    title: a.title,
-                    url: a.url,
-                    snippet: a.body,
-                    score: overlap as f32,
-                },
-            ));
+    for a in all {
+        if is_ru_domain(&a.url) {
+            continue; // RU domains are untrusted
         }
+        let hay = format!("{} {}", a.title, a.body).to_lowercase();
+        let overlap = q_words.iter().filter(|w| hay.contains(*w)).count();
+        if overlap == 0 {
+            continue;
+        }
+        scored.push((
+            overlap,
+            SearchResult {
+                title: a.title,
+                url: a.url,
+                snippet: a.body,
+                score: overlap as f32,
+            },
+        ));
     }
     scored.sort_by(|a, b| b.0.cmp(&a.0));
     scored

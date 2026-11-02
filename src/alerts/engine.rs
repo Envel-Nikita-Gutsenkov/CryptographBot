@@ -1,6 +1,7 @@
 //! Background alert engine.
 //! Wakes every `Config::alert_interval_secs`, evaluates all rules,
-//! enforces cooldown + 2-consecutive-trigger dedup before firing.
+//! enforces per-rule cooldown before firing. The tick only reads the quote
+//! cache, so it can run often without touching provider rate limits.
 
 use std::sync::Arc;
 

@@ -57,7 +57,12 @@ impl Config {
             ankr_rpc_url,
             gemini_api_key,
             session_key,
-            alert_interval_secs: env_u64("ALERT_INTERVAL_SECS", 300)?,
+            // Alert rules carry their own per-rule cooldown (default 12 h), so
+            // the tick decides reaction latency, not spam. Quotes come from the
+            // L1 cache (180 s TTL, kept warm by the Binance WS stream), so a
+            // 60 s tick costs no extra provider requests — it just checks the
+            // conditions 5x more often.
+            alert_interval_secs: env_u64("ALERT_INTERVAL_SECS", 60)?.max(30),
             wallet_poll_mins: env_u64("WALLET_POLL_MINS", 15)?,
             sqlite_db: std::env::var("SQLITE_DB").unwrap_or_else(|_| "crypto.db".to_string()),
         })

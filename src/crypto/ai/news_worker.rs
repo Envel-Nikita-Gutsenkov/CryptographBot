@@ -62,6 +62,25 @@ pub async fn run_news_cycle(
             warn!("Failed to store raw news articles for {}: {}", symbol, e);
         }
 
+        // If this batch is byte-identical to the one the stored summary was
+        // built from, re-running the AI would reproduce the same text at full
+        // cost. The RSS sources are market-wide, so that is the common case:
+        // 5 symbols re-summarized the same feed every cycle.
+        let fingerprint = batch_fingerprint(&articles);
+        let previous_fingerprint = sqlite
+            .get_news_batch_fingerprint(symbol)
+            .await
+            .ok()
+            .flatten();
+        if previous_fingerprint.as_deref() == Some(fingerprint.as_str()) {
+            debug!(
+                "News for {} unchanged ({} articles) — keeping the stored summary",
+                symbol,
+                articles.len()
+            );
+            continue;
+        }
+
         let mut news_text = String::new();
         let mut char_count = 0;
         let max_chars = 60_000;
@@ -110,20 +129,46 @@ pub async fn run_news_cycle(
         sqlite
             .save_news_summary_history(&symbol, &verified_summary)
             .await;
+        if let Err(e) = sqlite
+            .set_news_batch_fingerprint(symbol, &fingerprint)
+            .await
+        {
+            warn!("Failed to store news fingerprint for {}: {}", symbol, e);
+        }
         info!("Saved verified news summary for {}", symbol);
 
         // Sleep a bit between symbols to avoid rate limits
         sleep(Duration::from_secs(10)).await;
     }
 
-    // Retention sweep once per full cycle: raw articles 7 days,
-    // summary history 30 days. Keeps the DB small while preserving
-    // enough history for "what changed over time" questions.
-    if let Err(e) = sqlite.cleanup_news(7, 30).await {
+    // Retention sweep once per full cycle: raw articles 3 days, summary
+    // history 14 days. Keeps the DB small while preserving enough history for
+    // "what changed over time" questions.
+    if let Err(e) = sqlite.cleanup_news(3, 14).await {
         warn!("News retention sweep failed: {}", e);
     }
 
     symbols
+}
+
+/// Stable identity of an article batch: count plus an FNV-1a hash of the sorted
+/// URLs. Order is normalised because the feeds are merged in parallel and may
+/// come back in a different order between cycles. FNV is used instead of
+/// `DefaultHasher` because the value is persisted: it must survive a rebuild.
+fn batch_fingerprint(articles: &[crate::crypto::providers::cryptocompare::NewsArticle]) -> String {
+    let mut urls: Vec<&str> = articles.iter().map(|a| a.url.as_str()).collect();
+    urls.sort_unstable();
+
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for url in &urls {
+        for byte in url.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{}:{hash:016x}", urls.len())
 }
 
 /// Runs a background worker that periodically fetches news for all symbols
@@ -224,5 +269,22 @@ mod tests {
             "\n=== JUDGE'S FINAL VERDICT ===\n{}\n=============================\n",
             final_summary
         );
+    }
+
+    #[test]
+    fn batch_fingerprint_is_order_independent_and_stable() {
+        let art = |url: &str| crate::crypto::providers::cryptocompare::NewsArticle {
+            title: "t".to_string(),
+            source: "s".to_string(),
+            body: String::new(),
+            url: url.to_string(),
+        };
+        let a = batch_fingerprint(&[art("https://a"), art("https://b")]);
+        let b = batch_fingerprint(&[art("https://b"), art("https://a")]);
+        assert_eq!(a, b);
+        assert_ne!(a, batch_fingerprint(&[art("https://a")]));
+        // Pinned literal: the value is persisted in SQLite, so a change here
+        // means every symbol re-runs the summary once after an upgrade.
+        assert_eq!(a, batch_fingerprint(&[art("https://a"), art("https://b")]));
     }
 }

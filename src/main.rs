@@ -655,6 +655,45 @@ async fn main_inner() -> anyhow::Result<()> {
                     );
                 }
             }
+            "fetch" => {
+                // Live check of the news chain: merged RSS vs CryptoCompare, the
+                // per-symbol filter, and the shared cache (second call must be
+                // instant, i.e. no network).
+                let sym = args
+                    .get(3)
+                    .map(|s| s.to_uppercase())
+                    .unwrap_or_else(|| "BTC".to_string());
+                let cmc = crypto::CryptoClient::new(
+                    &config.cmc_api_key,
+                    &config.coingecko_api_key,
+                    &config.coincap_api_key,
+                    &config.cryptocompare_api_key,
+                    None,
+                );
+                let started = std::time::Instant::now();
+                let articles = cmc.get_news(&sym).await?;
+                println!(
+                    "{sym}: {} articles in {:?}",
+                    articles.len(),
+                    started.elapsed()
+                );
+                let mut sources: std::collections::BTreeMap<String, usize> =
+                    std::collections::BTreeMap::new();
+                for a in &articles {
+                    *sources.entry(a.source.clone()).or_insert(0) += 1;
+                }
+                println!("sources: {sources:?}");
+                for a in articles.iter().take(10) {
+                    println!("- [{}] {}", a.source, a.title);
+                }
+                let second = std::time::Instant::now();
+                let again = cmc.get_news(&sym).await?;
+                println!(
+                    "cached refetch: {} articles in {:?}",
+                    again.len(),
+                    second.elapsed()
+                );
+            }
             "articles" => {
                 let sym = args.get(3).map(|s| s.as_str()).unwrap_or("general");
                 let days = args.get(4).and_then(|s| s.parse::<i64>().ok()).unwrap_or(3);
@@ -668,8 +707,8 @@ async fn main_inner() -> anyhow::Result<()> {
                 }
             }
             "cleanup" => {
-                let deleted = sqlite.cleanup_news(7, 30).await?;
-                println!("Retention sweep deleted {deleted} rows (articles >7d, history >30d).");
+                let deleted = sqlite.cleanup_news(3, 14).await?;
+                println!("Retention sweep deleted {deleted} rows (articles >3d, history >14d).");
             }
             "run-once" => {
                 // One full news cycle without the bot loop: fetch + summarize +

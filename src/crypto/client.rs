@@ -40,6 +40,11 @@ const HISTORY_TIMEOUT: Duration = Duration::from_secs(30);
 const L1_TTL: Duration = Duration::from_secs(180);
 const TOP_TTL: Duration = Duration::from_secs(300);
 const BYN_TTL: Duration = Duration::from_secs(86_400);
+/// Headlines move on the scale of hours, not minutes: re-reading the same 8
+/// feeds every symbol every few minutes only burns bandwidth and rate limits.
+const NEWS_TTL: Duration = Duration::from_secs(600);
+/// How long to stop asking CryptoCompare for news after it rate-limits us.
+const NEWS_CC_COOLDOWN: Duration = Duration::from_secs(1_800);
 
 struct CryptoClientInner {
     cmc: CmcProvider,
@@ -67,6 +72,14 @@ struct CryptoClientInner {
     cache_top: Cache<u32, Vec<CmcQuote>>,
     cache_global: Cache<(), GlobalMetrics>,
     cache_byn: Cache<(), f64>,
+    /// Merged RSS feed shared by every caller. The feeds are market-wide, not
+    /// per coin, so fetching them once per symbol meant 8 HTTP requests per
+    /// symbol per cycle for byte-identical content.
+    cache_news: Cache<(), Vec<NewsArticle>>,
+    /// Set when CryptoCompare news fails (it is almost always rate limited), so
+    /// the following symbols go straight to RSS instead of each burning a
+    /// request on a guaranteed 429.
+    news_cc_cooldown: Cache<(), ()>,
     http: reqwest::Client,
     sqlite: Option<Arc<SqliteStore>>,
 }
@@ -146,6 +159,14 @@ impl CryptoClient {
             cache_byn: Cache::builder()
                 .time_to_live(BYN_TTL)
                 .max_capacity(1)
+                .build(),
+            cache_news: Cache::builder()
+                .time_to_live(NEWS_TTL)
+                .max_capacity(4)
+                .build(),
+            news_cc_cooldown: Cache::builder()
+                .time_to_live(NEWS_CC_COOLDOWN)
+                .max_capacity(4)
                 .build(),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(8))
@@ -504,76 +525,40 @@ impl CryptoClient {
         self.inner.get_history(symbol, period).await
     }
 
+    /// News headlines relevant to `symbol` ("GENERAL" means the whole market).
+    ///
+    /// The RSS sources are market-wide, not per coin, so the merged feed is
+    /// fetched once per [`NEWS_TTL`] and shared by every caller; each symbol then
+    /// keeps only the articles that actually mention it. CryptoCompare is tried
+    /// first, but one failure parks it for [`NEWS_CC_COOLDOWN`] — it is almost
+    /// always rate-limited, and previously every symbol burned a request on a
+    /// guaranteed error before falling back anyway.
     pub async fn get_news(&self, symbol: &str) -> Result<Vec<NewsArticle>> {
-        // 1. Try CryptoCompare first
-        match self.inner.cryptocompare.get_news(symbol).await {
-            Ok(news) if !news.is_empty() => Ok(news),
-            res => {
-                if let Err(ref e) = res {
-                    tracing::warn!(
-                        "CryptoCompare news failed ({}), falling back to merged RSS feeds",
-                        e
+        if self.inner.news_cc_cooldown.get(&()).await.is_none() {
+            match self.inner.cryptocompare.get_news(symbol).await {
+                Ok(news) if !news.is_empty() => return Ok(news),
+                Ok(_) => debug!("CryptoCompare news empty for {symbol}; using merged RSS"),
+                Err(e) => {
+                    warn!(
+                        "CryptoCompare news failed ({e}); skipping it for {}s",
+                        NEWS_CC_COOLDOWN.as_secs()
                     );
-                } else {
-                    tracing::warn!(
-                        "CryptoCompare news returned empty, falling back to merged RSS feeds"
-                    );
+                    self.inner.news_cc_cooldown.insert((), ()).await;
                 }
-
-                // 2. Fetch from all 6 RSS feeds in parallel and merge
-                let (ct_res, cd_res, de_res, bw_res, tb_res, bm_res) = tokio::join!(
-                    self.inner.rss.get_news_cointelegraph(),
-                    self.inner.rss.get_news_coindesk(),
-                    self.inner.rss.get_news_decrypt(),
-                    self.inner.rss.get_news_blockworks(),
-                    self.inner.rss.get_news_theblock(),
-                    self.inner.rss.get_news_bitcoinmagazine()
-                );
-
-                let mut merged = Vec::new();
-                if let Ok(ct_news) = ct_res {
-                    merged.extend(ct_news);
-                } else if let Err(ref e) = ct_res {
-                    tracing::warn!("CoinTelegraph RSS feed failed: {}", e);
-                }
-
-                if let Ok(cd_news) = cd_res {
-                    merged.extend(cd_news);
-                } else if let Err(ref e) = cd_res {
-                    tracing::warn!("CoinDesk RSS feed failed: {}", e);
-                }
-
-                if let Ok(de_news) = de_res {
-                    merged.extend(de_news);
-                } else if let Err(ref e) = de_res {
-                    tracing::warn!("Decrypt RSS feed failed: {}", e);
-                }
-
-                if let Ok(bw_news) = bw_res {
-                    merged.extend(bw_news);
-                } else if let Err(ref e) = bw_res {
-                    tracing::warn!("Blockworks RSS feed failed: {}", e);
-                }
-
-                if let Ok(tb_news) = tb_res {
-                    merged.extend(tb_news);
-                } else if let Err(ref e) = tb_res {
-                    tracing::warn!("TheBlock RSS feed failed: {}", e);
-                }
-
-                if let Ok(bm_news) = bm_res {
-                    merged.extend(bm_news);
-                } else if let Err(ref e) = bm_res {
-                    tracing::warn!("BitcoinMagazine RSS feed failed: {}", e);
-                }
-
-                // Deduplicate by title to ensure unique articles
-                let mut seen = std::collections::HashSet::new();
-                merged.retain(|a| seen.insert(a.title.clone()));
-
-                Ok(merged)
             }
         }
+
+        let all = match self.inner.cache_news.get(&()).await {
+            Some(cached) => cached,
+            None => {
+                let fresh = self.inner.rss.get_all_news().await?;
+                tracing::info!("RSS news refreshed: {} articles", fresh.len());
+                self.inner.cache_news.insert((), fresh.clone()).await;
+                fresh
+            }
+        };
+
+        Ok(select_for_symbol(all, symbol))
     }
 
     pub async fn get_fng(&self) -> Result<FearAndGreed> {
@@ -1349,6 +1334,112 @@ impl CryptoClientInner {
     }
 }
 
+/// Per-coin aliases used to pull a symbol's own stories out of a market-wide
+/// feed. The ticker alone is not enough: publishers write "ether", "solana"
+/// and "Chainlink" far more often than "ETH"/"SOL"/"LINK".
+///
+/// Returns `None` for symbols we have no aliases for — those keep the full feed
+/// instead of getting an empty list.
+fn aliases_for(symbol: &str) -> Option<&'static [&'static str]> {
+    Some(match symbol {
+        "BTC" => &["btc", "bitcoin"],
+        "ETH" => &["eth", "ethereum", "ether", "vitalik"],
+        "SOL" => &["sol", "solana"],
+        "LINK" => &["link", "chainlink"],
+        "BNB" => &["bnb", "binance coin", "bnb chain", "bsc"],
+        "XRP" => &["xrp", "ripple"],
+        "ADA" => &["ada", "cardano"],
+        "DOGE" => &["doge", "dogecoin"],
+        "AVAX" => &["avax", "avalanche"],
+        "DOT" => &["dot", "polkadot"],
+        "MATIC" | "POL" => &["matic", "polygon"],
+        "TON" => &["toncoin", "the open network"],
+        "TRX" => &["trx", "tron"],
+        "LTC" => &["ltc", "litecoin"],
+        "SHIB" => &["shib", "shiba"],
+        "UNI" => &["uni", "uniswap"],
+        "ATOM" => &["atom", "cosmos"],
+        "NEAR" => &["near protocol", "nearprot"],
+        "ARB" => &["arb", "arbitrum"],
+        "INJ" => &["inj", "injective"],
+        "SUI" => &["sui"],
+        "APT" => &["apt", "aptos"],
+        "SEI" => &["sei"],
+        "TIA" => &["tia", "celestia"],
+        "OP" => &["optimism"],
+        "RNDR" | "RENDER" => &["rndr", "render token", "render network"],
+        "PEPE" => &["pepe"],
+        _ => return None,
+    })
+}
+
+/// Keeps only the articles that mention `symbol`, falling back to the newest
+/// slice of the feed when a known coin simply has no coverage in this batch
+/// (better a market digest than an empty summary).
+fn select_for_symbol(articles: Vec<NewsArticle>, symbol: &str) -> Vec<NewsArticle> {
+    let symbol = symbol.trim().to_uppercase();
+    if symbol == "GENERAL" {
+        return articles;
+    }
+    let Some(aliases) = aliases_for(&symbol) else {
+        return articles;
+    };
+
+    let mut needles: Vec<String> = aliases.iter().map(|a| a.to_string()).collect();
+    if symbol.len() > 1 {
+        needles.push(symbol.to_lowercase());
+    }
+
+    let selected: Vec<NewsArticle> = articles
+        .iter()
+        .filter(|a| {
+            let title = a.title.to_lowercase();
+            let body = a.body.to_lowercase();
+            needles
+                .iter()
+                .any(|n| contains_word_lower(&title, n) || contains_word_lower(&body, n))
+        })
+        .cloned()
+        .collect();
+
+    if selected.is_empty() {
+        // No coin-specific coverage right now: hand back the freshest few
+        // market stories so the summary still has something to chew on.
+        return articles.into_iter().take(20).collect();
+    }
+    selected
+}
+
+/// Case-insensitive whole-word containment. `haystack` must already be
+/// lowercased. Boundary checks stop "sol" from matching "solution" and "link"
+/// from matching "linking".
+fn contains_word_lower(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return false;
+    }
+    let mut start = 0usize;
+    while let Some(pos) = haystack[start..].find(needle) {
+        let abs = start + pos;
+        let end = abs + needle.len();
+        let before_ok = haystack[..abs]
+            .chars()
+            .next_back()
+            .map_or(true, |c| !c.is_alphanumeric());
+        let after_ok = haystack[end..]
+            .chars()
+            .next()
+            .map_or(true, |c| !c.is_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+        start = end;
+        if start >= haystack.len() {
+            break;
+        }
+    }
+    false
+}
+
 #[derive(serde::Deserialize)]
 struct PaprikaGlobal {
     market_cap_usd: f64,
@@ -1360,6 +1451,56 @@ struct PaprikaGlobal {
 #[cfg(test)]
 mod debug_tests {
     use super::*;
+
+    #[test]
+    fn news_filter_picks_coin_specific_articles() {
+        let art = |title: &str, body: &str| NewsArticle {
+            title: title.to_string(),
+            source: "test".to_string(),
+            body: body.to_string(),
+            url: format!("https://example.com/{}", title.len()),
+        };
+        let feed = vec![
+            art("Bitcoin ETF inflows hit record", "BTC keeps climbing"),
+            art("Solana outage resolved", "validators restarted"),
+            art("Ethereum upgrade ships", "the ether roadmap continues"),
+        ];
+
+        let btc = select_for_symbol(feed.clone(), "BTC");
+        assert_eq!(btc.len(), 1);
+        assert!(btc[0].title.contains("Bitcoin"));
+
+        let eth = select_for_symbol(feed.clone(), "ETH");
+        assert_eq!(eth.len(), 1);
+        assert!(eth[0].title.contains("Ethereum"));
+
+        // "GENERAL" and unknown tickers keep the whole feed.
+        assert_eq!(select_for_symbol(feed.clone(), "GENERAL").len(), 3);
+        assert_eq!(select_for_symbol(feed.clone(), "ZZZ").len(), 3);
+    }
+
+    #[test]
+    fn news_filter_respects_word_boundaries() {
+        assert!(contains_word_lower("bitcoin drops", "btc") == false);
+        assert!(contains_word_lower("btc drops 5%", "btc"));
+        assert!(!contains_word_lower("a solution for scaling", "sol"));
+        assert!(contains_word_lower("sol rallies", "sol"));
+        assert!(!contains_word_lower("linking chains", "link"));
+        assert!(contains_word_lower("link surges", "link"));
+    }
+
+    #[test]
+    fn news_filter_falls_back_when_coin_has_no_coverage() {
+        let feed: Vec<NewsArticle> = (0..30)
+            .map(|i| NewsArticle {
+                title: format!("Market story {i}"),
+                source: "test".to_string(),
+                body: String::new(),
+                url: format!("https://example.com/{i}"),
+            })
+            .collect();
+        assert_eq!(select_for_symbol(feed, "LINK").len(), 20);
+    }
 
     #[test]
     fn sane_history_rejects_empty() {

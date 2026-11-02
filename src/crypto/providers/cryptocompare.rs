@@ -12,7 +12,7 @@ pub struct CryptoCompareProvider {
     api_key: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[allow(dead_code)]
 pub struct NewsArticle {
     pub title: String,

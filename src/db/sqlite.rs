@@ -1139,8 +1139,13 @@ impl SqliteStore {
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             let conn = Connection::open(&db_path)?;
             let mut stmt = conn.prepare(
-                "INSERT OR IGNORE INTO news_articles (symbol, source, title, body, url)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO news_articles (symbol, source, title, body, url)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(symbol, url) DO UPDATE SET
+                     source = excluded.source,
+                     title = excluded.title,
+                     body = excluded.body,
+                     fetched_at = CURRENT_TIMESTAMP",
             )?;
             for (source, title, body, url) in &articles {
                 if url.is_empty() {
@@ -1148,6 +1153,48 @@ impl SqliteStore {
                 }
                 stmt.execute(params![symbol, source, title, body, url])?;
             }
+            Ok(())
+        })
+        .await?
+    }
+
+    /// Fingerprint of the article batch that last produced a summary for
+    /// `symbol`. Used to skip a byte-identical AI call on the next cycle.
+    pub async fn get_news_batch_fingerprint(&self, symbol: &str) -> anyhow::Result<Option<String>> {
+        let db_path = self.db_path.clone();
+        let symbol = symbol.to_uppercase();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Option<String>> {
+            let conn = Connection::open(&db_path)?;
+            let mut stmt =
+                conn.prepare("SELECT fingerprint FROM news_batch_state WHERE symbol = ?1")?;
+            let mut rows = stmt.query(params![symbol])?;
+            match rows.next()? {
+                Some(row) => Ok(Some(row.get::<_, String>(0)?)),
+                None => Ok(None),
+            }
+        })
+        .await?
+    }
+
+    /// Remember which article batch the last summary was built from.
+    pub async fn set_news_batch_fingerprint(
+        &self,
+        symbol: &str,
+        fingerprint: &str,
+    ) -> anyhow::Result<()> {
+        let db_path = self.db_path.clone();
+        let symbol = symbol.to_uppercase();
+        let fingerprint = fingerprint.to_string();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let conn = Connection::open(&db_path)?;
+            conn.execute(
+                "INSERT INTO news_batch_state (symbol, fingerprint, updated_at)
+                 VALUES (?1, ?2, CURRENT_TIMESTAMP)
+                 ON CONFLICT(symbol) DO UPDATE SET
+                     fingerprint = excluded.fingerprint,
+                     updated_at = CURRENT_TIMESTAMP",
+                params![symbol, fingerprint],
+            )?;
             Ok(())
         })
         .await?
@@ -1215,6 +1262,10 @@ impl SqliteStore {
 
     /// Retention sweep: drop raw articles older than `article_days` and
     /// summary history older than `history_days`. Returns rows deleted.
+    ///
+    /// A large sweep also compacts the file: deleting rows leaves the pages
+    /// allocated, so the DB never actually shrank before (50 MB of which 22 MB
+    /// was dead news rows).
     pub async fn cleanup_news(&self, article_days: i64, history_days: i64) -> anyhow::Result<i64> {
         let db_path = self.db_path.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<i64> {
@@ -1227,7 +1278,15 @@ impl SqliteStore {
                 "DELETE FROM news_summary_history WHERE created_at < datetime('now', ?1)",
                 params![format!("-{history_days} days")],
             )?;
-            Ok((a + h) as i64)
+            let deleted = (a + h) as i64;
+            if deleted > 500 {
+                // Only worth a full rewrite after a bulk sweep; the routine
+                // sweep deletes a handful of rows.
+                if let Err(e) = conn.execute_batch("VACUUM;") {
+                    tracing::warn!("VACUUM after news sweep failed: {e}");
+                }
+            }
+            Ok(deleted)
         })
         .await?
     }
@@ -1423,6 +1482,7 @@ impl SqliteStore {
         let tables = [
             "news_summaries",
             "news_articles",
+            "news_batch_state",
             "news_summary_history",
             "quote_meta_cache",
             "model_health",
@@ -1553,6 +1613,24 @@ fn init_db(conn: &mut Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_news_articles_sym_ts
             ON news_articles(symbol, fetched_at);
+        -- Older builds inserted with `INSERT OR IGNORE` but had no constraint to
+        -- ignore on, so the same story was re-inserted every cycle: 46 750 rows
+        -- for 400 unique URLs. Collapse those duplicates before the unique
+        -- index goes on; re-running is a cheap no-op once they are gone.
+        DELETE FROM news_articles WHERE id NOT IN (
+            SELECT MIN(id) FROM news_articles GROUP BY symbol, url
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_news_articles_sym_url
+            ON news_articles(symbol, url);
+
+        -- Fingerprint of the last article batch that was sent to the AI per
+        -- symbol. When a cycle produces the same set of URLs, the summary would
+        -- be identical, so the whole AI call (and its cost) is skipped.
+        CREATE TABLE IF NOT EXISTS news_batch_state (
+            symbol TEXT PRIMARY KEY,
+            fingerprint TEXT NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
 
         CREATE TABLE IF NOT EXISTS news_summary_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

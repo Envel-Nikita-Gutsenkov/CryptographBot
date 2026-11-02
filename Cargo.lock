@@ -418,6 +418,7 @@ version = "1.0.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
+ "atom_syndication",
  "base64 0.21.7",
  "bincode",
  "blake3",

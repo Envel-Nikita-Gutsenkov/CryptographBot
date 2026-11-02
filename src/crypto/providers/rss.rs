@@ -16,47 +16,98 @@ impl RssProvider {
             reqwest::header::USER_AGENT,
             reqwest::header::HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64)"),
         );
+        headers.insert(
+            reqwest::header::ACCEPT,
+            reqwest::header::HeaderValue::from_static(
+                "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5",
+            ),
+        );
 
         Self {
             http: Client::builder()
                 .default_headers(headers)
                 .timeout(Duration::from_secs(8))
                 .use_rustls_tls()
+                // Several publishers answer with a 301/308 to their canonical
+                // feed URL (Blockworks is the case in point). Without an
+                // explicit policy the body of the redirect response was parsed
+                // as XML, which is why that source silently returned nothing.
+                .redirect(reqwest::redirect::Policy::limited(5))
                 .build()
                 .unwrap(),
         }
     }
 
-    pub async fn get_news_cointelegraph(&self) -> Result<Vec<NewsArticle>> {
-        self.fetch_rss("https://cointelegraph.com/rss", "CoinTelegraph")
-            .await
+    /// Every feed that currently answers with real XML, fetched in parallel.
+    ///
+    /// CoinDesk and Bitcoin Magazine were dropped: both reply `403 Forbidden`
+    /// to non-browser clients, so they only ever produced warnings. Dead slots
+    /// were refilled with outlets that are actually reachable and cover a
+    /// different slice of the market, so a single publisher can no longer
+    /// dominate the digest.
+    fn feeds(&self) -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("https://cointelegraph.com/rss", "CoinTelegraph"),
+            ("https://decrypt.co/feed", "Decrypt"),
+            ("https://blockworks.co/feed", "Blockworks"),
+            ("https://www.theblock.co/rss.xml", "TheBlock"),
+            ("https://cryptoslate.com/feed/", "CryptoSlate"),
+            ("https://ambcrypto.com/feed/", "AMBCrypto"),
+            ("https://beincrypto.com/feed/", "BeInCrypto"),
+            ("https://cryptopotato.com/feed/", "CryptoPotato"),
+            ("https://dailyhodl.com/feed/", "TheDailyHodl"),
+            ("https://news.bitcoin.com/feed/", "BitcoinCom"),
+            ("https://coinjournal.net/feed/", "CoinJournal"),
+            ("https://www.newsbtc.com/feed/", "NewsBTC"),
+            ("https://cryptobriefing.com/feed/", "CryptoBriefing"),
+            ("https://coingape.com/feed/", "CoinGape"),
+        ]
     }
 
-    pub async fn get_news_coindesk(&self) -> Result<Vec<NewsArticle>> {
-        self.fetch_rss(
-            "https://www.coindesk.com/arc/outboundfeeds/rss/",
-            "CoinDesk",
-        )
-        .await
-    }
+    /// Fetch all sources in parallel and merge them, de-duplicated by URL.
+    ///
+    /// One failing publisher must never empty the whole list, so partial
+    /// failures are logged and skipped.
+    pub async fn get_all_news(&self) -> Result<Vec<NewsArticle>> {
+        let feeds = self.feeds();
+        let total_feeds = feeds.len();
+        let mut tasks = Vec::with_capacity(feeds.len());
+        for (url, name) in feeds {
+            tasks.push(async move { (name, self.fetch_rss(url, name).await) });
+        }
 
-    pub async fn get_news_decrypt(&self) -> Result<Vec<NewsArticle>> {
-        self.fetch_rss("https://decrypt.co/feed", "Decrypt").await
-    }
+        let mut merged: Vec<NewsArticle> = Vec::new();
+        let mut ok_sources = 0usize;
+        for (name, res) in futures_util::future::join_all(tasks).await {
+            match res {
+                Ok(mut list) => {
+                    if !list.is_empty() {
+                        ok_sources += 1;
+                    }
+                    merged.append(&mut list);
+                }
+                Err(e) => tracing::debug!("RSS feed {name} failed: {e}"),
+            }
+        }
 
-    pub async fn get_news_blockworks(&self) -> Result<Vec<NewsArticle>> {
-        self.fetch_rss("https://blockworks.co/feed", "Blockworks")
-            .await
-    }
+        if merged.is_empty() {
+            return Err(BotError::CmcApi(format!(
+                "all {total_feeds} RSS feeds failed"
+            )));
+        }
+        tracing::debug!(
+            "Merged {} articles from {ok_sources} RSS feeds",
+            merged.len()
+        );
 
-    pub async fn get_news_theblock(&self) -> Result<Vec<NewsArticle>> {
-        self.fetch_rss("https://www.theblock.co/rss.xml", "TheBlock")
-            .await
-    }
-
-    pub async fn get_news_bitcoinmagazine(&self) -> Result<Vec<NewsArticle>> {
-        self.fetch_rss("https://bitcoinmagazine.com/.rss/full/", "BitcoinMagazine")
-            .await
+        // De-duplicate by URL first (the same story is syndicated with slightly
+        // different titles across publishers), then by title.
+        let mut seen_urls = std::collections::HashSet::new();
+        merged.retain(|a| a.url.is_empty() || seen_urls.insert(a.url.clone()));
+        let mut seen_titles = std::collections::HashSet::new();
+        merged.retain(|a| seen_titles.insert(a.title.trim().to_lowercase()));
+        merged.retain(|a| !a.title.trim().is_empty());
+        Ok(merged)
     }
 
     /// Fetches the feed XML directly and parses it with the `rss` crate.
@@ -81,30 +132,84 @@ impl RssProvider {
             .text()
             .await
             .map_err(|e| BotError::CmcApi(e.to_string()))?;
-        let channel = rss::Channel::read_from(xml.as_bytes())
-            .map_err(|e| BotError::CmcApi(format!("RSS parse failed: {e}")))?;
+
+        // Most publishers serve RSS 2.0, but Blockworks serves Atom, which the
+        // `rss` crate's Channel parser cannot read at all — that source was
+        // fetched successfully and then silently discarded.
+        let is_atom = xml
+            .get(..2048)
+            .map(|head| head.contains("<feed") && head.contains("Atom"))
+            .unwrap_or(false);
+        if is_atom {
+            return parse_atom(xml.as_bytes(), source_name);
+        }
+
+        let channel = match rss::Channel::read_from(xml.as_bytes()) {
+            Ok(c) => c,
+            Err(e) => {
+                // Wrongly labelled feeds exist too: fall back to Atom once.
+                tracing::debug!("RSS parse failed for {source_name} ({e}); trying Atom");
+                return parse_atom(xml.as_bytes(), source_name);
+            }
+        };
 
         let mut articles = Vec::new();
         for item in channel.items().iter().take(30) {
-            let mut body_text = item
+            let body_text = item
                 .content()
                 .map(str::to_string)
                 .unwrap_or_else(|| item.description().unwrap_or_default().to_string());
-            body_text = strip_html(&body_text);
-            if body_text.chars().count() > 800 {
-                body_text = body_text.chars().take(797).collect::<String>();
-                body_text.push_str("...");
-            }
 
             articles.push(NewsArticle {
                 title: item.title().unwrap_or_default().trim().to_string(),
                 source: source_name.to_string(),
-                body: body_text.trim().to_string(),
+                body: clean_body(&body_text),
                 url: item.link().unwrap_or_default().to_string(),
             });
         }
         Ok(articles)
     }
+}
+
+fn parse_atom(xml: &[u8], source_name: &'static str) -> Result<Vec<NewsArticle>> {
+    let feed = atom_syndication::Feed::read_from(xml)
+        .map_err(|e| BotError::CmcApi(format!("Atom parse failed: {e}")))?;
+
+    let mut articles = Vec::new();
+    for entry in feed.entries().iter().take(30) {
+        let title = entry.title().as_str().trim().to_string();
+        let body_text = entry
+            .content()
+            .and_then(|c| c.value().map(str::to_string))
+            .or_else(|| entry.summary().map(|s| s.as_str().to_string()))
+            .unwrap_or_default();
+        let url = entry
+            .links()
+            .iter()
+            .find(|l| l.rel() == "alternate" || l.rel().is_empty())
+            .or_else(|| entry.links().first())
+            .map(|l| l.href().to_string())
+            .unwrap_or_default();
+
+        articles.push(NewsArticle {
+            title,
+            source: source_name.to_string(),
+            body: clean_body(&body_text),
+            url,
+        });
+    }
+    Ok(articles)
+}
+
+/// Strip markup and cap the body at 800 chars (the news prompt only ever uses
+/// the first 800 anyway).
+fn clean_body(raw: &str) -> String {
+    let mut body = strip_html(raw);
+    if body.chars().count() > 800 {
+        body = body.chars().take(797).collect::<String>();
+        body.push_str("...");
+    }
+    body.trim().to_string()
 }
 
 fn strip_html(s: &str) -> String {
@@ -120,4 +225,40 @@ fn strip_html(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_atom, strip_html};
+
+    #[test]
+    fn html_tags_are_stripped_from_descriptions() {
+        assert_eq!(
+            strip_html("<p>BTC <b>drops</b> 5%</p>").trim(),
+            "BTC drops 5%"
+        );
+    }
+
+    #[test]
+    fn atom_feeds_are_parsed() {
+        // Trimmed real-world shape of the Blockworks feed: Atom, not RSS.
+        let xml = br#"<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Test</title>
+  <entry>
+    <title>ETF inflows hit a record</title>
+    <link rel="alternate" href="https://example.com/a"/>
+    <id>https://example.com/a</id>
+    <updated>2026-11-02T10:00:00Z</updated>
+    <summary>Bitcoin ETFs took in $1B.</summary>
+  </entry>
+</feed>"#;
+
+        let articles = parse_atom(xml, "Blockworks").expect("atom parse");
+        assert_eq!(articles.len(), 1);
+        assert_eq!(articles[0].title, "ETF inflows hit a record");
+        assert_eq!(articles[0].url, "https://example.com/a");
+        assert!(articles[0].body.contains("$1B"));
+        assert_eq!(articles[0].source, "Blockworks");
+    }
 }
