@@ -641,7 +641,17 @@ async fn run_goal_pipeline_traced_with<F: Fn(&str, &str)>(
         "Stage 2/3: cheap reviewer merging drafts (pool: news, 90s/call)...",
     );
     let reviewer_prompt = prompts::build_proactive_reviewer_prompt(prompt, &draft_a, &draft_b);
-    let reviewers = pools::get_available_models(Some("news"));
+    let mut reviewers = pools::get_available_models(Some("news"));
+    // Every news-role model except Groq is a free tier that runs out of daily
+    // quota (Gemini/Cloudflare), and Groq rejects prompts above 8k tokens. The
+    // old list then ended with "falling back to raw drafts" — i.e. the review
+    // stage silently disappeared. Stronger critic-tier models verify just as
+    // well, so append them as a fallback tier.
+    for m in pools::get_available_models(Some("critic")) {
+        if !reviewers.contains(&m) {
+            reviewers.push(m);
+        }
+    }
     let mut reviewer_model = String::new();
     let mut merged = String::new();
     let mut last_err = anyhow::anyhow!("No reviewer models available");
