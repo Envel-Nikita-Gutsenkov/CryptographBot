@@ -174,7 +174,6 @@ pub async fn call_single_model(
                     || err_s.contains("503")
                     || err_s.contains("504")
                     || err_s.contains("429")
-                    || err_s.contains("413")
                     || err_s.contains("rate limit")
                     || err_s.contains("too many requests");
                 if transient {
@@ -223,6 +222,12 @@ pub async fn call_single_model(
             // banning it would let background workers knock working models out
             // of the pool for interactive /ask calls.
             let err_s = e.to_string();
+            // A prompt that does not fit a free tier's TPM gate is not a provider
+            // fault: smaller interactive prompts still work, so neither the model
+            // nor the provider should be benched for it.
+            if err_s.contains("prompt too large") {
+                return Err(e);
+            }
             // Quota exhaustion → bench the whole provider until its reset time,
             // so background workers stop hammering it every minute. Burst 429s
             // (no quota marker) keep the existing short/1h behaviour.
@@ -247,7 +252,6 @@ pub async fn call_single_model(
                 || err_s.contains("504")
                 || err_s.contains("429")
                 || err_s.contains("422")
-                || err_s.contains("413")
                 || err_s.contains("rate limit")
                 || err_s.contains("too many requests");
             if !transient {
@@ -420,12 +424,28 @@ pub async fn call_gemini_model(
     }
 }
 
+/// Rough token estimate for the free tiers' TPM gates. English+JSON prompts
+/// average ~3 chars per token for BPE tokenizers, so dividing by 3 never
+/// under-counts the risky direction (over-counting only skips a call early).
+pub(crate) fn estimate_tokens(text: &str) -> usize {
+    text.chars().count() / 3 + 1
+}
+
 async fn call_groq_model(
     client: &reqwest::Client,
     model: &str,
     prompt: &str,
 ) -> anyhow::Result<String> {
     let key = std::env::var("GROQ_API_KEY").unwrap_or_default();
+    // The on-demand tier is capped at 8k TPM *including* the completion. A
+    // larger prompt can only ever answer 413, so skip the HTTP call instead of
+    // burning quota round-trips on requests that are refused by construction.
+    let tokens = estimate_tokens(prompt);
+    if tokens > 6000 {
+        return Err(anyhow::anyhow!(
+            "prompt too large for Groq TPM limit (~{tokens} tokens, cap 8000/min)"
+        ));
+    }
     if key.is_empty() {
         return Err(anyhow::anyhow!("GROQ_API_KEY not configured"));
     }
@@ -940,5 +960,35 @@ pub async fn call_any_model_with_search(
         }
 
         return Ok(response);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn estimate_tokens_never_underestimates_large_prompts() {
+        // 6000-token prompt ≈ 18k chars with the 3 chars/token heuristic.
+        let prompt = "a".repeat(18_000);
+        assert!(estimate_tokens(&prompt) >= 6000);
+        assert!(estimate_tokens("") >= 1);
+    }
+
+    #[test]
+    fn groq_skips_prompts_that_can_only_get_413() {
+        // The on-demand tier caps at 8k TPM; an oversized prompt must fail
+        // locally instead of burning an HTTP round-trip on a guaranteed 413.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = reqwest::Client::new();
+        let big = "x".repeat(60_000);
+        let err = rt
+            .block_on(call_groq_model(&client, "openai/gpt-oss-120b", &big))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("prompt too large"), "got: {err}");
     }
 }
