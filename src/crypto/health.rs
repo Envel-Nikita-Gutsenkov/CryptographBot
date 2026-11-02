@@ -8,6 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAX_FAILURES: u32 = 3;
 const RECOVERY_MINS: i64 = 15;
+/// Rate limits and quota errors do not clear in 15 minutes, and probing them
+/// anyway just burns more of the same quota.
+const RATE_LIMIT_MINS: i64 = 60;
 
 #[derive(Debug, Default)]
 pub struct SourceHealth {
@@ -20,6 +23,8 @@ pub struct SourceHealth {
     /// Rolling average % deviation from consensus price.
     pub avg_deviation_pct: f64,
     pub is_healthy: bool,
+    /// Cooldown override for the current failure streak (0 = default).
+    cooldown_mins: i64,
 }
 
 impl SourceHealth {
@@ -40,6 +45,7 @@ impl SourceHealth {
         // EMA with α=0.3
         self.avg_deviation_pct = 0.7 * self.avg_deviation_pct + 0.3 * deviation_pct;
         self.is_healthy = true;
+        self.cooldown_mins = 0;
         if was_unhealthy {
             warn!(
                 "Source {} recovered after {} consecutive failures",
@@ -58,6 +64,14 @@ impl SourceHealth {
 
     pub fn record_err(&mut self, reason: &str) {
         let was_healthy = self.is_healthy;
+        let lower = reason.to_lowercase();
+        if lower.contains("rate limit")
+            || lower.contains("429")
+            || lower.contains("quota")
+            || lower.contains("too many requests")
+        {
+            self.cooldown_mins = RATE_LIMIT_MINS;
+        }
         self.consecutive_failures += 1;
         self.total_err.fetch_add(1, Ordering::Relaxed);
         self.last_err = Some(Utc::now());
@@ -79,9 +93,14 @@ impl SourceHealth {
         if self.is_healthy {
             return true;
         }
+        let mins = if self.cooldown_mins > 0 {
+            self.cooldown_mins
+        } else {
+            RECOVERY_MINS
+        };
         match self.last_err {
             None => true,
-            Some(t) => (Utc::now() - t).num_minutes() >= RECOVERY_MINS,
+            Some(t) => (Utc::now() - t).num_minutes() >= mins,
         }
     }
 
@@ -164,5 +183,33 @@ impl HealthTracker {
             }
         }
         deltas
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rate_limit_failures_cooldown_longer_than_plain_ones() {
+        let mut s = SourceHealth::new("probe");
+        s.record_err("network timeout");
+        assert_eq!(s.cooldown_mins, 0, "plain failures keep the 15m window");
+
+        let mut r = SourceHealth::new("probe");
+        r.record_err("HTTP 429: you are over your rate limit");
+        assert_eq!(r.cooldown_mins, RATE_LIMIT_MINS);
+        // 20 minutes later the plain source may be re-probed, the rate-limited
+        // one must not be.
+        s.last_err = Some(Utc::now() - chrono::Duration::minutes(20));
+        s.is_healthy = false;
+        r.last_err = Some(Utc::now() - chrono::Duration::minutes(20));
+        r.is_healthy = false;
+        assert!(s.should_probe());
+        assert!(!r.should_probe());
+
+        // A success clears the override.
+        r.record_ok(0.0);
+        assert_eq!(r.cooldown_mins, 0);
     }
 }

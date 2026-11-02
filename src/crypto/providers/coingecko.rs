@@ -303,6 +303,10 @@ impl CoinGeckoProvider {
 
         #[derive(Deserialize)]
         struct CgChartResp {
+            // A soft-blocked/limited key answers with an error object instead of
+            // `{prices: [...]}`, which used to fail the whole decode and mark
+            // CoinGecko UNHEALTHY. An empty series is the honest outcome.
+            #[serde(default)]
             prices: Vec<Vec<f64>>,
         }
 
