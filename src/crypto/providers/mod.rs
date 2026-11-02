@@ -1,5 +1,7 @@
 pub mod alternative_me;
 pub mod binance;
+pub mod bitfinex;
+pub mod bitstamp;
 pub mod bybit;
 pub mod cmc;
 pub mod coinbase;
@@ -11,7 +13,9 @@ pub mod cryptocompare;
 pub mod defillama;
 pub mod dexscreener;
 pub mod geckoterminal;
+pub mod kraken;
 pub mod mempool;
+pub mod okx;
 pub mod onchain;
 pub mod rss;
 pub mod yfinance;

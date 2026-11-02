@@ -12,6 +12,8 @@ use super::{
     providers::{
         alternative_me::{AlternativeMeProvider, FearAndGreed},
         binance::BinanceProvider,
+        bitfinex::BitfinexProvider,
+        bitstamp::BitstampProvider,
         bybit::BybitProvider,
         cmc::CmcProvider,
         coinbase::CoinbaseProvider,
@@ -19,6 +21,8 @@ use super::{
         coingecko::CoinGeckoProvider,
         coinpaprika::CoinPaprikaProvider,
         cryptocompare::{CryptoCompareProvider, NewsArticle},
+        kraken::KrakenProvider,
+        okx::OkxProvider,
         rss::RssProvider,
         RawQuote,
     },
@@ -53,7 +57,11 @@ struct CryptoClientInner {
     coinpaprika: CoinPaprikaProvider,
     alternative_me: AlternativeMeProvider,
     binance: BinanceProvider,
+    bitfinex: BitfinexProvider,
+    bitstamp: BitstampProvider,
     bybit: BybitProvider,
+    okx: OkxProvider,
+    kraken: KrakenProvider,
     coinbase: CoinbaseProvider,
     cryptocompare: CryptoCompareProvider,
     defillama: DefiLlamaProvider,
@@ -105,6 +113,10 @@ impl CryptoClient {
             BinanceProvider::NAME,
             BybitProvider::NAME,
             CoinbaseProvider::NAME,
+            OkxProvider::NAME,
+            KrakenProvider::NAME,
+            BitfinexProvider::NAME,
+            BitstampProvider::NAME,
             crate::crypto::providers::cryptocompare::NAME,
             DefiLlamaProvider::NAME,
             DexScreenerProvider::NAME,
@@ -127,7 +139,11 @@ impl CryptoClient {
             coinpaprika: CoinPaprikaProvider::new(),
             alternative_me: AlternativeMeProvider::new(),
             binance: BinanceProvider::new(),
+            bitfinex: BitfinexProvider::new(),
+            bitstamp: BitstampProvider::new(),
             bybit: BybitProvider::new(),
+            okx: OkxProvider::new(),
+            kraken: KrakenProvider::new(),
             coinbase: CoinbaseProvider::new(),
             cryptocompare: CryptoCompareProvider::new(cryptocompare_key),
             defillama: DefiLlamaProvider::new(),
@@ -825,7 +841,24 @@ impl CryptoClientInner {
     }
 
     async fn fetch_consensus(&self, symbols: &[&str]) -> (Vec<CmcQuote>, Vec<(String, f64)>) {
-        let (r_cmc, r_cg, r_cc, r_cp, r_alt, r_ccp, r_bi, r_by, r_cb, r_dl, r_ds, r_gt) = tokio::join!(
+        let (
+            r_cmc,
+            r_cg,
+            r_cc,
+            r_cp,
+            r_alt,
+            r_ccp,
+            r_bi,
+            r_by,
+            r_cb,
+            r_dl,
+            r_ds,
+            r_gt,
+            r_okx,
+            r_kr,
+            r_bfx,
+            r_bstp,
+        ) = tokio::join!(
             self.fetch_from_cmc(symbols),
             self.fetch_from_cg(symbols),
             self.fetch_from_cc(symbols),
@@ -838,12 +871,17 @@ impl CryptoClientInner {
             self.fetch_from_dl(symbols),
             self.fetch_from_ds(symbols),
             self.fetch_from_gt(symbols),
+            self.fetch_from_okx(symbols),
+            self.fetch_from_kraken(symbols),
+            self.fetch_from_bfx(symbols),
+            self.fetch_from_bstp(symbols),
         );
 
         let mut by_sym: std::collections::HashMap<String, Vec<RawQuote>> =
             std::collections::HashMap::new();
         for batch in [
-            r_cmc, r_cg, r_cc, r_cp, r_alt, r_ccp, r_bi, r_by, r_cb, r_dl, r_ds, r_gt,
+            r_cmc, r_cg, r_cc, r_cp, r_alt, r_ccp, r_bi, r_by, r_cb, r_dl, r_ds, r_gt, r_okx, r_kr,
+            r_bfx, r_bstp,
         ]
         .into_iter()
         .flatten()
@@ -1260,6 +1298,81 @@ impl CryptoClientInner {
             }
             Err(_) => {
                 self.health.record_err(CoinbaseProvider::NAME, "timeout");
+                None
+            }
+        }
+    }
+
+    async fn fetch_from_okx(&self, symbols: &[&str]) -> Option<Vec<RawQuote>> {
+        if !self.health.should_probe(OkxProvider::NAME) {
+            return None;
+        }
+        match timeout(PROVIDER_TIMEOUT, self.okx.get_quotes(symbols)).await {
+            Ok(Ok(q)) => Some(q),
+            Ok(Err(e)) => {
+                let err: BotError = e;
+                self.health.record_err(OkxProvider::NAME, &err.to_string());
+                None
+            }
+            Err(_) => {
+                self.health.record_err(OkxProvider::NAME, "timeout");
+                None
+            }
+        }
+    }
+
+    async fn fetch_from_kraken(&self, symbols: &[&str]) -> Option<Vec<RawQuote>> {
+        if !self.health.should_probe(KrakenProvider::NAME) {
+            return None;
+        }
+        match timeout(PROVIDER_TIMEOUT, self.kraken.get_quotes(symbols)).await {
+            Ok(Ok(q)) => Some(q),
+            Ok(Err(e)) => {
+                let err: BotError = e;
+                self.health
+                    .record_err(KrakenProvider::NAME, &err.to_string());
+                None
+            }
+            Err(_) => {
+                self.health.record_err(KrakenProvider::NAME, "timeout");
+                None
+            }
+        }
+    }
+
+    async fn fetch_from_bfx(&self, symbols: &[&str]) -> Option<Vec<RawQuote>> {
+        if !self.health.should_probe(BitfinexProvider::NAME) {
+            return None;
+        }
+        match timeout(PROVIDER_TIMEOUT, self.bitfinex.get_quotes(symbols)).await {
+            Ok(Ok(q)) => Some(q),
+            Ok(Err(e)) => {
+                let err: BotError = e;
+                self.health
+                    .record_err(BitfinexProvider::NAME, &err.to_string());
+                None
+            }
+            Err(_) => {
+                self.health.record_err(BitfinexProvider::NAME, "timeout");
+                None
+            }
+        }
+    }
+
+    async fn fetch_from_bstp(&self, symbols: &[&str]) -> Option<Vec<RawQuote>> {
+        if !self.health.should_probe(BitstampProvider::NAME) {
+            return None;
+        }
+        match timeout(PROVIDER_TIMEOUT, self.bitstamp.get_quotes(symbols)).await {
+            Ok(Ok(q)) => Some(q),
+            Ok(Err(e)) => {
+                let err: BotError = e;
+                self.health
+                    .record_err(BitstampProvider::NAME, &err.to_string());
+                None
+            }
+            Err(_) => {
+                self.health.record_err(BitstampProvider::NAME, "timeout");
                 None
             }
         }
