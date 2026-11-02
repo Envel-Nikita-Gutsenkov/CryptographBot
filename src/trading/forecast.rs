@@ -115,13 +115,134 @@ pub struct HorizonForecast {
 #[derive(Debug, Clone)]
 pub struct HorizonAccuracy {
     pub days: i64,
-    /// Direction hit rate, percent (50% = coin flip).
-    pub direction_pct: f64,
+    /// Origins where the predicted direction was right. Kept as a count (not
+    /// only a percentage) so a binomial interval can be computed.
+    pub hits: usize,
     /// Mean absolute error of the point target, percent.
     pub mape_pct: f64,
     /// Share of outcomes inside the 68% cone (ideal ≈ 68%), percent.
     pub coverage_pct: f64,
     pub samples: usize,
+}
+
+/// Two-sided z for the 95% interval reported to the user.
+const EDGE_Z: f64 = 1.96;
+
+/// What a direction hit rate can honestly claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeVerdict {
+    /// The 95% interval straddles 50%: indistinguishable from a coin flip.
+    NoEdge,
+    /// The whole interval is above 50%: a real (if small) directional edge.
+    AboveChance,
+    /// The whole interval is below 50%: the drift reliably points the wrong
+    /// way, so the honest read is the opposite of the model's arrow.
+    BelowChance,
+}
+
+impl EdgeVerdict {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NoEdge => "no edge",
+            Self::AboveChance => "above 50%",
+            Self::BelowChance => "below 50%",
+        }
+    }
+}
+
+/// Direction hit rate with the uncertainty that belongs to it.
+#[derive(Debug, Clone, Copy)]
+pub struct DirectionEdge {
+    /// Observed hit rate, percent.
+    pub pct: f64,
+    /// 95% Wilson score interval, percent.
+    pub ci_low: f64,
+    pub ci_high: f64,
+    /// Origins that are effectively independent for this horizon — *not* the
+    /// raw sample count. Walk-forward windows overlap; see [`effective_origins`].
+    pub effective_n: f64,
+    pub verdict: EdgeVerdict,
+}
+
+impl DirectionEdge {
+    /// Interval as `27–57%`.
+    pub fn ci(&self) -> String {
+        format!("{:.0}–{:.0}%", self.ci_low, self.ci_high)
+    }
+}
+
+/// Wilson score interval for a binomial proportion, returned in percent.
+/// Preferred over the normal approximation because it stays inside 0–100 and
+/// is not garbage at the small effective counts long horizons leave us with.
+fn wilson_ci(p: f64, n: f64, z: f64) -> (f64, f64) {
+    if !p.is_finite() || !n.is_finite() || n < 1.0 {
+        return (0.0, 100.0);
+    }
+    let p = p.clamp(0.0, 1.0);
+    let n = n.max(1.0);
+    let z2 = z * z;
+    let denom = 1.0 + z2 / n;
+    let centre = (p + z2 / (2.0 * n)) / denom;
+    let half = z * (p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt() / denom;
+    (
+        ((centre - half) * 100.0).clamp(0.0, 100.0),
+        ((centre + half) * 100.0).clamp(0.0, 100.0),
+    )
+}
+
+/// Number of origins that behave as independent samples for a horizon of
+/// `days`.
+///
+/// Calibration walks forward in `CALIBRATION_STEP_DAYS` steps, so a 30-day
+/// horizon scored on 133 origins really only contains ~13 non-overlapping
+/// 30-day windows; a 180-day horizon has ~2. Using the raw count would shrink
+/// the interval by √10 and turn a coin flip into a fake edge. This denominator
+/// is what makes the reported CI honest rather than flattering.
+pub fn effective_origins(samples: usize, days: i64) -> f64 {
+    if samples == 0 {
+        return 0.0;
+    }
+    let span = samples as f64 * CALIBRATION_STEP_DAYS as f64;
+    (span / days.max(1) as f64).min(samples as f64).max(2.0)
+}
+
+/// Build the edge report from a hit count and an explicit effective count.
+fn edge_from_counts(hits: usize, samples: usize, effective_n: f64) -> DirectionEdge {
+    if samples == 0 {
+        return DirectionEdge {
+            pct: f64::NAN,
+            ci_low: f64::NAN,
+            ci_high: f64::NAN,
+            effective_n,
+            verdict: EdgeVerdict::NoEdge,
+        };
+    }
+    let pct = hits as f64 / samples as f64 * 100.0;
+    let (ci_low, ci_high) = wilson_ci(pct / 100.0, effective_n, EDGE_Z);
+    let verdict = if ci_low > 50.0 {
+        EdgeVerdict::AboveChance
+    } else if ci_high < 50.0 {
+        EdgeVerdict::BelowChance
+    } else {
+        EdgeVerdict::NoEdge
+    };
+    DirectionEdge {
+        pct,
+        ci_low,
+        ci_high,
+        effective_n,
+        verdict,
+    }
+}
+
+impl HorizonAccuracy {
+    pub fn edge(&self) -> DirectionEdge {
+        edge_from_counts(
+            self.hits,
+            self.samples,
+            effective_origins(self.samples, self.days),
+        )
+    }
 }
 
 /// Walk-forward-fitted knobs for one symbol.
@@ -153,13 +274,12 @@ impl Default for Calibration {
 }
 
 impl Calibration {
-    /// MAPE for the horizon closest to `days`, if calibrated.
-    pub fn mape_for(&self, days: i64) -> Option<f64> {
+    /// Accuracy row for the horizon closest to `days`.
+    pub fn accuracy_for(&self, days: i64) -> Option<&HorizonAccuracy> {
         self.accuracy
             .iter()
+            .filter(|a| a.samples > 0)
             .min_by_key(|a| (a.days - days).abs())
-            .map(|a| a.mape_pct)
-            .filter(|m| m.is_finite())
     }
 
     pub fn is_default(&self) -> bool {
@@ -685,7 +805,7 @@ fn measure_accuracy(
             let s = samples.max(1) as f64;
             HorizonAccuracy {
                 days,
-                direction_pct: hits as f64 / s * 100.0,
+                hits,
                 mape_pct: err_sum / s * 100.0,
                 coverage_pct: inside as f64 / s * 100.0,
                 samples,
@@ -807,8 +927,22 @@ pub struct BacktestHorizon {
     pub bias_pct: f64,
     /// Share of origins where the predicted direction was right.
     pub hit_pct: f64,
+    /// Origins where the direction was right (for the binomial interval).
+    pub hits: usize,
     /// Share of actual closes inside the 68% cone (ideal ≈ 68%).
     pub coverage_pct: f64,
+}
+
+impl BacktestHorizon {
+    /// 95% Wilson interval on the direction hit rate, using an effective count
+    /// that accounts for overlapping walk-forward windows.
+    pub fn edge(&self) -> DirectionEdge {
+        edge_from_counts(
+            self.hits,
+            self.samples,
+            effective_origins(self.samples, self.days),
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -911,6 +1045,7 @@ pub fn backtest(
                     mape_pct: abs_sum / s,
                     bias_pct: signed_sum / s,
                     hit_pct: hits as f64 / s * 100.0,
+                    hits,
                     coverage_pct: inside as f64 / s * 100.0,
                 }
             })
@@ -964,19 +1099,23 @@ pub fn backtest_report(symbol: &str, history: &[(i64, f64)]) -> String {
         ("30d window (post-release)", &short_legacy, &short_new),
     ] {
         out.push_str(&format!("{title} — {} origins\n", new.origins));
-        out.push_str("   H    MAPE old→new    hit old→new   cone old→new   bias new\n");
+        out.push_str(
+            "   H    MAPE old→new    hit old→new   95% CI       cone old→new   bias new\n",
+        );
         for (o, nw) in old.horizons.iter().zip(new.horizons.iter()) {
             // A 30-day window cannot score a 30-day horizon; skip empty rows.
             if nw.samples == 0 {
                 continue;
             }
+            let e = nw.edge();
             out.push_str(&format!(
-                "  {:>3}d   {:>5.1}% → {:>5.1}%   {:>4.0}% → {:>4.0}%   {:>4.0}% → {:>4.0}%   {:+.1}%\n",
+                "  {:>3}d   {:>5.1}% → {:>5.1}%   {:>4.0}% → {:>4.0}%   {:>9}  {:>4.0}% → {:>4.0}%   {:+.1}%\n",
                 nw.days,
                 o.mape_pct,
                 nw.mape_pct,
                 o.hit_pct,
                 nw.hit_pct,
+                e.ci(),
                 o.coverage_pct,
                 nw.coverage_pct,
                 nw.bias_pct
@@ -1000,7 +1139,10 @@ pub fn backtest_report(symbol: &str, history: &[(i64, f64)]) -> String {
     out.push_str(
         "MAPE = mean absolute error of the target · hit = direction accuracy ·\n\
          cone = share of outcomes inside the 68% cone (ideal ≈ 68%) · bias > 0 = over-forecast.\n\
-         Cone uses a Student-t quantile (ν=4) instead of the Gaussian 1σ.",
+         Cone uses a Student-t quantile (ν=4) instead of the Gaussian 1σ.\n\
+         CI = 95% Wilson interval on the hit rate, computed on non-overlapping\n\
+         windows (origins×step/h), because adjacent walk-forward windows share\n\
+         days. A CI that covers 50% means the horizon has no directional edge.\n",
     );
     out
 }
@@ -1057,6 +1199,46 @@ fn verdict(change_pct: f64) -> (&'static str, &'static str) {
         }
     } else {
         ("neutral / no edge", "➡️")
+    }
+}
+
+/// One accuracy bucket (day / week / month / ...), aggregated over the
+/// horizons that fall into it. Kept as a struct instead of a formatted string
+/// because the direction rate now carries a confidence interval.
+#[derive(Debug, Clone)]
+struct AccuracyBucket {
+    label: &'static str,
+    hits: usize,
+    samples: usize,
+    effective_n: f64,
+    mape_pct: f64,
+    coverage_pct: f64,
+}
+
+impl AccuracyBucket {
+    fn direction_pct(&self) -> f64 {
+        if self.samples == 0 {
+            return f64::NAN;
+        }
+        self.hits as f64 / self.samples as f64 * 100.0
+    }
+
+    fn edge(&self) -> DirectionEdge {
+        edge_from_counts(self.hits, self.samples, self.effective_n)
+    }
+
+    /// `month    dir 41% · CI 27–57% · no edge · err ±9.3% · in-range 67%`
+    fn line(&self) -> String {
+        let e = self.edge();
+        format!(
+            "{:<9} dir {:>3.0}% · CI {} · {} · err ±{:.1}% · in-range {:.0}%",
+            self.label,
+            self.direction_pct(),
+            e.ci(),
+            e.verdict.label(),
+            self.mape_pct,
+            self.coverage_pct,
+        )
     }
 }
 
@@ -1129,10 +1311,10 @@ impl Forecast {
             .or_else(|| self.horizons.last())
     }
 
-    /// Accuracy lines bucketed into day / week / month / quarter / half-year,
+    /// Accuracy rows bucketed into day / week / month / quarter / half-year,
     /// so the user can see how often the model is right at each scale.
     /// Recomputed from the latest history on every forecast.
-    fn accuracy_bucket_lines(&self) -> Vec<String> {
+    fn accuracy_buckets(&self) -> Vec<AccuracyBucket> {
         // (label, inclusive min, inclusive max)
         const BUCKETS: [(&str, i64, i64); 5] = [
             ("day", 1, 4),
@@ -1141,7 +1323,7 @@ impl Forecast {
             ("quarter", 46, 120),
             ("half-year", 121, i64::MAX),
         ];
-        let mut lines = Vec::new();
+        let mut buckets = Vec::new();
         for (label, lo, hi) in BUCKETS {
             let rows: Vec<&HorizonAccuracy> = self
                 .calibration
@@ -1152,15 +1334,19 @@ impl Forecast {
             if rows.is_empty() {
                 continue;
             }
-            // Weight by sample count so a long horizon with fewer origins does
-            // not dominate the bucket.
+            // Weight error/coverage by sample count so a long horizon with fewer
+            // origins does not dominate the bucket. Direction is aggregated from
+            // raw hits, which is what the binomial interval needs.
             let total: usize = rows.iter().map(|a| a.samples).sum();
             let w = total.max(1) as f64;
-            let dir = rows
+            let hits: usize = rows.iter().map(|a| a.hits).sum();
+            // Sum of per-horizon effective counts: the horizons inside a bucket
+            // overlap each other too, so this is mildly optimistic — but far
+            // more honest than `total`.
+            let effective_n = rows
                 .iter()
-                .map(|a| a.direction_pct * a.samples as f64)
-                .sum::<f64>()
-                / w;
+                .map(|a| effective_origins(a.samples, a.days))
+                .sum::<f64>();
             let mape = rows
                 .iter()
                 .map(|a| a.mape_pct * a.samples as f64)
@@ -1171,12 +1357,44 @@ impl Forecast {
                 .map(|a| a.coverage_pct * a.samples as f64)
                 .sum::<f64>()
                 / w;
-            lines.push(format!(
-                "{:<9} direction {:>3.0}% · avg error ±{:.1}% · in-range {:.0}%",
-                label, dir, mape, cover
-            ));
+            buckets.push(AccuracyBucket {
+                label,
+                hits,
+                samples: total,
+                effective_n,
+                mape_pct: mape,
+                coverage_pct: cover,
+            });
         }
-        lines
+        buckets
+    }
+
+    fn accuracy_bucket_lines(&self) -> Vec<String> {
+        self.accuracy_buckets().iter().map(|b| b.line()).collect()
+    }
+
+    /// One honest sentence about whether *any* horizon beats a coin flip.
+    /// Several horizons are tested at once, so a single cell just clear of 50%
+    /// is called suggestive, not proven.
+    fn edge_summary(&self) -> Option<String> {
+        let buckets = self.accuracy_buckets();
+        if buckets.is_empty() {
+            return None;
+        }
+        let tested = buckets.len();
+        match buckets.iter().find(|b| b.edge().verdict != EdgeVerdict::NoEdge) {
+            None => Some(
+                "direction: coin flip at every horizon (no 95% interval excludes 50%) — use the cone, not the arrow"
+                    .to_string(),
+            ),
+            Some(b) => Some(format!(
+                "direction: only {} is {} ({}) of {} horizons tested — suggestive, not proven",
+                b.label,
+                b.edge().verdict.label(),
+                b.edge().ci(),
+                tested,
+            )),
+        }
     }
 
     /// Plain-text table, aligned for a monospace font. Used by the CLI and the
@@ -1237,6 +1455,9 @@ impl Forecast {
                     out.push_str("  ");
                     out.push_str(&line);
                     out.push('\n');
+                }
+                if let Some(s) = self.edge_summary() {
+                    out.push_str(&format!("  {s}\n"));
                 }
             }
         }
@@ -1323,6 +1544,9 @@ impl Forecast {
                     self.calibration.samples,
                     esc(&lines.join("\n")),
                 ));
+                if let Some(s) = self.edge_summary() {
+                    out.push_str(&format!("<i>{}</i>\n", esc(&s)));
+                }
             }
         }
         for n in &self.notes {
@@ -1477,17 +1701,29 @@ impl Forecast {
         };
         out.push(action);
 
-        if let Some(m) = self
+        if let Some(acc) = self
             .calibration
-            .mape_for(self.reference_horizon().map(|h| h.days).unwrap_or(30))
+            .accuracy_for(self.reference_horizon().map(|h| h.days).unwrap_or(30))
         {
+            let e = acc.edge();
             out.push(if russian {
                 format!(
-                    "Точность модели на этом горизонте: ошибка ±{:.1}% (walk-forward)",
-                    m
+                    "Направление: попадание {:.0}% · 95% CI {} · {} · ошибка ±{:.1}% (walk-forward, n≈{:.0})",
+                    e.pct,
+                    e.ci(),
+                    e.verdict.label(),
+                    acc.mape_pct,
+                    e.effective_n
                 )
             } else {
-                format!("Model error at this horizon: ±{:.1}% (walk-forward)", m)
+                format!(
+                    "Direction: hit {:.0}% · 95% CI {} · {} · error ±{:.1}% (walk-forward, n≈{:.0})",
+                    e.pct,
+                    e.ci(),
+                    e.verdict.label(),
+                    acc.mape_pct,
+                    e.effective_n
+                )
             });
         }
         out
@@ -1566,6 +1802,9 @@ impl Forecast {
                 ));
                 for line in lines {
                     out.push_str(&format!("- `{line}`\n"));
+                }
+                if let Some(s) = self.edge_summary() {
+                    out.push_str(&format!("- {s}\n"));
                 }
             }
         }
@@ -1893,5 +2132,93 @@ mod tests {
         assert_eq!(merged[1].1, 106.0); // last intraday close of that day
         assert_eq!(merged[2].1, 102.0);
         assert_eq!(merged[3].1, 110.0);
+    }
+
+    #[test]
+    fn wilson_interval_is_calibrated() {
+        // 50/100 is the textbook sanity point: 40.4–59.6%, straddling 50.
+        let (lo, hi) = wilson_ci(0.5, 100.0, 1.96);
+        assert!((lo - 40.4).abs() < 0.2, "lo={lo}");
+        assert!((hi - 59.6).abs() < 0.2, "hi={hi}");
+        assert!(lo < 50.0 && hi > 50.0);
+        // Degenerate inputs must not escape 0..100 or produce NaN.
+        let (lo, hi) = wilson_ci(0.0, 2.0, 1.96);
+        assert!((0.0..=100.0).contains(&lo) && (0.0..=100.0).contains(&hi));
+        let (lo, hi) = wilson_ci(0.5, f64::NAN, 1.96);
+        assert_eq!((lo, hi), (0.0, 100.0));
+    }
+
+    #[test]
+    fn effective_origins_discounts_overlap() {
+        // Adjacent origins at a 3-day step do not overlap on a 1-day outcome.
+        assert!((effective_origins(133, 1) - 133.0).abs() < 1e-9);
+        // A 30-day horizon on the same origins holds only ~13 disjoint windows.
+        assert!((effective_origins(133, 30) - 13.3).abs() < 1e-6);
+        // Never below 2, otherwise an interval would be meaningless.
+        assert_eq!(effective_origins(73, 180), 2.0);
+        assert_eq!(effective_origins(0, 30), 0.0);
+    }
+
+    #[test]
+    fn coin_flip_is_never_flagged_as_an_edge() {
+        assert_eq!(
+            edge_from_counts(50, 100, 100.0).verdict,
+            EdgeVerdict::NoEdge
+        );
+        // The real prod case: 41% over 133 overlapping 90-day origins. Even the
+        // raw count would need ~±8.5pp, and the effective count is far smaller.
+        let e = edge_from_counts(55, 133, effective_origins(133, 90));
+        assert_eq!(e.verdict, EdgeVerdict::NoEdge);
+    }
+
+    #[test]
+    fn clear_bias_is_flagged_but_tiny_n_is_not() {
+        let up = edge_from_counts(70, 100, 100.0);
+        assert_eq!(up.verdict, EdgeVerdict::AboveChance);
+        assert!(up.ci_low > 50.0);
+        let down = edge_from_counts(30, 100, 100.0);
+        assert_eq!(down.verdict, EdgeVerdict::BelowChance);
+        assert!(down.ci_high < 50.0);
+        // 70% on 200 hits but only 2 independent windows: not evidence.
+        assert_eq!(edge_from_counts(140, 200, 2.0).verdict, EdgeVerdict::NoEdge);
+    }
+
+    #[test]
+    fn accuracy_block_reports_ci_and_verdict() {
+        let h = series(&rising(700));
+        let f = forecast("BTC", h.last().unwrap().1, &h);
+        let lines = f.accuracy_bucket_lines();
+        assert!(!lines.is_empty());
+        for line in &lines {
+            assert!(line.contains("CI "), "missing CI: {line}");
+            assert!(
+                line.contains("no edge")
+                    || line.contains("above 50%")
+                    || line.contains("below 50%"),
+                "missing verdict: {line}"
+            );
+        }
+        let summary = f.edge_summary().expect("edge summary");
+        assert!(summary.starts_with("direction:"), "{summary}");
+    }
+
+    #[test]
+    fn backtest_horizons_carry_their_interval() {
+        let h = series(&rising(700));
+        let bt = backtest("BTC", &h, 365, &Calibration::default());
+        for hz in &bt.horizons {
+            if hz.samples == 0 {
+                continue;
+            }
+            let e = hz.edge();
+            // Wilson always contains the point estimate; allow for f64 epsilon.
+            assert!(
+                e.ci_low <= e.pct + 1e-6 && e.pct <= e.ci_high + 1e-6,
+                "{:?}",
+                e
+            );
+            assert!((0.0..=100.0).contains(&e.ci_low));
+            assert!((0.0..=100.0).contains(&e.ci_high));
+        }
     }
 }
