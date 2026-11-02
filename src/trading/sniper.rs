@@ -18,6 +18,7 @@
 //!
 //! No network, no clock, no randomness — so the whole thing is unit-tested.
 
+use crate::models::onchain::{DerivativesRead, DerivativesSignal, OnChainMetrics};
 use crate::trading::{
     dipzones::touch_probability,
     forecast::{cone_sigma_h, student_t_quantile, t68_mult, Forecast, STUDENT_DF},
@@ -100,6 +101,8 @@ pub struct Capitulation {
     pub rsi_hit: bool,
     pub volume_spike: bool,
     pub long_wick: bool,
+    /// Open interest is being flushed on a drop (longs capitulated).
+    pub oi_flush: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +145,8 @@ pub struct DipSniperReport {
     /// already in strong profit, so a shallow fill would dilute it).
     pub guard_active: bool,
     pub capitulation: Capitulation,
+    /// Futures tape (funding / OI trend / long-short). `None` when unavailable.
+    pub derivatives: Option<DerivativesSignal>,
     pub buckets: Vec<SniperBucket>,
     pub history_days: usize,
 }
@@ -222,6 +227,7 @@ fn capitulation_score(
     rsi14: Option<f64>,
     candle: Option<Candle>,
     volumes: Option<&[f64]>,
+    derivatives: Option<&DerivativesSignal>,
 ) -> Capitulation {
     let mut score: u32 = 0;
     let mut max_score: u32 = 0;
@@ -250,6 +256,18 @@ fn capitulation_score(
             max_score += 20;
             if hit {
                 score += 20;
+            }
+            hit
+        }
+        None => false,
+    };
+
+    let oi_flush = match derivatives {
+        Some(d) => {
+            max_score += 15;
+            let hit = d.read == DerivativesRead::LongsFlushed;
+            if hit {
+                score += 15;
             }
             hit
         }
@@ -289,6 +307,7 @@ fn capitulation_score(
         rsi_hit,
         volume_spike,
         long_wick,
+        oi_flush,
     }
 }
 
@@ -306,12 +325,47 @@ pub fn sniper_report(
     cash: f64,
     protect_avg_entry: bool,
 ) -> DipSniperReport {
+    sniper_report_with_derivatives(
+        forecast,
+        history,
+        candle,
+        volumes,
+        avg_entry,
+        position_size,
+        cash,
+        protect_avg_entry,
+        None,
+    )
+}
+
+/// Same as [`sniper_report`], additionally folding the futures tape into the
+/// capitulation score and the rendered verdict.
+#[allow(clippy::too_many_arguments)]
+pub fn sniper_report_with_derivatives(
+    forecast: &Forecast,
+    history: &[(i64, f64)],
+    candle: Option<Candle>,
+    volumes: Option<&[f64]>,
+    avg_entry: Option<f64>,
+    position_size: f64,
+    cash: f64,
+    protect_avg_entry: bool,
+    onchain: Option<&OnChainMetrics>,
+) -> DipSniperReport {
     let price = forecast.price;
     let closes: Vec<f64> = history.iter().map(|&(_, c)| c).collect();
     let sigma = (forecast.vol_daily_pct / 100.0).max(0.003);
     let mu = forecast.drift_daily_pct / 100.0;
     let anchor = rolling_high(&closes, 14).unwrap_or(price);
     let z14 = drawdown_z(price, anchor, sigma, 14.0);
+
+    // 24h price move for the derivatives read (closes are daily, so compare the
+    // two most recent values; the date gap is irrelevant for the sign/magnitude).
+    let price_change_24h = match closes.as_slice() {
+        [.., prev, last] if *prev > 0.0 => (last / prev - 1.0) * 100.0,
+        _ => 0.0,
+    };
+    let derivatives = onchain.and_then(|m| DerivativesSignal::from_metrics(m, price_change_24h));
 
     let avg = avg_entry.filter(|a| a.is_finite() && *a > 0.0);
     let in_profit = avg
@@ -369,7 +423,8 @@ pub fn sniper_report(
         });
     }
 
-    let capitulation = capitulation_score(z14, forecast.rsi14, candle, volumes);
+    let capitulation =
+        capitulation_score(z14, forecast.rsi14, candle, volumes, derivatives.as_ref());
 
     DipSniperReport {
         symbol: forecast.symbol.clone(),
@@ -386,6 +441,7 @@ pub fn sniper_report(
         protect_avg_entry,
         guard_active,
         capitulation,
+        derivatives,
         buckets,
         history_days: history.len(),
     }
@@ -481,6 +537,24 @@ impl DipSniperReport {
             } else {
                 "Model capitulation: this is a statistical anomaly — buy at market in tranches."
                     .into()
+            };
+        }
+        if self
+            .derivatives
+            .map(|d| d.read == DerivativesRead::ShortsPiling)
+            .unwrap_or(false)
+        {
+            let b1 = &self.buckets[0];
+            return if russian {
+                format!(
+                    "Падение идёт на новых шортах — это ещё не дно. Не лови нож, держи лимитку {}.",
+                    fmt_money(b1.limit_price, dec)
+                )
+            } else {
+                format!(
+                    "The drop is driven by fresh shorts — not the bottom yet. Don't catch the knife, keep the bid at {}.",
+                    fmt_money(b1.limit_price, dec)
+                )
             };
         }
         match self.avg_entry {
@@ -639,6 +713,9 @@ impl DipSniperReport {
         if cap.long_wick {
             hits.push("long lower wick");
         }
+        if cap.oi_flush {
+            hits.push("OI flush");
+        }
         if !hits.is_empty() {
             text.push_str(&format!(
                 "\n{} <i>{}</i>",
@@ -666,6 +743,36 @@ impl DipSniperReport {
                     "Avg-entry guard is on: the only safe adds are below your average, not above it."
                 })
             ));
+        }
+        if let Some(d) = &self.derivatives {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(f) = d.funding_avg_pct {
+                parts.push(format!("funding {:+.3}%/8h", f * 100.0));
+            }
+            if let Some(oi) = d.oi_change_24h_pct {
+                parts.push(format!("OI 24h {:+.1}%", oi));
+            }
+            if let Some(oi7) = d.oi_change_7d_pct {
+                parts.push(format!("OI 7d {:+.1}%", oi7));
+            }
+            if let Some(ls) = d.long_short_ratio {
+                parts.push(format!("L/S {ls:.2}"));
+            }
+            if let Some(t) = d.taker_buy_sell {
+                parts.push(format!("taker {t:.2}"));
+            }
+            if !parts.is_empty() {
+                text.push_str(&format!(
+                    "\n{} <i>{}</i> · {}",
+                    if russian {
+                        "Фьючерсы:"
+                    } else {
+                        "Futures:"
+                    },
+                    html_escape::encode_text(&parts.join(" · ")),
+                    html_escape::encode_text(d.read.verdict(russian))
+                ));
+            }
         }
         if cap.volume_spike {
             text.push_str(&format!(
@@ -709,8 +816,8 @@ impl DipSniperReport {
     pub fn plain(&self, russian: bool) -> String {
         let dec = price_decimals(self.price);
         let cap = &self.capitulation;
-        format!(
-            "DIP SNIPER {} {}\nZ14 {:+.2}sigma  cap {}/{} {}\ncash ${:.0}  avg {}\n{}\n{}",
+        let mut text = format!(
+            "DIP SNIPER {} {}\nZ14 {:+.2}sigma  cap {}/{} {}\ncash ${:.0}  avg {}\n{}",
             self.symbol,
             fmt_money(self.price, dec),
             self.z14,
@@ -722,8 +829,31 @@ impl DipSniperReport {
                 .map(|v| fmt_money(v, dec))
                 .unwrap_or_else(|| "-".into()),
             self.table_lines().join("\n"),
-            self.verdict(russian)
-        )
+        );
+        if let Some(d) = &self.derivatives {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(f) = d.funding_avg_pct {
+                parts.push(format!("funding {:+.3}%/8h", f * 100.0));
+            }
+            if let Some(oi) = d.oi_change_24h_pct {
+                parts.push(format!("OI24h {:+.1}%", oi));
+            }
+            if let Some(oi7) = d.oi_change_7d_pct {
+                parts.push(format!("OI7d {:+.1}%", oi7));
+            }
+            if let Some(ls) = d.long_short_ratio {
+                parts.push(format!("L/S {ls:.2}"));
+            }
+            if !parts.is_empty() {
+                text.push_str(&format!(
+                    "\nfutures: {} · {}",
+                    parts.join(" · "),
+                    d.read.verdict(russian)
+                ));
+            }
+        }
+        text.push_str(&format!("\n{}", self.verdict(russian)));
+        text
     }
 }
 
@@ -840,6 +970,7 @@ mod tests {
                 close: 95.0,
             }),
             None,
+            None,
         );
         // z 40 + rsi 25 + wick 15 = 80 of max 80 → capitulation.
         assert_eq!(c.score, 80);
@@ -851,7 +982,7 @@ mod tests {
 
     #[test]
     fn calm_market_is_sleep() {
-        let c = capitulation_score(-0.2, Some(55.0), None, None);
+        let c = capitulation_score(-0.2, Some(55.0), None, None, None);
         assert_eq!(c.score, 0);
         assert_eq!(c.band, CapBand::Sleep);
     }
@@ -897,5 +1028,73 @@ mod tests {
         assert_eq!(lines.len(), 4);
         assert!(lines[0].contains("limit"));
         assert!(lines[3].contains("swan"));
+    }
+
+    #[test]
+    fn oi_flush_is_scored_and_rendered() {
+        // A 5% one-day drop plus shrinking open interest = longs flushed.
+        let mut history = series(400, 100.0, 0.02);
+        let last_ts = history.last().unwrap().0 + DAY_MS;
+        let prev = history.last().unwrap().1;
+        history.push((last_ts, prev * 0.95));
+        let f = forecast_for(&history);
+
+        let mut m = OnChainMetrics::empty("TEST");
+        m.oi_change_24h_pct = Some(-9.0);
+        m.funding_rate_avg_8h = Some(0.0001);
+
+        let r = sniper_report_with_derivatives(
+            &f,
+            &history,
+            None,
+            None,
+            Some(80.0),
+            5.0,
+            1000.0,
+            false,
+            Some(&m),
+        );
+        assert!(r.derivatives.is_some());
+        assert!(r.capitulation.oi_flush);
+        let html = r.render_html(true);
+        assert!(html.contains("Фьючерсы"));
+        assert!(html.contains("лонги вымыты"));
+    }
+
+    #[test]
+    fn missing_onchain_keeps_report_intact() {
+        let r = report(1000.0, false);
+        assert!(r.derivatives.is_none());
+        assert!(!r.capitulation.oi_flush);
+        assert!(!r.render_html(true).contains("Фьючерсы"));
+    }
+
+    #[test]
+    fn shorts_piling_warns_against_catching_the_knife() {
+        let mut history = series(400, 100.0, 0.02);
+        let last_ts = history.last().unwrap().0 + DAY_MS;
+        let prev = history.last().unwrap().1;
+        history.push((last_ts, prev * 0.97));
+        let f = forecast_for(&history);
+
+        let mut m = OnChainMetrics::empty("TEST");
+        m.oi_change_24h_pct = Some(7.0);
+
+        let r = sniper_report_with_derivatives(
+            &f,
+            &history,
+            None,
+            None,
+            None,
+            0.0,
+            500.0,
+            false,
+            Some(&m),
+        );
+        assert_eq!(
+            r.derivatives.unwrap().read,
+            crate::models::onchain::DerivativesRead::ShortsPiling
+        );
+        assert!(r.verdict(true).contains("не дно"));
     }
 }

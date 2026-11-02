@@ -21,7 +21,7 @@ use crate::{
     trading::{
         forecast::merge_daily_history,
         history_file,
-        sniper::{aggregate_last_day, sniper_report, DipSniperReport},
+        sniper::{aggregate_last_day, sniper_report_with_derivatives, DipSniperReport},
     },
 };
 
@@ -61,7 +61,12 @@ pub async fn build_sniper_report(
         .ok()
         .and_then(|rows| aggregate_last_day(&rows));
 
-    Ok(sniper_report(
+    // Futures tape: funding, OI trend, long/short. Cached for an hour inside the
+    // client, so hammering /sniper does not hammer Binance futures.
+    let onchain = cmc.get_onchain_metrics(&[sym.as_str()]).await;
+    let onchain = onchain.first();
+
+    Ok(sniper_report_with_derivatives(
         &forecast,
         &series,
         candle,
@@ -70,6 +75,7 @@ pub async fn build_sniper_report(
         position_size,
         cash,
         protect_avg_entry,
+        onchain,
     ))
 }
 
