@@ -537,7 +537,17 @@ impl CryptoClient {
         if self.inner.news_cc_cooldown.get(&()).await.is_none() {
             match self.inner.cryptocompare.get_news(symbol).await {
                 Ok(news) if !news.is_empty() => return Ok(news),
-                Ok(_) => debug!("CryptoCompare news empty for {symbol}; using merged RSS"),
+                Ok(_) => {
+                    // The provider reports a rate limit as an empty success with
+                    // only a `warn!` inside, so an empty result is the signal to
+                    // stop asking: otherwise every symbol in the cycle burned a
+                    // request on the same guaranteed-empty response.
+                    debug!(
+                        "CryptoCompare news empty for {symbol}; parking it for {}s",
+                        NEWS_CC_COOLDOWN.as_secs()
+                    );
+                    self.inner.news_cc_cooldown.insert((), ()).await;
+                }
                 Err(e) => {
                     warn!(
                         "CryptoCompare news failed ({e}); skipping it for {}s",
