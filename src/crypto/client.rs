@@ -864,9 +864,17 @@ impl CryptoClientInner {
             }) = build_consensus(quotes)
             {
                 if !outliers.is_empty() {
-                    warn!(
-                        "Symbol {sym}: outliers from {:?}",
-                        outliers.iter().map(|(s, _, _)| s).collect::<Vec<_>>()
+                    // One line per symbol per cycle, not per outlier, and at debug
+                    // level: a DEX quote disagreeing with CEX consensus is normal,
+                    // not an incident worth a WARN every 10 minutes.
+                    let detail = outliers
+                        .iter()
+                        .map(|(s, p, d)| format!("{s} ${p:.6} ({d:.1}%)"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    debug!(
+                        "Symbol {sym}: {} outlier quote(s): {detail}",
+                        outliers.len()
                     );
                 }
 
@@ -986,12 +994,9 @@ impl CryptoClientInner {
                     self.health.record_ok(src, 0.0);
                 }
                 for (src, _, dev) in &outliers {
-                    if *dev > 20.0 {
-                        self.health
-                            .record_err(src, &format!("price deviation {dev:.1}%"));
-                    } else {
-                        self.health.record_ok(src, *dev);
-                    }
+                    // Deviation is data, not an outage: update the rolling metric
+                    // but never mark the source unhealthy because of it.
+                    self.health.record_deviation(src, *dev);
                 }
                 debug!(
                     "Consensus {sym}: ${:.2} confidence={confidence:.2} sources={:?}",

@@ -32,24 +32,45 @@ impl SourceHealth {
     }
 
     pub fn record_ok(&mut self, deviation_pct: f64) {
+        let was_unhealthy = !self.is_healthy;
+        let prev_failures = self.consecutive_failures;
         self.consecutive_failures = 0;
         self.total_ok.fetch_add(1, Ordering::Relaxed);
         self.last_ok = Some(Utc::now());
         // EMA with α=0.3
         self.avg_deviation_pct = 0.7 * self.avg_deviation_pct + 0.3 * deviation_pct;
         self.is_healthy = true;
+        if was_unhealthy {
+            warn!(
+                "Source {} recovered after {} consecutive failures",
+                self.name, prev_failures
+            );
+        }
+    }
+
+    /// Track how far a source's price sits from consensus without penalising
+    /// its health. A DEX aggregator structurally quotes a different pool than a
+    /// CEX, so a deviation is not an outage — logging it as a failure used to
+    /// ban dexscreener (and spam the journal) twice an hour.
+    pub fn record_deviation(&mut self, deviation_pct: f64) {
+        self.avg_deviation_pct = 0.7 * self.avg_deviation_pct + 0.3 * deviation_pct;
     }
 
     pub fn record_err(&mut self, reason: &str) {
+        let was_healthy = self.is_healthy;
         self.consecutive_failures += 1;
         self.total_err.fetch_add(1, Ordering::Relaxed);
         self.last_err = Some(Utc::now());
         if self.consecutive_failures >= MAX_FAILURES {
-            warn!(
-                "Source {} marked UNHEALTHY after {} failures: {}",
-                self.name, self.consecutive_failures, reason
-            );
             self.is_healthy = false;
+            // Log once per transition, not once per failure: 3-6 providers fail
+            // together on a network blip and each attempt used to print a line.
+            if was_healthy {
+                warn!(
+                    "Source {} marked UNHEALTHY after {} failures: {}",
+                    self.name, self.consecutive_failures, reason
+                );
+            }
         }
     }
 
@@ -102,6 +123,14 @@ impl HealthTracker {
             .entry(source)
             .or_insert_with(|| SourceHealth::new(source))
             .record_err(reason);
+    }
+
+    pub fn record_deviation(&self, source: &'static str, deviation_pct: f64) {
+        self.sources
+            .write()
+            .entry(source)
+            .or_insert_with(|| SourceHealth::new(source))
+            .record_deviation(deviation_pct);
     }
 
     pub fn is_healthy(&self, source: &'static str) -> bool {

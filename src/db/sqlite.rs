@@ -185,8 +185,21 @@ impl SqliteStore {
                         high,
                         low,
                     } => {
+                        // One row per (symbol, UTC day). The price worker samples
+                        // every 10 min, so a plain INSERT used to add 144 rows per
+                        // symbol per day (50k rows = 2 MB) while every consumer
+                        // resampled them back to daily closes anyway. The upsert
+                        // keeps the day's first open and the running extremes and
+                        // collapses the rest into one row.
                         let res = conn.execute(
-                            "INSERT INTO price_history (symbol, price, open, high, low) VALUES (?1, ?2, ?3, ?4, ?5)",
+                            "INSERT INTO price_history (symbol, price, open, high, low, day, timestamp)
+                             VALUES (?1, ?2, ?3, ?4, ?5, date('now'), CURRENT_TIMESTAMP)
+                             ON CONFLICT(symbol, day) DO UPDATE SET
+                                price = excluded.price,
+                                open = COALESCE(price_history.open, excluded.open),
+                                high = MAX(COALESCE(price_history.high, excluded.high), excluded.high),
+                                low = MIN(COALESCE(price_history.low, excluded.low), excluded.low),
+                                timestamp = CURRENT_TIMESTAMP",
                             params![symbol, price, open, high, low],
                         );
                         if let Err(e) = res {
@@ -308,7 +321,11 @@ impl SqliteStore {
                         if let Err(e) = res {
                             warn!("Failed to cleanup old events: {}", e);
                         }
-                        let _ = conn.execute("DELETE FROM price_history WHERE timestamp < datetime('now', '-90 days')", []);
+                        // One row per symbol per day now, so a full year costs
+                        // ~5 rows/symbol instead of 52k rows. The longer window
+                        // lets /forecast, /dip and /sniper build their series
+                        // locally instead of calling provider history APIs.
+                        let _ = conn.execute("DELETE FROM price_history WHERE timestamp < datetime('now', '-400 days')", []);
                         let _ = conn.execute(
                             "DELETE FROM daily_metrics WHERE date < date('now', '-31 days')",
                             [],
@@ -1563,6 +1580,10 @@ fn init_db(conn: &mut Connection) -> rusqlite::Result<()> {
         PRAGMA journal_mode = WAL;
         PRAGMA synchronous = NORMAL;
         PRAGMA max_page_count = 32768;
+        -- Checkpoint aggressively so the WAL stops parking at its 4 MB default
+        -- ceiling (1000 pages). ~200 pages ≈ 800 KB of hot journal.
+        PRAGMA wal_autocheckpoint = 200;
+        PRAGMA journal_size_limit = 1048576;
         ",
     )?;
 
@@ -1591,6 +1612,7 @@ fn init_db(conn: &mut Connection) -> rusqlite::Result<()> {
             open REAL,
             high REAL,
             low REAL,
+            day TEXT,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -1787,6 +1809,41 @@ fn init_db(conn: &mut Connection) -> rusqlite::Result<()> {
     let _ = conn.execute("ALTER TABLE price_history ADD COLUMN high REAL;", ());
     let _ = conn.execute("ALTER TABLE price_history ADD COLUMN low REAL;", ());
 
+    // Migration: collapse intraday samples into one row per (symbol, UTC day).
+    // Older DBs hold a row every 10 minutes; the newest row of each day already
+    // carries the accumulated open/high/low (the worker keeps a running
+    // accumulator), so keeping MAX(id) preserves the candle and drops the rest.
+    let _ = conn.execute("ALTER TABLE price_history ADD COLUMN day TEXT;", ());
+    let _ = conn.execute(
+        "UPDATE price_history SET day = date(timestamp) WHERE day IS NULL;",
+        (),
+    );
+    if let Ok(n) = conn.query_row(
+        "SELECT COUNT(*) FROM price_history WHERE id NOT IN
+         (SELECT MAX(id) FROM price_history GROUP BY symbol, day)",
+        [],
+        |r| r.get::<_, i64>(0),
+    ) {
+        if n > 0 {
+            if let Err(e) = conn.execute(
+                "DELETE FROM price_history WHERE id NOT IN
+                 (SELECT MAX(id) FROM price_history GROUP BY symbol, day)",
+                [],
+            ) {
+                warn!("price_history dedupe failed: {e}");
+            } else {
+                tracing::info!(
+                    "price_history: collapsed {} intraday rows into daily candles",
+                    n
+                );
+            }
+        }
+    }
+    let _ = conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_price_history_sym_day ON price_history(symbol, day);",
+        (),
+    );
+
     // Migration for existing DBs: model fingerprint (OpenRouter `updated` field)
     // lets the lazy ranker skip re-testing models that have not changed.
     let _ = conn.execute(
@@ -1851,6 +1908,41 @@ mod tests {
         let store = rt.block_on(async { SqliteStore::new(&path.to_string_lossy()).unwrap() });
         std::mem::forget(rt); // keep the worker alive for the duration of the test
         store
+    }
+
+    #[test]
+    fn price_history_collapses_to_one_row_per_day() {
+        // Regression: the 10-minute sampler used to INSERT 144 rows per symbol
+        // per day (50k rows / 2 MB on prod). It must now upsert a single daily
+        // candle that keeps the first open and the running extremes.
+        let store = tmp_store();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            store.log_ohlcv("BTC", 100.0, 100.0, 100.0, 100.0).await;
+            store.log_ohlcv("BTC", 105.0, 100.0, 105.0, 98.0).await;
+            store.log_ohlcv("BTC", 99.0, 100.0, 105.0, 97.0).await;
+
+            let mut rows = Vec::new();
+            for _ in 0..50 {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                rows = store.get_ohlcv_history("BTC", 5).await.unwrap();
+                if !rows.is_empty() {
+                    // Give the writer a moment to drain the remaining messages.
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    rows = store.get_ohlcv_history("BTC", 5).await.unwrap();
+                    break;
+                }
+            }
+            assert_eq!(rows.len(), 1, "one row per (symbol, UTC day): {rows:?}");
+            let (_, open, high, low, close) = rows[0];
+            assert_eq!(open, Some(100.0), "first open of the day must survive");
+            assert_eq!(high, Some(105.0), "day high must be the running max");
+            assert_eq!(low, Some(97.0), "day low must be the running min");
+            assert_eq!(close, 99.0, "close must be the latest sample");
+        });
     }
 
     #[test]
