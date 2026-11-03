@@ -311,6 +311,14 @@ pub async fn call_last_resort(
                         provider,
                         std::time::Instant::now() + std::time::Duration::from_secs(secs),
                     );
+                } else if err_s.contains("401") || err_s.contains("User not found") {
+                    // A revoked/invalid key never recovers on its own. Park the
+                    // provider for a day instead of probing it on every fallback
+                    // (OpenRouter's dead key produced one wasted call per answer).
+                    crate::crypto::ai::pools::mark_provider_exhausted(
+                        provider,
+                        std::time::Instant::now() + std::time::Duration::from_secs(86_400),
+                    );
                 }
                 tracing::warn!("Last-resort {} failed: {}", label, e);
                 None

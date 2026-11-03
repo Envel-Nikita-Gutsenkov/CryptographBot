@@ -1,6 +1,62 @@
 use super::prompts::{build_moe_critic_prompt, build_news_judge_prompt};
 use futures::stream::{FuturesUnordered, StreamExt};
 
+/// Single-pass generation for short, latency-sensitive on-demand tasks.
+///
+/// The two-generator race plus a critic stage costs 30-60s and exists to harden
+/// long-form news analysis. For a <900-char narration whose numbers are already
+/// fixed by the caller it only made the "AI analysis" buttons feel dead: prod
+/// logs showed `fc:ai:` taking 35s end to end while the user had already given
+/// up. This path asks one cheap model and falls through the last-resort chain
+/// instead, which answers in a few seconds.
+pub async fn generate_quick(
+    prompt: &str,
+    db: std::sync::Arc<crate::db::sqlite::SqliteStore>,
+) -> anyhow::Result<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(45))
+        .use_rustls_tls()
+        .build()?;
+    let gemini_key = std::env::var("GEMINI_API_KEY").unwrap_or_default();
+
+    // Cheap/fast tier first: the task is narrating a table we already produced,
+    // not open-ended reasoning.
+    let mut last_err = anyhow::anyhow!("No quick models available");
+    for alias in super::pools::get_available_models(Some("watcher")) {
+        match super::providers::call_any_model(
+            &client,
+            &gemini_key,
+            &alias,
+            prompt,
+            Some(db.clone()),
+        )
+        .await
+        {
+            Ok(res) => {
+                let cleaned = super::providers::clean_model_output(&res);
+                let trimmed = cleaned.trim();
+                if !trimmed.is_empty() {
+                    super::pools::record_successful_model(&alias);
+                    return Ok(trimmed.to_string());
+                }
+                last_err = anyhow::anyhow!("model {alias} returned an empty answer");
+            }
+            Err(e) => {
+                tracing::warn!("Quick model {alias} failed: {e}");
+                last_err = e;
+            }
+        }
+    }
+
+    match super::providers::call_last_resort(&client, &gemini_key, prompt).await {
+        Ok((label, res)) => {
+            super::pools::record_successful_model(&label);
+            Ok(res.trim().to_string())
+        }
+        Err(e) => Err(anyhow::anyhow!("{last_err}; last-resort: {e}")),
+    }
+}
+
 #[allow(dead_code)]
 pub async fn generate_moe_pipeline(
     prompt_base: &str,

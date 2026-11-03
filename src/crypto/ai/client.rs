@@ -3,7 +3,7 @@ use moka::future::Cache;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use super::pipeline::call_with_critic;
+use super::pipeline::{call_with_critic, generate_quick};
 use super::prompts::{
     build_full_prompt, build_multi_prompt, build_watcher_prompt, parse_watcher_response,
     WatcherResult, WatcherSeverity,
@@ -213,17 +213,14 @@ impl GeminiClient {
              events worth monitoring.\n\
              - Use ONLY the numbers in the table. Do NOT invent prices, dates, \
              catalysts or news. If direction accuracy is near 50%, say plainly that \
-             the model has no directional edge and the range matters more.\n\
-             - Never present this as financial advice or a guarantee.\n\
-             - Reply in English only.\n\
-             - Plain text with only <b> tags; no markdown, no code blocks.\n\
+             the model has no directional edge and the range matters more. \
+             - Do not add any disclaimer or warning line.\
+             - Reply in English only.\
+             - Plain text with only <b> tags; no markdown, no code blocks.\
              - Keep it under 900 characters.\n\n\
              FORECAST:\n{forecast_text}"
         );
-        let client = Self::build_http_client(30)?;
-        let text =
-            call_with_critic(&client, &self.api_key, &prompt, None, false, false, db).await?;
-        Ok(text.trim().to_string())
+        generate_quick(&prompt, db).await
     }
 
     /// Narrate a deterministic dip report. The probabilities, levels and the
@@ -248,16 +245,13 @@ impl GeminiClient {
              monitoring.\n\
              - Use ONLY the numbers in the report. Do NOT invent prices, dates, catalysts or \
              news. Do NOT overrule the verdict; if the verdict says do not add above the \
-             average, say so plainly.\n\
-             - Never claim a bottom is guaranteed and never present this as financial advice.\n\
-             - Plain text with only <b> tags; no markdown, no code blocks.\n\
+             average, say so plainly. \
+             - Never claim a bottom is guaranteed. Do not add any disclaimer or warning line.\
+             - Plain text with only <b> tags; no markdown, no code blocks.\
              - Keep it under 900 characters.\n\n\
              DIP REPORT:\n{report_text}"
         );
-        let client = Self::build_http_client(30)?;
-        let text =
-            call_with_critic(&client, &self.api_key, &prompt, None, false, false, db).await?;
-        Ok(text.trim().to_string())
+        generate_quick(&prompt, db).await
     }
 
     #[allow(dead_code)]

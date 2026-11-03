@@ -312,31 +312,30 @@ pub async fn handle_forecast_callback(
                     .map(|l| format!("• {}", html_escape::encode_text(&l)))
                     .collect::<Vec<_>>()
                     .join("\n");
-                let commentary = if ai.is_configured() {
-                    match tokio::time::timeout(
-                        Duration::from_secs(60),
-                        ai.forecast_commentary(&f.symbol, &f.render(), sqlite.clone()),
-                    )
-                    .await
-                    {
-                        Ok(Ok(t)) => {
-                            if t.trim().is_empty() {
-                                None
-                            } else {
-                                Some(t)
-                            }
-                        }
-                        Ok(Err(e)) => {
-                            warn!("Forecast AI commentary failed for {sym}: {e}");
+                // Commentary is a fast single-pass call: it must not depend on a
+                // single provider's key (Gemini 429s constantly), so the guard is
+                // gone and the multi-provider chain decides.
+                let commentary = match tokio::time::timeout(
+                    Duration::from_secs(50),
+                    ai.forecast_commentary(&f.symbol, &f.render(), sqlite.clone()),
+                )
+                .await
+                {
+                    Ok(Ok(t)) => {
+                        if t.trim().is_empty() {
                             None
-                        }
-                        Err(_) => {
-                            warn!("Forecast AI commentary timed out for {sym}");
-                            None
+                        } else {
+                            Some(t)
                         }
                     }
-                } else {
-                    None
+                    Ok(Err(e)) => {
+                        warn!("Forecast AI commentary failed for {sym}: {e}");
+                        None
+                    }
+                    Err(_) => {
+                        warn!("Forecast AI commentary timed out for {sym}");
+                        None
+                    }
                 };
 
                 let text = match commentary {
@@ -345,7 +344,7 @@ pub async fn handle_forecast_callback(
                         if russian { "Итог" } else { "Bottom line" }
                     ),
                     None => format!(
-                        "{}\n\n🎯 <b>{}</b>\n{verdict}\n<i>AI commentary unavailable — deterministic summary only.</i>",
+                        "{}\n\n🎯 <b>{}</b>\n{verdict}",
                         f.summary_html(),
                         if russian { "Итог" } else { "Bottom line" }
                     ),

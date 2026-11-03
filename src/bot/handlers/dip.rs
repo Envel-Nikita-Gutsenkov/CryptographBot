@@ -186,26 +186,23 @@ pub async fn handle_dip_callback(
                 };
 
                 let ai = GeminiClient::new(&config.gemini_api_key);
-                let commentary = if ai.is_configured() {
-                    match tokio::time::timeout(
-                        Duration::from_secs(60),
-                        ai.dip_commentary(&r.symbol, &r.plain(), sqlite.clone()),
-                    )
-                    .await
-                    {
-                        Ok(Ok(t)) if !t.trim().is_empty() => Some(t),
-                        Ok(Ok(_)) => None,
-                        Ok(Err(e)) => {
-                            warn!("Dip AI commentary failed for {sym}: {e}");
-                            None
-                        }
-                        Err(_) => {
-                            warn!("Dip AI commentary timed out for {sym}");
-                            None
-                        }
+                // Fast single-pass: the multi-provider chain decides, not one key.
+                let commentary = match tokio::time::timeout(
+                    Duration::from_secs(50),
+                    ai.dip_commentary(&r.symbol, &r.plain(), sqlite.clone()),
+                )
+                .await
+                {
+                    Ok(Ok(t)) if !t.trim().is_empty() => Some(t),
+                    Ok(Ok(_)) => None,
+                    Ok(Err(e)) => {
+                        warn!("Dip AI commentary failed for {sym}: {e}");
+                        None
                     }
-                } else {
-                    None
+                    Err(_) => {
+                        warn!("Dip AI commentary timed out for {sym}");
+                        None
+                    }
                 };
 
                 let text = match commentary {
@@ -213,10 +210,7 @@ pub async fn handle_dip_callback(
                         "🧠 <b>{sym} — AI read</b>\n\n{t}\n\n\
                          <i>The probabilities above are deterministic.</i>"
                     ),
-                    None => format!(
-                        "{}\n\n<i>AI commentary unavailable — deterministic report only.</i>",
-                        r.summary_html()
-                    ),
+                    None => r.summary_html(),
                 };
 
                 let sent = bot_task
