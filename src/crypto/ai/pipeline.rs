@@ -109,7 +109,7 @@ pub async fn generate_moe_pipeline(
 /// be up to 36k chars — every Groq model answered "prompt too large" and the
 /// news cycle died for BTC/GENERAL. Budget the blocks explicitly: news gets the
 /// bulk, the previous summary and market context are short hints.
-const NEWS_PROMPT_CHAR_BUDGET: usize = 15_600; // ≈5.2k tokens, safe under 6k
+const NEWS_PROMPT_CHAR_BUDGET: usize = 12_000; // ≈4k tokens, leaves TPM headroom
 
 /// Truncate the news prompt inputs so the assembled prompt fits the smallest
 /// provider window. Returns `(news_text, market_data, prev_context)`.
@@ -731,7 +731,7 @@ mod tests {
             total <= NEWS_PROMPT_CHAR_BUDGET,
             "budgeted blocks are {total} chars, budget {NEWS_PROMPT_CHAR_BUDGET}"
         );
-        // ~5.2k tokens at 3 chars/token — under the 6000-token Groq gate.
+        // ~5.2k tokens
         assert!(total / 3 < 6_000);
         assert!(
             news.len() > 5_000,

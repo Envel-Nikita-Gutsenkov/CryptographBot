@@ -142,8 +142,10 @@ pub async fn run_news_cycle(
         }
         info!("Saved verified news summary for {}", symbol);
 
-        // Sleep a bit between symbols to avoid rate limits
-        sleep(Duration::from_secs(10)).await;
+        // Space symbols out: Groq's free tier is 8000 tokens/minute, and one
+        // summary is ~4k tokens, so two back-to-back calls burst through the
+        // cap (429 TPM) and the cycle fails. 25s keeps ~2.4 calls/min.
+        sleep(Duration::from_secs(25)).await;
     }
 
     // Retention sweep once per full cycle: raw articles 3 days, summary
