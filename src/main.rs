@@ -706,6 +706,7 @@ async fn main_inner() -> anyhow::Result<()> {
             cmc.clone(),
             config.clone(),
             sqlite.clone(),
+            None,
         )
         .await?;
         crypto::ai::proactive_worker::run_cli_scan(DEMO_USER_ID, store, cmc, sqlite, true, false)
@@ -879,15 +880,34 @@ async fn main_inner() -> anyhow::Result<()> {
         let sqlite = Arc::new(db::SqliteStore::new(&config.sqlite_db)?);
         crate::crypto::ai::deepseek_budget::DeepSeekBudget::instance().init(Some(sqlite.clone()));
 
-        let (user_id, question) = if args[2].eq_ignore_ascii_case("demo") {
-            (DEMO_USER_ID, args[3..].join(" "))
+        // Optional reply context for verifying the Telegram reply-to flow from
+        // the box: `ask <user> "what about this?" reply="[assistant (bot)]: …"`
+        let mut reply_context: Option<String> = None;
+        let (user_id, mut words): (u64, Vec<String>) = if args[2].eq_ignore_ascii_case("demo") {
+            (DEMO_USER_ID, args[3..].to_vec())
         } else if let Ok(uid) = args[2].trim().parse::<u64>() {
-            (uid, args[3..].join(" "))
+            (uid, args[3..].to_vec())
         } else {
-            (DEMO_USER_ID, args[2..].join(" "))
+            (DEMO_USER_ID, args[2..].to_vec())
         };
+        words.retain(|tok| {
+            match tok
+                .strip_prefix("reply=")
+                .or_else(|| tok.strip_prefix("reply:"))
+            {
+                Some(r) => {
+                    let r = r.trim().trim_matches('"');
+                    if !r.is_empty() {
+                        reply_context = Some(r.to_string());
+                    }
+                    false
+                }
+                None => true,
+            }
+        });
+        let question = words.join(" ");
         if question.trim().is_empty() {
-            anyhow::bail!("Usage: cargo run -- ask <user_id|demo> \"question\"");
+            anyhow::bail!("Usage: cargo run -- ask <user_id|demo> \"question\" [reply=\"…\"]");
         }
 
         let store = Arc::new(db::Store::new());
@@ -923,7 +943,16 @@ async fn main_inner() -> anyhow::Result<()> {
             Some(sqlite.clone()),
         ));
 
-        bot::handlers::ask::run_cli_ask(user_id, &question, store, cmc, config, sqlite).await?;
+        bot::handlers::ask::run_cli_ask(
+            user_id,
+            &question,
+            store,
+            cmc,
+            config,
+            sqlite,
+            reply_context,
+        )
+        .await?;
         return Ok(());
     }
 

@@ -64,25 +64,7 @@ pub async fn handle_ask_cmd(
     let bot_task = bot.clone();
     let chat_id = msg.chat.id;
     let loading_id = loading.id;
-    let reply_context = msg.reply_to_message().and_then(|m| {
-        let body = m.text().or_else(|| m.caption())?;
-        // Replying to your own message is just as valid a follow-up as
-        // replying to the bot's card — mark the author so the model knows
-        // whose words it is continuing.
-        let from_bot = m.from().map(|u| u.is_bot).unwrap_or(false);
-        let who = if from_bot { "assistant (bot)" } else { "user" };
-        let full = format!("[{who}]: {body}");
-        Some({
-            let chars: Vec<char> = full.chars().collect();
-            if chars.len() > 2000 {
-                let mut t: String = chars.into_iter().take(2000).collect();
-                t.push_str("... (truncated)");
-                t
-            } else {
-                full
-            }
-        })
-    });
+    let reply_context = reply_context_from(&msg);
 
     tokio::spawn(async move {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -169,6 +151,93 @@ pub async fn handle_ask_cmd(
     Ok(())
 }
 
+/// Build the dialogue context from the message the user replied to.
+///
+/// Replying to the bot's card, to your own earlier message, or to a photo /
+/// document / voice note must all continue the thread — a reply that carries
+/// only media used to be dropped silently (`text().or_else(caption())?`),
+/// so "а это что?" replied to a chart produced a context-free answer. Media
+/// replies now degrade to a short marker (`[photo]`, `[document: name]`, …)
+/// plus any caption.
+pub fn reply_context_from(msg: &Message) -> Option<String> {
+    let replied = msg.reply_to_message()?;
+    let body = replied
+        .text()
+        .map(|t| t.to_string())
+        .or_else(|| replied.caption().map(|c| c.to_string()))
+        .unwrap_or_else(|| media_marker(replied));
+    if body.trim().is_empty() {
+        return None;
+    }
+    // Replying to your own message is just as valid a follow-up as replying to
+    // the bot's card — mark the author so the model knows whose words it is
+    // continuing (needed because the bot's cards are long and look like data).
+    let from_bot = replied.from().map(|u| u.is_bot).unwrap_or(false);
+    compose_reply_context(from_bot, &body)
+}
+
+/// Pure part of [`reply_context_from`] — testable without constructing a
+/// `teloxide::types::Message`.
+fn compose_reply_context(from_bot: bool, body: &str) -> Option<String> {
+    if body.trim().is_empty() {
+        return None;
+    }
+    let who = if from_bot { "assistant (bot)" } else { "user" };
+    Some(truncate_chars(
+        &format!("[{who}]: {body}"),
+        2000,
+        "... (truncated)",
+    ))
+}
+
+/// Short textual stand-in for a reply that has no text and no caption.
+fn media_marker(m: &Message) -> String {
+    if m.photo().is_some() {
+        return "[photo]".to_string();
+    }
+    if let Some(doc) = m.document() {
+        return match &doc.file_name {
+            Some(name) => format!("[document: {name}]"),
+            None => "[document]".to_string(),
+        };
+    }
+    if m.voice().is_some() {
+        return "[voice message]".to_string();
+    }
+    if m.video_note().is_some() {
+        return "[video note]".to_string();
+    }
+    if m.video().is_some() {
+        return "[video]".to_string();
+    }
+    if m.audio().is_some() {
+        return "[audio]".to_string();
+    }
+    if m.animation().is_some() {
+        return "[animation]".to_string();
+    }
+    if m.sticker().is_some() {
+        return "[sticker]".to_string();
+    }
+    if m.contact().is_some() {
+        return "[contact]".to_string();
+    }
+    if m.location().is_some() {
+        return "[location]".to_string();
+    }
+    "[message without text]".to_string()
+}
+
+fn truncate_chars(s: &str, max: usize, suffix: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        return s.to_string();
+    }
+    let mut out: String = chars.into_iter().take(max).collect();
+    out.push_str(suffix);
+    out
+}
+
 /// CLI reproduction of the full `/ask` pipeline (`cargo run -- ask <user|demo> "q"`).
 ///
 /// Enables `CRYPTOGRAPH_DEBUG_PROMPTS` so every stage is printed: the system
@@ -184,12 +253,17 @@ pub async fn run_cli_ask(
     cmc: Arc<CryptoClient>,
     config: Arc<Config>,
     sqlite: Arc<SqliteStore>,
+    reply_context: Option<String>,
 ) -> anyhow::Result<()> {
     std::env::set_var("CRYPTOGRAPH_DEBUG_PROMPTS", "1");
 
-    println!("\n=== /ask PIPELINE REPLAY ===");
+    println!("=== /ask PIPELINE REPLAY ===");
     println!("User: {}", user_id);
-    println!("Question: {}\n", question);
+    println!("Question: {}", question);
+    if let Some(r) = reply_context.as_deref() {
+        println!("Replying to: {}", r);
+    }
+    println!();
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let progress_task = tokio::spawn(async move {
@@ -208,7 +282,7 @@ pub async fn run_cli_ask(
             config,
             sqlite,
             Some(tx),
-            None,
+            reply_context,
         ),
     )
     .await
@@ -277,5 +351,31 @@ mod tests {
         assert!(s2.len() < 700 + 200);
         // Empty history -> empty block.
         assert!(format_ask_history(&[]).is_empty());
+    }
+
+    #[test]
+    fn reply_context_tags_author_and_keeps_body() {
+        let bot = compose_reply_context(true, "📈 BTC forecast · 77712 USD").unwrap();
+        assert!(bot.starts_with("[assistant (bot)]: "));
+        assert!(bot.contains("BTC forecast"));
+
+        let user = compose_reply_context(false, "я купил на 60к").unwrap();
+        assert!(user.starts_with("[user]: "));
+        assert!(user.contains("60к"));
+    }
+
+    #[test]
+    fn reply_context_truncates_long_bodies() {
+        let long = "x".repeat(5000);
+        let ctx = compose_reply_context(true, &long).unwrap();
+        assert!(ctx.ends_with("... (truncated)"));
+        // 2000 chars of body + "[assistant (bot)]: " prefix + suffix.
+        assert!(ctx.chars().count() < 2000 + 64);
+    }
+
+    #[test]
+    fn reply_context_rejects_blank_body() {
+        assert!(compose_reply_context(true, "").is_none());
+        assert!(compose_reply_context(false, "   \n\t").is_none());
     }
 }

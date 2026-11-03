@@ -125,6 +125,9 @@ pub struct BottomSignal {
     pub drawdown_pct: f64,
     /// Price is falling on fresh shorts — the drop can continue.
     pub shorts_piling: bool,
+    /// Futures tape: funding / OI / long-short — tells whether the fall is
+    /// exhausting (longs flushed) or just starting (shorts piling).
+    pub derivatives: Option<crate::models::onchain::DerivativesSignal>,
     pub history_days: usize,
 }
 
@@ -204,6 +207,29 @@ impl BottomSignal {
                     "drop on fresh shorts — not the bottom yet"
                 }
             ));
+        }
+
+        if let Some(d) = self.derivatives {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(f) = d.funding_avg_pct {
+                parts.push(format!("funding {:+.3}%/8h", f * 100.0));
+            }
+            if let Some(oi) = d.oi_change_24h_pct {
+                parts.push(format!("OI 24ч {oi:+.1}%"));
+            }
+            if let Some(oi) = d.oi_change_7d_pct {
+                parts.push(format!("OI 7д {oi:+.1}%"));
+            }
+            if let Some(ls) = d.long_short_ratio {
+                parts.push(format!("L/S {ls:.2}"));
+            }
+            if !parts.is_empty() {
+                out.push_str(&format!(
+                    "🛢 {} · {}\n",
+                    html_escape::encode_text(&parts.join(" · ")),
+                    html_escape::encode_text(d.read.verdict(russian))
+                ));
+            }
         }
 
         out.push_str(&format!(
@@ -483,6 +509,7 @@ pub fn bottom_signal(report: &DipSniperReport) -> BottomSignal {
         hits,
         drawdown_pct: (price / report.anchor_price.max(f64::MIN_POSITIVE) - 1.0) * 100.0,
         shorts_piling: shorts,
+        derivatives: report.derivatives,
         history_days: report.history_days,
     }
 }
@@ -578,5 +605,24 @@ mod tests {
         let p = s.plain(false);
         assert!(p.contains("bottom score"));
         assert!(p.contains("verdict:"));
+    }
+
+    #[test]
+    fn derivatives_line_is_rendered() {
+        use crate::models::onchain::{DerivativesRead, DerivativesSignal};
+        let mut r = calm_report();
+        r.derivatives = Some(DerivativesSignal {
+            funding_avg_pct: Some(-0.0001),
+            oi_change_24h_pct: Some(-4.2),
+            oi_change_7d_pct: Some(-9.0),
+            long_short_ratio: Some(1.1),
+            taker_buy_sell: None,
+            price_change_24h_pct: -2.0,
+            read: DerivativesRead::LongsFlushed,
+        });
+        let html = bottom_signal(&r).render_html(true);
+        assert!(html.contains("funding"));
+        assert!(html.contains("OI 24ч"));
+        assert!(html.contains("лонги вымыты"));
     }
 }
