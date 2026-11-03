@@ -70,16 +70,29 @@ The background News Worker (`src/crypto/ai/news_worker.rs`) executes periodicall
 * **Default Interval:** Every **2 hours**.
 * **Volatility Override:** The worker checks hourly changes of watched assets. If any asset changes $\ge 2\%$ in 1 hour or $\ge 5\%$ in 24 hours, the interval is automatically shortened to **1 hour** to keep news fresh.
 
-### Parallel RSS Feed Aggregation (6 Sources)
-If the CryptoCompare API fails or is unconfigured, the News Worker fetches news from 6 parallel feeds:
+### Parallel RSS Feed Aggregation (14 Sources)
+CryptoCompare is attempted first, but an empty response or a failure parks it for
+a cooldown window (it is almost always rate-limited). The merged RSS feed is
+then fetched once per 10 minutes and shared by every symbol:
+
 * CoinTelegraph
-* CoinDesk
 * Decrypt
 * Blockworks
 * The Block
-* Bitcoin Magazine
+* CryptoSlate
+* AMBCrypto
+* BeInCrypto
+* CryptoPotato
+* The Daily Hodl
+* Bitcoin.com
+* CoinJournal
+* NewsBTC
+* CryptoBriefing
+* CoinGape
 
-Articles are merged, parsed, and deduplicated before being sent to the MoE pipeline.
+CoinDesk and Bitcoin Magazine were removed: both answer `403` to non-browser
+clients and only produced warnings. Articles are merged, URL-deduplicated, and
+filtered per symbol before being sent to the MoE pipeline.
 
 ---
 

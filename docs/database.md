@@ -67,11 +67,11 @@ fast concurrent reads.
 | Table | Purpose |
 |---|---|
 | `users` | `id`, `portfolio_data` (versioned JSON backup), `last_updated` |
-| `events` | Audit log of user-triggered events |
-| `price_history` | Historical price points (symbol, price, timestamp) — the trajectory memory fed into AI snapshots; gained OHLC columns, 90-day retention |
+| `events` | Audit log of user-triggered events (7-day retention) |
+| `price_history` | One OHLC close row per symbol per UTC day — the local candle store behind `/forecast`, `/dip`, `/sniper`, `/bottom` and the AI trajectory memory (400-day retention) |
 | `news_summaries` | Latest AI-verified news digest per symbol (markdown/emoji stripped on write) |
-| `news_articles` | Raw articles per symbol, dedup by URL, 7-day retention (on-demand "extended results") |
-| `news_summary_history` | Append-only per-symbol summary history, 30-day retention ("what changed over time") |
+| `news_articles` | Raw articles per symbol, dedup by URL, 3-day retention (on-demand "extended results") |
+| `news_summary_history` | Append-only per-symbol summary history, 14-day retention ("what changed over time") |
 | `quote_meta_cache` | Non-real-time token metadata (rank, supply, 1h/24h/7d/30d/90d changes) |
 | `model_health` | Provider health status (up/down, error, last checked) |
 | `macro_cache` | Latest macro context summary |
@@ -89,7 +89,7 @@ fast concurrent reads.
 | `paid_usage` | Per-model daily paid usage (DeepSeek) |
 | `daily_usage` | Per-category daily totals (OpenRouter 300/day budget) |
 | `ai_stats` | Legacy per-model ok/err counters |
-| `daily_metrics` | Per-category daily ok/err counters |
+| `daily_metrics` | Per-category daily ok/err counters (31-day retention) |
 
 ### Model ranking tables
 

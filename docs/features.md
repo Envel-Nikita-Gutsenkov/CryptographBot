@@ -70,6 +70,21 @@ for the same inputs.
   The verdict is `BUY` (at/below your average entry and a further dip is
   unlikely), `SPLIT` (buy part now, the rest at `zone_price`), `WAIT` (not in a
   zone yet, ladder is reachable) or `NO-BUY` (above your average entry).
+- **`/sniper SYMBOL`** — the tail-risk accumulation ladder. A 14-day drawdown
+  Z-score anchored to a rolling high (so a slow bleed does not drag the buckets
+  down every day), three limit levels at the 12% / 4% / 1% Student-t quantiles,
+  Martingale cash weights from the configured pool (`/sniper cash N`), the
+  resulting average entry per bucket, first-passage touch probabilities, and a
+  0–100 capitulation score for "buy at market now". The average-entry guard
+  (`/sniper protect on|off`) flags any bucket that would raise your cost basis.
+- **`/bottom SYMBOL`** — the same inputs condensed into one explicit answer:
+  how deep this is, whether a deeper bucket is still likely to print, and the
+  concrete price at which buying makes statistical sense. Works for symbols you
+  do not hold.
+
+Every report carries inline actions: **AI Analysis** (a single-pass narration
+of the deterministic numbers), **Refresh** (rebuild from the freshest data in
+place) and cross-links between forecast, dip zones, sniper and bottom.
 
 Per-zone cooldowns apply to the proactive dip alert (`dip_alert_enabled`,
 `dip_cooldown_hours`, default 168 h), and the alert only fires at/below the
@@ -89,21 +104,25 @@ Cryptograph generates premium charts inside the chat interface using the native 
 ## 3b. Security Incident Detection
 
 A deterministic scanner (`run_security_scan`) walks the cached news summaries
-and articles every 5 minutes — local SQLite reads only — and classifies
+and articles every **15 minutes** — local SQLite reads only — and classifies
 incidents (hack/breach/exploit/theft/depeg/freeze/phishing, English and
 Russian wording) with brand-level topics (`binance`, `ledger`, `kraken`, …).
 
-Deduplication is **per topic** (`ai_security_seen` map with a 7-day window),
-not a single "last topic" slot, so two incidents alternating in the feed can no
-longer re-send the same alert every scan. The first sighting is delivered
-immediately; repeats stay silent for the cooldown.
+Noise is controlled on three levels:
 
-The AI watcher's own security path is fed **only by articles fetched in the
-last 24 hours** and detects per article — scanning a week of cached summaries
-matched the word "hack" anywhere and re-fired the same "Security incident
-detected" card. Every scan produces **one** digest (one message, AI-written
-when a provider is available, deterministic snippets otherwise) listing all
-fresh incidents, sent as a rich message with an HTML fallback.
+1. **Significance gate** — custody and exchange topics always qualify; other
+   brand mentions only when the article reports a compromise; everything else
+   needs a material incident (≥$100M).
+2. **Per-topic dedup** (`ai_security_seen` map) — two incidents alternating in
+   the feed cannot re-send the same alert every scan.
+3. **Global gap** — at most one security digest per **6 hours**, and at most one
+   alert per scan.
+
+The first sighting is delivered immediately; repeats stay silent for the
+cooldown. The AI watcher's own security path is fed **only by articles fetched
+in the last 24 hours** and detects per article, instead of re-firing on "hack"
+anywhere in a week of cached text. Each scan produces one digest (AI-written
+when a provider is available, deterministic snippets otherwise).
 
 ---
 
@@ -129,7 +148,7 @@ exhausted and when they reset.
 
 ## 4. Anti-Spam Alerts & Quiet Hours
 
-- **Anti-Spam Engine**: Alerts require the threshold condition to be met for at least **two consecutive checks** (5 minutes apart) to prevent false alerts caused by quick price wicks.
+- **Anti-Spam Engine**: Alerts require the threshold condition to be met for at least **two consecutive ticks** (60 seconds apart by default) to prevent false alerts caused by quick price wicks.
 - **Quiet Hours**: Users can set time periods during which low-severity alerts are queued and silenced (e.g., `23:00 - 07:00 UTC`), protecting sleep. High-priority alerts can bypass this filter.
 
 ---
@@ -185,9 +204,9 @@ tranches and never realizes a loss:
 
 ## 5b. News Layer — Pre-Digested Summaries + On-Demand Details
 
-- Raw articles are stored per symbol (`news_articles`, dedup by URL, 7-day
+- Raw articles are stored per symbol (`news_articles`, dedup by URL, 3-day
   retention) and AI-verified summaries are appended to `news_summary_history`
-  (30-day retention) — the AI prompt only ever sees compact fresh summaries
+  (14-day retention) — the AI prompt only ever sees compact fresh summaries
   (24h staleness guard), never raw feeds.
 - `news summary|history|articles|cleanup` CLI exposes the full store for
   on-demand "extended results" without burning tokens on re-processing raw

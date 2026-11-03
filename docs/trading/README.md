@@ -1,6 +1,6 @@
 # Trading Module — Documentation Index
 
-> **Branch:** `master`
+> **Branch:** `main`
 > **Status:** CLI engine **implemented** (sim + live modes, backtesting, scenarios,
 > strategy catalog, self-tuning, ATH guard, commander/advice mode, trade-task
 > advisor, conviction mode, market-regime auto-adaptation, seed-DB bundling,

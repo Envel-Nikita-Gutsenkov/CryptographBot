@@ -24,9 +24,9 @@ The bot generates a high-resolution PNG chart representing the price history (1D
 - Gemini uses its visual capability to inspect technical patterns, trend lines, support/resistance zones, and indicators.
 
 ### C. Public Market News
-The bot queries the public keyless CryptoCompare News API:
-- Retrieves the latest 15 global cryptocurrency news articles.
-- If the CryptoCompare API is rate-limited or fails, it falls back to the parallel RSS news aggregator (CoinTelegraph, CoinDesk, Decrypt, Blockworks) to retrieve up to 40 deduplicated articles.
+The bot queries the public keyless CryptoCompare News API first:
+- Retrieves the latest global cryptocurrency news articles.
+- An empty response or a failure parks CryptoCompare for a cooldown, and the bot falls back to the merged RSS aggregator (14 feeds behind a shared 10-minute cache: CoinTelegraph, Decrypt, Blockworks, The Block, CryptoSlate, AMBCrypto, BeInCrypto, CryptoPotato, The Daily Hodl, Bitcoin.com, CoinJournal, NewsBTC, CryptoBriefing, CoinGape).
 - Filters articles containing references to the requested asset symbol or name.
 - Passes the top relevant news titles and summaries as context for Gemini.
 

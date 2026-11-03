@@ -26,14 +26,15 @@ graph TD
 
     subgraph Price & Market Engine
         Bot <-->|Consensus Rate / Watchdog| CryptoClient[Crypto Client]
-        CryptoClient <-->|Consensus API Queries| PriceProviders[CMC / Binance / Coinbase / Coingecko / CoinCap ...]
+        CryptoClient <-->|Consensus API Queries| PriceProviders[CMC / CoinGecko / CoinCap / CoinPaprika / Binance / Bybit / Coinbase / OKX / Kraken / Bitfinex / Bitstamp / DefiLlama / DexScreener ...]
         CryptoClient <-->|FX Conversion| NBRB[NBRB Bank API - Daily BYN]
         CryptoClient -->|Cache Quote Metadata| SqliteDB
     end
 
     subgraph News Aggregation Engine
         NewsWorker[Background News Worker] -->|Fetch News| RssProvider[RSS Provider]
-        RssProvider -->|Concurrent GET| RSSFeeds[CoinTelegraph / CoinDesk / Decrypt / Blockworks / The Block / Bitcoin Magazine]
+        RssProvider -->|Concurrent GET, shared 10-min cache| RSSFeeds[14 feeds: CoinTelegraph / Decrypt / Blockworks / The Block / CryptoSlate / AMBCrypto / BeInCrypto / ...]
+        NewsWorker -->|Optional first attempt| CC[CryptoCompare News API]
         NewsWorker -->|Deduplicate & Summarize| MoEPipeline[AI MoE Pipeline]
         MoEPipeline -->|Cache Summary| SqliteDB
     end
@@ -59,7 +60,7 @@ sequenceDiagram
     autonumber
     participant Worker as Background News Worker
     participant DB as SQLite Database
-    participant API as CryptoCompare API
+    participant CC as CryptoCompare API
     participant RSS as RSS Provider (rss.rs)
     participant AI as AI pipeline.rs
 
@@ -67,30 +68,21 @@ sequenceDiagram
     alt Cache Hits
         DB-->>Worker: Return Cached News Summary
     else Cache Miss / Invalidation
-        Worker->>API: Query public News API
+        Worker->>CC: Attempt the public news API
         alt API Success
-            API-->>Worker: Return latest 15 articles
-        else API Failure / Rate Limit (429)
-            Worker->>RSS: Request RSS Fallback
-            Note over RSS: Spawns 4 concurrent tokio tasks
-            par CoinTelegraph
-                RSS->>RSS: Fetch CoinTelegraph RSS
-            and CoinDesk
-                RSS->>RSS: Fetch CoinDesk RSS
-            and Decrypt
-                RSS->>RSS: Fetch Decrypt RSS
-            and Blockworks
-                RSS->>RSS: Fetch Blockworks RSS
-            end
-            RSS-->>Worker: Return combined lists (up to 40 articles)
+            CC-->>Worker: Return symbol articles
+        else Empty / Rate-limit (429)
+            CC-->>Worker: Empty success or error
+            Worker->>Worker: Park CryptoCompare for the cooldown window
+            Worker->>RSS: Merged feed from the shared RSS cache
+            Note over RSS: 14 feeds fetched in parallel once per 10 min
+            RSS-->>Worker: Combined, URL-deduplicated articles
         end
-        Worker->>Worker: Deduplicate articles by normalized Title
-        Worker->>Worker: Strip HTML tags & truncate bodies to 800 chars
+        Worker->>Worker: Keep only articles mentioning the symbol
+        Worker->>Worker: Deduplicate by normalized title, strip HTML, truncate
         Worker->>AI: Send news corpus + market data
-        AI->>AI: Try Qwen/Llama models (exclude Gemini)
-        alt Primary Models Outage
-            AI->>AI: Fallback to Gemini 2.5 Flash (Last resort)
-        end
+        AI->>AI: Race two generator models
+        AI->>AI: Critic fact-checks against the market snapshot
         AI-->>Worker: Return dense, cohesive summary
         Worker->>DB: Write summary into news_summaries (Update SQLite)
     end
@@ -135,9 +127,16 @@ Caches non-real-time token metadata (rank, supply, historical percentage changes
 - `updated_at` (DATETIME)
 
 #### 4. `price_history` & `events`
-Logs historical price points (for volatility metrics and the AI trajectory
-memory) and user-triggered audit logs. Kept for a maximum of 30 days
-(auto-cleaned via `CleanupOldEvents`).
+`price_history` stores **one OHLC close row per symbol per UTC day** (400-day
+retention) — it powers `/forecast`, `/dip`, `/sniper`, `/bottom` and the AI
+trajectory memory, so the deterministic models need no provider history calls.
+`events` is the user/agent audit log (7-day retention). `daily_metrics` keeps
+31 days, `paid_usage` 95 days.
+
+#### 4b. News layer — `news_articles` / `news_summary_history`
+Raw articles per symbol (dedup by URL, 3-day retention) and the append-only
+per-symbol AI summary history (14-day retention). `news_summaries` holds only
+the current digest per symbol.
 
 #### 5. `user_memos` / `user_goals` / `proactive_cache`
 Standing AI memory (hard rules), user goals with progress + verdicts, and the
@@ -200,14 +199,16 @@ flowchart TD
 
 ### 🔔 Alert Engine Watchdog & Anti-Spam Workflow
 
-Alerts run on a 5-minute tick background loop.
+Alerts run on a 60-second tick background loop (`ALERT_INTERVAL_SECS`, minimum
+30). Quotes are served from the 180 s cache, so a faster tick costs no extra
+provider requests.
 
 ```mermaid
 flowchart TD
-    Tick([5-Minute Timer Tick]) --> Fetch[Fetch live consensus quotes for all alert symbols]
+    Tick([60-Second Timer Tick]) --> Fetch[Fetch live consensus quotes for all alert symbols]
     Fetch --> Loop[Loop through active user Alert Rules]
     Loop --> Condition{Has threshold condition been met?}
-    Condition -- Yes --> CheckSpam{Has this condition met in the PREVIOUS 5-min check?}
+    Condition -- Yes --> CheckSpam{Was the condition also met on the PREVIOUS tick?}
     Condition -- No --> ClearState[Clear consecutive triggers flag]
     CheckSpam -- Yes --> Cooldown{Has the configured Cooldown period e.g. 12h elapsed?}
     CheckSpam -- No --> SaveState[Mark 1st consecutive trigger and do not notify]

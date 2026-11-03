@@ -23,13 +23,16 @@ graph TD
     Crypto -->|Cache Quote Metadata| Sqlite
     Watchdog[Watchdog / RSS + Hang Guard] -->|Supervises| Workers
     subgraph Workers[Supervised Background Workers]
-        AlertEngine[Alert Engine / 5 min]
+        AlertEngine[Alert Engine / 60 s]
         Watcher[AI Market Watcher / 4h]
         NewsWorker[News Worker / 2h]
         MacroWorker[Macro Worker / 12h]
         IntelWorker[Market Intel Worker / 60 min]
+        SecurityScan[Security Scanner / 15 min]
         Proactive[Proactive Goal Worker]
         Ranker[Model Ranker / daily]
+        DipWorker[Dip Worker / 24h]
+        WalletPoller[Wallet Poller / 15 min]
         Prefetch[Price Prefetch / 10 min]
     end
     Workers -->|Read/Write| Sqlite
@@ -69,29 +72,33 @@ graph TD
 
 ### 3. Market Data Client (`src/crypto/`)
 - **Consensus quotes**: fetches rates from many independent providers
-  (CoinMarketCap, CoinGecko, CoinCap, CryptoCompare, Binance, Bybit, Coinbase,
-  CoinPaprika, DefiLlama, DexScreener, GeckoTerminal) and applies outlier
-  exclusion (median) to prevent single-point anomalies. Providers without a
-  configured API key (e.g. CryptoCompare) are skipped instead of being called
-  just to fail.
+  (CoinMarketCap, CoinGecko, CoinCap, CoinPaprika, Alternative.me, Binance,
+  Bybit, Coinbase, OKX, Kraken, Bitfinex, Bitstamp, CryptoCompare, DefiLlama,
+  DexScreener, GeckoTerminal — 16 in total) and applies outlier exclusion
+  (median) to prevent single-point anomalies. Providers without a configured
+  API key (e.g. CryptoCompare) are skipped instead of being called just to fail.
 - **TTL caching** for real-time prices (180s, refreshed out-of-band by the
   Binance WS stream) and market metrics (5 min) to stay within free-tier rate
   limits.
 - **BYN/USD conversion** via the Belarus National Bank (NBRB) API, cached daily.
-- **Deduplicated news aggregator**: parallel RSS polling (CoinTelegraph,
-  CoinDesk, Decrypt, Blockworks, The Block, Bitcoin Magazine) merged and
-  deduplicated by title.
+- **Deduplicated news aggregator**: 14 RSS feeds (CoinTelegraph, Decrypt,
+  Blockworks, The Block, CryptoSlate, AMBCrypto, BeInCrypto, CryptoPotato,
+  The Daily Hodl, Bitcoin.com, CoinJournal, NewsBTC, CryptoBriefing, CoinGape)
+  fetched once per cycle behind a shared 10-minute cache, merged and
+  deduplicated by URL and normalized title. CoinDesk and Bitcoin Magazine are
+  deliberately excluded: both answer `403` to non-browser clients.
 - **News storage layer** (`news_articles` + `news_summary_history` tables): raw
-  articles are deduped by URL and kept 7 days; per-symbol AI-verified summaries
-  are appended to history (30-day retention). The AI prompt only ever sees
+  articles are deduped by URL and kept 3 days; per-symbol AI-verified summaries
+  are appended to history (14-day retention). The AI prompt only ever sees
   compact fresh summaries (24h staleness guard); raw articles and summary
   history are available on demand via `news` CLI — no token burn on
   re-processing raw feeds. Stored summaries are normalized on write (markdown
   and emoji stripped): these rows feed AI prompts, never rendered output.
 
 ### 4. Alert & Watchdog System (`src/alerts/`, `src/watchdog.rs`)
-- **Alert engine**: wakes every 5 minutes, evaluates user alert rules against
-  consensus prices, enforces cooldowns and two-consecutive-check deduplication.
+- **Alert engine**: wakes every 60 seconds (`ALERT_INTERVAL_SECS`, minimum 30),
+  evaluates user alert rules against consensus prices, enforces cooldowns and
+  two-consecutive-tick deduplication.
 - **Watchdog**: process-level guardian — RSS memory cap and hang detection with
   a heartbeat pinger; supervised workers auto-restart on panic (exponential
   backoff).
@@ -132,9 +139,10 @@ graph TD
     numbers that needs no interpretation.
   - `watcher` — 4h (2h under volatility) AI market watcher with severity
     levels and cooldowns.
-  - `security_scan` — 5 min deterministic incident detector over the cached
-    news (local SQLite reads only; one AI digest per *new* incident, 7-day
-    per-topic cooldown).
+  - `security_scan` — 15 min deterministic incident detector over the cached
+    news (local SQLite reads only). Significance-gated (custody always,
+    wallet brands only on compromise, otherwise ≥$100M), per-topic dedup, one
+    digest per scan and a 6-hour global gap.
   - `dip_worker` — daily dip-zone scan; alerts only at/below the average entry
     inside a zone, 7-day per-symbol/zone cooldown.
   - `proactive_worker` — goal/memo scan with 2 gens → reviewer → critic and
@@ -142,10 +150,12 @@ graph TD
   - `model_ranker` — daily registry refresh + lazy benchmark batch (see below).
   - `price_prefetch` — 10 min price pre-fetch into SQLite.
 - **Deterministic analytics** (`src/trading/forecast.rs`,
-  `src/trading/dipzones.rs`): the `/forecast` horizon ladder (walk-forward
-  calibrated drift damping + volatility cone) and the `/dip` zone ladder
-  (closed-form first-passage probabilities). Pure functions over the local
-  history — no AI, no network, unit-tested for monotonicity/determinism.
+  `src/trading/dipzones.rs`, `src/trading/sniper.rs`): the `/forecast` horizon
+  ladder (walk-forward calibrated drift damping + Student-t volatility cone),
+  the `/dip` zone ladder (closed-form first-passage probabilities), the
+  `/sniper` tail-risk bucket ladder and the `/bottom` radar. Pure functions
+  over the local history — no AI, no network, unit-tested for
+  monotonicity/determinism.
 
 ### 7. Model Ranking System (`src/crypto/ai/model_rank.rs`)
 - **Generalized lazy ranker across all providers**: discovers hand-configured

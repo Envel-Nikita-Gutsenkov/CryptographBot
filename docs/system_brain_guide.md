@@ -13,7 +13,7 @@ Cryptograph runs several asynchronous background loops powered by `tokio::spawn`
 * **Volatility Boost (Adaptive Scheduling):** The worker checks hourly quotes of all assets in user watchlists. If any asset exhibits volatility (change $\ge 2\%$ in 1 hour or $\ge 5\%$ in 24 hours), the worker **shortens its sleep interval to 1 hour**.
 * **What it does:**
   1. Compiles a unique list of watched cryptocurrency symbols (plus a special `"GENERAL"` market query).
-  2. Queries 6 parallel RSS feeds and raw APIs (CoinTelegraph, CoinDesk, Decrypt, Blockworks, The Block, and Bitcoin Magazine).
+  2. Queries the merged RSS feed (14 feeds behind a shared 10-minute cache: CoinTelegraph, Decrypt, Blockworks, The Block, CryptoSlate, AMBCrypto, BeInCrypto, CryptoPotato, The Daily Hodl, Bitcoin.com, CoinJournal, NewsBTC, CryptoBriefing, CoinGape), after one Cheap CryptoCompare attempt.
   3. Deduplicates and merges articles, extracting title, body, and source.
   4. Runs the massive **Mixture of Experts (MoE) dual-agent pipeline** to compress and verify the data.
   5. Saves the final verified news summary to the SQLite database `news_summaries` table.
@@ -27,11 +27,11 @@ Cryptograph runs several asynchronous background loops powered by `tokio::spawn`
   4. Writes the result to the SQLite `macro_cache` table.
 
 ### C. Alert Evaluation Engine (`src/alerts/engine.rs`)
-* **Trigger Interval:** Every **5 minutes**.
+* **Trigger Interval:** Every **60 seconds** (`ALERT_INTERVAL_SECS`, minimum 30). Quotes come from the 180 s cache, so the faster tick adds no provider load.
 * **What it does:**
   1. Reads all active user alerts (price triggers, volatility metrics).
   2. Pulls fresh consensus prices from the providers.
-  3. Checks condition matches (e.g., `BTC > $100,000` or `ETH drops 5% in 1h`).
+  3. Checks condition matches (e.g., `BTC > $100,000` or `ETH drops 5% in 1h`). A rule must hold for two consecutive ticks before it fires.
   4. If a match occurs, triggers an alert notification and generates an AI-powered commentary describing why the price moved (using cached news).
 
 ### D. AI Market Watcher (`src/crypto/ai/watcher.rs`)
@@ -61,8 +61,17 @@ Cryptograph runs several asynchronous background loops powered by `tokio::spawn`
   2. Benchmarks **at most 3 models** per run (30-day cooldown, fingerprint-change detection, underperformer re-tests) with a non-OpenRouter judge.
   3. Writes role assignments to `models.openrouter.json`, merged into the pools by `load_all_models()`.
 
-### H. Price Prefetch & Watchdog
+### H. Security Scanner (`src/crypto/ai/watcher.rs`)
+* **Trigger Interval:** Every **15 minutes** (local SQLite reads only).
+* **What it does:** Classifies cached news into hacks/exploits/depegs, gated by significance (custody topics always; other brands only on a reported compromise; everything else ≥$100M), deduplicated per topic, with at most one digest per scan and a 6-hour global gap.
+
+### I. Dip Worker (`dip_worker.rs`)
+* **Trigger Interval:** Every **24 hours**.
+* **What it does:** Builds the deterministic dip ladder for held symbols and alerts only when spot is at/below the average entry inside a zone (per-symbol/zone cooldown).
+
+### J. Price Prefetch, Wallet Poller & Watchdog
 * **Price prefetch:** every **10 minutes**, supervised, warms the SQLite price cache.
+* **Wallet poller:** every **15 minutes** (`WALLET_POLL_MINS`), verifies on-chain balances and notifies on change.
 * **Watchdog** (`src/watchdog.rs`): process-level guardian — RSS memory cap and hang detection via a heartbeat pinger; supervised workers auto-restart on panic.
 
 ### Model health (no separate worker)
@@ -76,25 +85,37 @@ on boot so stale marks never survive a deploy.
 ## 2. Data Volume & Aggregation Details
 
 ### How many aggregators are queried?
-1. **News Sources (6 parallel RSS Feeds):**
-   * Cointelegraph
-   * CoinDesk
+1. **News Sources (14 parallel RSS feeds behind a shared 10-minute cache):**
+   * CoinTelegraph
    * Decrypt
    * Blockworks
    * The Block
-   * Bitcoin Magazine
-2. **On-Chain & Market Data Sources:**
-   * CoinMarketCap API
-   * Binance API
-   * National Bank of the Republic of Belarus (NBRB) API (for local currency BYN conversion)
+   * CryptoSlate
+   * AMBCrypto
+   * BeInCrypto
+   * CryptoPotato
+   * The Daily Hodl
+   * Bitcoin.com
+   * CoinJournal
+   * NewsBTC
+   * CryptoBriefing
+   * CoinGape
+
+   CoinDesk and Bitcoin Magazine are excluded: both answer `403` to
+   non-browser clients.
+2. **Price & Market Data Sources (16 consensus providers):**
+   * CoinMarketCap, CoinGecko, CoinCap, CoinPaprika, Alternative.me
+   * Binance, Bybit, Coinbase, OKX, Kraken, Bitfinex, Bitstamp
+   * CryptoCompare, DefiLlama, DexScreener, GeckoTerminal
+   * National Bank of the Republic of Belarus (NBRB) API for BYN conversion
 3. **Web Search Fallbacks (Tavily, Exa, DuckDuckGo HTML, Yahoo):**
    * Used dynamically by the LLM when it detects that the pre-cached database lacks specific real-time facts.
 
 ### How much raw data is processed?
-* **Raw RSS Ingestion:** Each feed ingestion downloads up to 30 items. This represents $\approx 180$ raw articles per cycle.
-* **Text volume:** The raw payload of these articles easily exceeds **150,000 characters ($\approx 30,000$ tokens)**.
-* **Filtering & Truncation:** To fit model context windows efficiently and save tokens, the RSS parser strips HTML tags and truncates each article body to a maximum of **800 characters**.
-* **Max ingestion cap:** The worker limits the consolidated input for each coin's summary prompt to **60,000 characters ($\approx 12,000$ tokens)**.
+* **Raw RSS Ingestion:** Each feed ingestion downloads its full item list. This represents roughly 200+ raw articles per cycle.
+* **Text volume:** The raw payload can exceed 150,000 characters, which is why the merged feed is cached and filtered per symbol instead of being passed through wholesale.
+* **Filtering & Truncation:** The RSS parser strips HTML tags and truncates each article body to a maximum of **800 characters**.
+* **Max ingestion cap:** The worker limits the consolidated input for each coin's summary prompt to **36,000 characters** (≈9k tokens).
 
 ---
 
@@ -104,7 +125,7 @@ Instead of passing raw, verbose text directly to a single expensive model, Crypt
 
 ```mermaid
 graph TD
-    A[Raw Aggregated News Text ~60k Chars] --> B[Race Generators]
+    A[Raw Aggregated News Text up to 36k chars] --> B[Race Generators]
     B -->|Parallel Prompt| C(Qwen-2.5-72B / Groq)
     B -->|Parallel Prompt| D(Llama-3.1-70B / OpenRouter)
     C -->|Draft A| E[Critic / Judge]

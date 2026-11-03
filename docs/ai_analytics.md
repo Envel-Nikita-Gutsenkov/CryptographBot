@@ -56,10 +56,10 @@ Runs automatically every **4 hours** (2 hours under market volatility) in the ba
 
 ### Background News Worker (Dual-Agent Pipeline)
 Runs every **2 hours** to summarize market news into concise bullet points.
-- **Dual-Source Aggregator**: Pulls from the CryptoCompare News API as the primary channel. If rate-limited or unavailable, it falls back to a parallelized RSS collector gathering feeds from CoinTelegraph, CoinDesk, Decrypt, and Blockworks. Articles are merged and deduplicated.
+- **Dual-Source Aggregator**: Attempts the CryptoCompare News API first; an empty response or a failure parks it for a cooldown. It then falls back to a parallelized RSS collector over 14 feeds (CoinTelegraph, Decrypt, Blockworks, The Block, CryptoSlate, AMBCrypto, BeInCrypto, CryptoPotato, The Daily Hodl, Bitcoin.com, CoinJournal, NewsBTC, CryptoBriefing, CoinGape) served from a shared 10-minute cache. Articles are merged and URL-deduplicated.
 - **Agent 1 (FastWorker)**: Drafts the summary.
 - **Agent 2 (Flagship Controller)**: Verifies the summary against the previously saved database state to reject hallucinations.
-- **SQLite Caching**: Verified summaries are cached in SQLite so the main 6-hour Watcher does not need to re-read raw news, saving massive context window space.
+- **SQLite Caching**: Verified summaries are cached in SQLite so the 4-hour Watcher does not need to re-read raw news, saving massive context window space.
 
 ---
 

@@ -43,7 +43,7 @@ DEEPSEEK_API_KEY=your-deepseek-key            # optional paid last resort
 
 # --- System Settings ---
 SQLITE_DB=crypto.db                            # default; /app/data/crypto.db in Docker
-ALERT_INTERVAL_SECS=300
+ALERT_INTERVAL_SECS=60                         # alert tick; quotes come from the 180s cache
 WALLET_POLL_MINS=15
 OPENROUTER_DAILY_REQ_BUDGET=300               # hard daily cap for OpenRouter free tier
 MAX_RSS_MB=512                                # watchdog RSS cap
@@ -106,28 +106,27 @@ If you are deploying to a remote ARM64 server (e.g., Ubuntu server), you can bui
    - Execute the run script on the server:
      ```bash
      chmod +x run.sh
-     ./run.sh
+     GIT_HASH=$(git rev-parse --short HEAD) ./run.sh
      ```
 
-2. **Configure Docker Compose**:
-   Create a `docker-compose.yml` file:
-   ```yaml
-   version: '3.8'
-   services:
-     bot:
-       image: cryptograph:latest
-       container_name: cryptograph_bot
-       restart: unless-stopped
-       env_file:
-         - .env
-       volumes:
-         - ./data:/app/data
-   ```
+#### Manual Docker Compose
 
-3. **Start the Service**:
-   ```bash
-   docker-compose up -d
-   ```
+```yaml
+services:
+  cryptograph:
+    image: cryptograph:latest
+    container_name: cryptograph
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./history:/app/history
+```
+
+```bash
+docker compose up -d --build
+```
 
 ### Option B: Systemd Service File (Linux Bare-Metal)
 If you prefer running directly on a Linux host system:
@@ -190,3 +189,18 @@ docker compose up -d --build
 ```
 
 *Note: Docker Compose automatically stops the old container, builds the new binary using Docker's build cache, and recreates the container seamlessly.*
+
+### Verifying the deployment
+
+The git hash is baked into the image at build time, so the running container
+can prove exactly which commit it runs:
+
+```bash
+docker compose -f docker-compose.yml exec -T cryptograph /app/cryptograph version
+docker inspect cryptograph --format 'restarts={{.RestartCount}} status={{.State.Status}}'
+```
+
+Expected output: `v1.0.0 · build <short-hash> · built <UTC>`, with
+`restarts=0 status=running`. The same hash is what `/ver` reports in Telegram.
+Data lives in bind-mounted volumes (`data/`, `history/`), so a redeploy never
+touches the SQLite database or the candle cache.
