@@ -102,6 +102,40 @@ pub async fn generate_moe_pipeline(
     Ok(res)
 }
 
+/// Hard prompt budget for the news summary call.
+///
+/// Groq's free tier refuses any prompt above ~6000 tokens
+/// (`providers::call_groq_model`, 3 chars/token), and the article digest used to
+/// be up to 36k chars — every Groq model answered "prompt too large" and the
+/// news cycle died for BTC/GENERAL. Budget the blocks explicitly: news gets the
+/// bulk, the previous summary and market context are short hints.
+const NEWS_PROMPT_CHAR_BUDGET: usize = 15_600; // ≈5.2k tokens, safe under 6k
+
+/// Truncate the news prompt inputs so the assembled prompt fits the smallest
+/// provider window. Returns `(news_text, market_data, prev_context)`.
+fn budget_news_inputs(
+    news_text: &str,
+    market_data: &str,
+    previous_summary: Option<&str>,
+) -> (String, String, String) {
+    let prev_context = previous_summary
+        .map(|s| {
+            format!(
+                "PREVIOUS SUMMARY:\n{}\n(Do not contradict this wildly unless new evidence proves otherwise.)\n",
+                crate::format::truncate_chars(s, 1_200)
+            )
+        })
+        .unwrap_or_default();
+    const TEMPLATE_OVERHEAD: usize = 700;
+    let reserved = TEMPLATE_OVERHEAD + prev_context.chars().count() + 600;
+    let news_budget = NEWS_PROMPT_CHAR_BUDGET.saturating_sub(reserved);
+    (
+        crate::format::truncate_chars(news_text, news_budget),
+        crate::format::truncate_chars(market_data, 500),
+        prev_context,
+    )
+}
+
 pub async fn summarize_news_single_pass(
     symbol: &str,
     news_text: &str,
@@ -115,16 +149,8 @@ pub async fn summarize_news_single_pass(
         .build()?;
     let gemini_key = std::env::var("GEMINI_API_KEY").unwrap_or_default();
 
-    let prev_context = previous_summary
-        .map(|s| {
-            format!(
-                "PREVIOUS SUMMARY:
-{s}
-(Do not contradict this wildly unless new evidence proves otherwise.)
-"
-            )
-        })
-        .unwrap_or_default();
+    let (news_text, market_data, prev_context) =
+        budget_news_inputs(news_text, market_data, previous_summary);
 
     let prompt = format!(
         "You are an expert cryptocurrency analyst acting as the Chief Editor for {symbol}.\n\n\
@@ -691,6 +717,27 @@ pub async fn run_dynamic_critic(
 mod tests {
     use super::*;
     use crate::crypto::ai::providers::clean_model_output;
+
+    #[test]
+    fn news_prompt_budget_fits_groq_window() {
+        // The regression: a 36k-char digest assembled a ~13k-token prompt, so
+        // every Groq model refused it and the whole news cycle failed.
+        let articles = "x".repeat(36_000);
+        let prev = "y".repeat(8_000);
+        let (news, market, prev_ctx) =
+            budget_news_inputs(&articles, "m".repeat(2_000).as_str(), Some(&prev));
+        let total = news.chars().count() + market.chars().count() + prev_ctx.chars().count();
+        assert!(
+            total <= NEWS_PROMPT_CHAR_BUDGET,
+            "budgeted blocks are {total} chars, budget {NEWS_PROMPT_CHAR_BUDGET}"
+        );
+        // ~5.2k tokens at 3 chars/token — under the 6000-token Groq gate.
+        assert!(total / 3 < 6_000);
+        assert!(
+            news.len() > 5_000,
+            "news digest must keep most of the budget"
+        );
+    }
 
     #[test]
     fn test_is_meta_critique_detection() {
