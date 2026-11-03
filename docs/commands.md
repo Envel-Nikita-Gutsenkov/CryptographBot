@@ -119,7 +119,9 @@ and the forecast model.
 ## 6. Deterministic models
 
 These commands do not call an AI provider and do not consume quota. Output is
-reproducible for the same inputs.
+reproducible for the same inputs. The full mathematics — formulas, constants,
+calibration grid and accuracy methodology — is in
+[models.md](models.md).
 
 ### `/forecast [SYMS]`
 

@@ -43,7 +43,8 @@ The `/advice` command generates sophisticated market intelligence reports using 
 
 Both commands are pure math over the local daily-close cache plus the intraday
 rows in SQLite: **no AI call, no provider call, no quota**, fully reproducible
-for the same inputs.
+for the same inputs. The formulas, constants and calibration methodology live in
+[models.md](models.md).
 
 - **`/forecast SYMBOL`** — a horizon ladder (`1/3/5/7/14/30/90/180d` for BTC/ETH,
   shortened for younger alts) built from log-drift with horizon damping, a
