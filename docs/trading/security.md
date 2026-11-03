@@ -1,4 +1,8 @@
-# Security Measures — Trading System
+# Security Measures — Trading System (design draft)
+
+> **Status:** partially shipped. Access control (`ALLOWED_ADMIN_IDS`, `/allow`,
+> `/revoke`), pause controls and the audit tables are in place. The dead man's
+> switch and emergency-stop semantics below are partly a design target.
 
 Security is layered: the paper trading sandbox inherits all existing Cryptograph
 security measures and adds trading-specific protections.
@@ -42,7 +46,9 @@ AI → set_trigger(params) → Validate params → Create ActiveTrigger → (lat
 
 ### 2. Risk Manager Is Immutable to AI
 
-The `risk.rs` module is a pure function with no API exposed to the AI.
+The risk layer is not a separate module: operator constraints and the no-loss
+invariant are enforced inside `src/trading/engine.rs`, and the AI has no API that
+can bypass them.
 The AI cannot:
 - Change risk parameters
 - Bypass risk checks

@@ -1,4 +1,9 @@
-# Logging & Analytics Export
+# Logging & Analytics Export (design draft)
+
+> **Status:** partially shipped. `trade export --format csv|json` exports the
+> ledger, and `backtest_runs`, `strategy_lessons`, `experiments`,
+> `task_sim_runs` persist results. The trading-journal format below is a design
+> target.
 
 The system maintains a comprehensive audit trail and provides multiple export
 formats for analysis. All logs are pre-processed — not raw data dumps.

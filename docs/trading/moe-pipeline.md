@@ -1,4 +1,9 @@
-# MoE Pipeline — Double-Checking for Trading
+# MoE Pipeline — Double-Checking for Trading (design draft)
+
+> **Status:** partially shipped. `src/trading/debate.rs` implements a
+> sell-side bull/bear debate, and the shared AI pipeline provides generators +
+> critic. The full adversarial-debate loop with decision proofs is a design
+> target.
 
 The AI Brain uses the existing Mixture of Experts (MoE) pipeline from
 `crypto/ai/pipeline.rs` but with trading-specific prompts and validation.

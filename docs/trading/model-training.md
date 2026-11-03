@@ -1,4 +1,9 @@
-# Model Training & Learning System
+# Model Training & Learning System (design draft)
+
+> **Status:** partially shipped. `strategy train` runs a walk-forward grid,
+> `trade tune` proposes configs behind a deterministic validator, and results
+> land in `training_stats`, `strategy_lessons` and `regime_profiles`. The
+> self-evolving AI loop described below is a design target.
 
 The AI improves over time through a structured feedback loop: trade → review →
 learn → apply. This is not traditional ML gradient descent — it's a

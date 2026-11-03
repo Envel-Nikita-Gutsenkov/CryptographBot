@@ -43,17 +43,17 @@ Each provider has a specific request schema mapped in `src/crypto/ai/providers.r
 
 ## 🧠 2. Model Pool Selection & Success Promotion
 
-To optimize cost, throughput, and reliability, model IDs are separated into two distinct pools in `src/crypto/ai/pools.rs`:
-1. **Generators**: Lightweight, cost-efficient, and fast models (e.g., Llama 3.3, Qwen 2.5, Gemini Flash) designed to draft initial responses.
-2. **Critics**: Heavy, high-parameter reasoning models (e.g., Llama 3.3 70B Instruct, Mistral Large, DeepSeek Pro, Gemini Pro) designed to fact-check, critique, and synthesize.
+To optimize cost, throughput, and reliability, models are grouped by **role** in `src/crypto/ai/pools.rs` (`main`, `critic`, `news`, `watcher`). Roles are assigned by the lazy ranker from measured quality, so the pools are not tied to a fixed vendor list:
+1. **Cheap roles** (`news`, `watcher`): fast, cost-efficient models that draft or digest high-volume text.
+2. **Heavy roles** (`main`, `critic`): stronger reasoning models that fact-check, critique, and synthesize.
 
-### Dynamic Success Promotion Algorithm
-To avoid hitting failing models repeatedly, Cryptograph remembers the last model that successfully answered a request using thread-safe `Mutex` timers.
+### Success Promotion
+When a model answers successfully, it is pinned to the front of every pool so bursts and rate-limit cycles reuse the model that just worked instead of re-brute-forcing the list. The pin lasts **6 hours** (`SUCCESS_MEMORY`) and is persisted to `model_memory.json` next to the SQLite file, so it survives restarts.
 
 ```mermaid
 flowchart TD
-    Start[Get Available Generators/Critics] --> FetchPool[Load ranked list of API-supported models]
-    CheckSuccess{Was a model successful in the last 10 minutes?}
+    Start[Get ranked models for the role] --> FetchPool[Load ranked list of API-supported models]
+    CheckSuccess{Was a model successful in the last 6 hours?}
     FetchPool --> CheckSuccess
     CheckSuccess -- Yes --> Promote[Find that model in the list, extract it, and prepend to index 0]
     CheckSuccess -- No --> Return[Return list in default rank order]
@@ -111,9 +111,9 @@ sequenceDiagram
     participant Critic as Critic/Judge (e.g. Gemini Pro / Llama 70B)
 
     Bot->>Pipes: call_with_critic(Prompt)
-    Pipes->>Pool: get_available_generators()
-    Pool-->>Pipes: List of generators
-    Note over Pipes: Spawns parallel tasks for top 2 generators
+    Pipes->>Pool: get_available_models(Some(role))
+    Pool-->>Pipes: Ranked models for the role
+    Note over Pipes: Spawns parallel tasks for the top 2 generators
     par Task 1
         Pipes->>GenA: call_any_model_with_search(Prompt)
         GenA-->>Pipes: Draft A
@@ -123,8 +123,8 @@ sequenceDiagram
     end
     Pipes->>Pipes: Build news_judge_prompt / moe_critic_prompt
     Note over Pipes: Injects Draft A & Draft B into Critic Prompt
-    Pipes->>Pool: get_available_critics()
-    Pool-->>Pipes: List of critics
+    Pipes->>Pool: get_available_models(Some("critic"))
+    Pool-->>Pipes: Ranked critics
     Pipes->>Critic: call_any_model_with_search(Critic Prompt)
     Note over Critic: Compares drafts, reviews mathematical accuracy, resolves hallucinations
     Critic-->>Pipes: Final synthesized response

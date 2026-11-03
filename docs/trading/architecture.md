@@ -1,12 +1,18 @@
-# Paper Trading Sandbox — Architecture
+# Trading Architecture — Strategist / Executor Split
+
+> **Status:** the shipped engine is event-driven: ticks arrive from a Telegram
+> command or the CLI (`trade tick`, `/trade`), and there is no autonomous
+> `tokio` loop. The paragraphs below describe the split that is actually in the
+> code; anything the older sandbox design assumed about a permanent loop is
+> marked as design.
 
 ## Design Philosophy
 
 The system follows a **Strategist–Executor separation** pattern:
 
-- **AI (Strategist):** Wakes up periodically (every 4–12h). Analyzes market data, reviews past decisions, and submits *algorithmic triggers* to the Execution Engine. The AI never executes trades directly — it only sets conditions.
-- **Execution Engine (Algorithm):** Runs continuously (every 5 min tick). Evaluates triggers against live consensus prices. Executes virtual trades instantly when conditions are met. Enforces all risk rules.
-- **Risk Manager (Hardcoded):** Sits between the Engine and the virtual portfolio. Vetoes any action that violates safety rules. The AI has zero access to this layer.
+- **AI (Strategist):** Analyses market data and proposes *algorithmic triggers* when invoked. The AI never executes trades directly — it only sets conditions.
+- **Execution Engine (Algorithm):** A deterministic function of `(config, market tick, portfolio state)`. It evaluates triggers against consensus prices and enforces every risk rule when it is called.
+- **Risk Manager (Hardcoded):** Operator constraints and the no-loss invariant sit between the Engine and the portfolio. The AI has no way to bypass them: a blocked action is simply returned as a veto with a reason.
 
 This architecture prevents AI hallucinations from causing financial damage, while still allowing the AI to learn and improve its strategy over time.
 
@@ -26,17 +32,17 @@ graph TD
         EXPORT[Log Export]
     end
 
-    subgraph "AI Brain — Periodic Strategist"
-        AI[AI Strategist<br/>Wakes every 4-12h]
-        MOE[MoE Pipeline<br/>2x Generator → Critic]
-        DEBATE[Adversarial Debate<br/>Challenger → Defender → Arbiter]
+    subgraph "Strategist — design targets"
+        AI[AI Strategist<br/>invoked, not scheduled]
+        MOE[MoE Pipeline<br/>2x Generator -> Critic]
+        DEBATE[Adversarial Debate<br/>Challenger -> Defender -> Arbiter]
         PROOF[Decision Proof<br/>Evidence Chain]
-        TOOLS[AI Toolset<br/>11 Function Calls]
+        TOOLS[AI Toolset<br/>function calls]
         MEMORY[Persistent Memos<br/>& Strategy]
     end
 
-    subgraph "Execution Engine — Continuous Loop"
-        ENGINE[Execution Engine<br/>Tokio interval 5min]
+    subgraph "Execution Engine — Event-Driven"
+        ENGINE[Execution Engine<br/>trade tick / /trade]     
         TRIGGERS[Trigger Evaluator<br/>Price/Time/Composite]
         CONSENSUS[Consensus Price<br/>Multi-provider median]
         EXEC[Trade Executor<br/>Virtual orders]
@@ -93,60 +99,60 @@ graph TD
 
 ## Component Breakdown
 
-### 1. AI Brain (`src/trading/ai_brain.rs`)
+### 1. Strategist surface (`src/trading/advisor.rs`, `analyze.rs`, `debate.rs`, `tuner.rs`)
 
-The strategist loop runs on a configurable interval (default: 6 hours). Each cycle:
-
-1. **Wake:** Triggered by timer OR by trade execution event
-2. **Gather Context:** Calls `read_market_snapshot`, `get_portfolio_state`, `list_active_triggers`, `read_memos`, `get_macro_context`
-3. **Think:** Runs through MoE pipeline (2 Generators → 1 Critic)
-4. **Act:** Outputs structured JSON with actions: `set_trigger`, `cancel_trigger`, `write_memo`
-5. **Journal:** Full reasoning chain saved to `TradingJournal`
-6. **Sleep:** Until next cycle
+The strategist is invoked, not scheduled: `trade task advise`, `trade
+recommend …`, `trade analyze` and `trade tune` gather the market snapshot and
+the portfolio state, build a prompt, and return structured advice. The model
+never writes to the ledger directly — the result is stored as a recommendation
+or a learning note for the operator.
 
 ### 2. Execution Engine (`src/trading/engine.rs`)
 
-A background `tokio::spawn` task with a 5-minute interval:
+A deterministic object, not a background task. `TradingEngine::new(config)`
+builds it from a stored `engine_configs` row, then each call to `plan_buy` /
+`plan_sell` takes a `MarketTick` plus the current lots and returns a
+`Decision<BuyPlan|SellPlan>`. Applying a plan is a separate, explicit step
+(`execute_buy` / `execute_sell`), which is what makes simulation and live modes
+the same code path.
 
-- Fetches consensus prices for all tracked assets
-- Evaluates every `ActiveTrigger` against current prices
-- On condition match → routes through Risk Manager → executes virtual trade
-- Updates virtual portfolio in RAM + persists to SQLite
-- Sends wake-up signal to AI Brain
+- Evaluates the tick against operator constraints, the ATH guard and the trend filter
+- Applies the no-loss invariant to every exit
+- Persists fills to `trade_executions` and updates the `trade_lots` ledger
+- Returns a veto reason instead of silently skipping
 
-### 3. Risk Manager (`src/trading/risk.rs`)
+### 3. Risk layer (`src/trading/store/types.rs`, `engine.rs`)
 
-A pure function that takes a proposed trade and returns `Approved` or `Vetoed(reason)`:
+Risk is data + invariant, not a separate service:
 
-- Stateless — no internal memory, only rules
-- Called synchronously before every trade execution
-- Vetoes are logged with full context for later analysis
-- Some rules use portfolio state (passed as argument), not mutable
+- `operator_constraints` rows (ceiling / floor / drawdown step / pause flags) are loaded before each evaluation
+- The no-loss invariant is a pure function of cost basis, amount, target price and fee
+- Blocked actions return a typed reason that the CLI and Telegram render verbatim
+- Some rules depend on portfolio state (drawdown from recent high, run-up from recent low) and are evaluated per tick
 
-### 4. Trigger System (`src/trading/triggers.rs`)
+### 4. Strategy layer (`src/trading/strategies.rs`, `regime.rs`)
 
-Triggers are algorithmic conditions set by the AI:
+Instead of AI-authored triggers, the module uses versioned **strategy profiles**
+and a regime classifier:
 
-| Condition | Description |
+| Concept | Description |
 |---|---|
-| `PriceBelow` | Execute when price drops to target |
-| `PriceAbove` | Execute when price rises to target |
-| `TrailingStop` | Activate after X% profit, trail by Y% step |
-| `TakeProfit` | Staged exit: sell 50% at +10%, 50% at +20% |
-| `StopLoss` | Hard floor: sell all if price drops to X |
-| `TimeDecay` | Auto-cancel if not triggered within N hours |
+| `StrategyProfile` | Named engine config + default constraints, builtin / trained / manual |
+| `trade regime` | Classifies the market and selects the profile that historically fits it |
+| `trade rule` | Operator overrides, always outranking the profile |
+| Tranches | Dip-tranche sizing derived from the profile's drop thresholds |
 
 ### 5. Data Flow
 
 ```
-AI Cycle:
-  Read State → Think → Set Triggers → Journal
+Advisor / CLI:
+  Read state -> evaluate -> recommendation (PENDING) -> operator executes -> reconcile
 
-Engine Tick:
-  Fetch Prices → Eval Triggers → Risk Check → Execute → Update State
+Engine tick:
+  MarketTick -> constraints -> plan -> invariant check -> execute -> ledger
 
-User Interaction:
-  Telegram → Command Handler → Read/Write State → Response
+User interaction:
+  Telegram -> handler -> engine / advisor -> ledger + response
 ```
 
 ---

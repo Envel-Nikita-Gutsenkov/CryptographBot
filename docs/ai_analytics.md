@@ -4,7 +4,7 @@ Cryptograph uses a highly advanced, multi-agent AI architecture to provide deep 
 
 ## Mixture of Experts (MoE) & Dual-Agent Validation
 
-To ensure the highest quality of analysis and entirely eliminate "hallucinations" or contradictory logic, Cryptograph does not rely on a single LLM pass. Instead, it utilizes a **Generator-Critic Pipeline**:
+To reduce hallucinations and contradictory logic, Cryptograph does not rely on a single LLM pass. Instead, it uses a **Generator-Critic Pipeline**:
 
 1. **Writer (Generator)**: The primary model drafts the initial analysis based on raw market data and news.
 2. **Judge (Critic)**: A secondary model reviews the draft. It actively searches for factual errors, contradictions, mathematical mistakes, or overly emotional/vague claims.
@@ -70,6 +70,6 @@ Nvidia, Cohere, Cloudflare, Hugging Face, OpenRouter (free tier)**, with a
 paid **DeepSeek** model as a budget-capped last resort.
 To bypass rate limits and outages, it uses a **Fallback Pool System**:
 - If a primary model hits a `429 Too Many Requests` or `503 Service Unavailable`, the pipeline automatically falls back to alternative providers in the pool.
-- **Model Segment Routing**: High-volume recurring tasks (like news digestion) prioritize cost-efficient models (e.g., Qwen/Llama) and exclude Gemini models from the primary list. Gemini (e.g., `gemini-2.5-flash`) is reserved strictly as the final fallback layer. This balances speed, limits, and cost effectively.
-- **Interactive Deep Dives**: Multi-modal workflows (such as `/ai <SYMBOL>` which processes price charts) utilize visual-capable models (e.g. Gemini 2.5) to analyze support, resistance, and market structures directly.
+- **Role-based routing**: high-volume recurring tasks (news digestion, watcher) draw from the cheap `news`/`watcher` roles, while deep dives use `main`/`critic`. Roles are assigned by `models rank` from measured quality, not hardcoded per vendor.
+- **Text-only**: no workflow sends a chart or image to a model. `/ai` analyses a pre-computed text snapshot (quotes, indicators, news, portfolio context) — see [ai_payloads.md](ai_payloads.md).
 

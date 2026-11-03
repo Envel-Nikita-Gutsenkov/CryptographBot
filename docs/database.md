@@ -16,8 +16,10 @@ alerts, purchases, memos, goals, and settings in RAM while the bot is running.
 ### Why In-Memory?
 - **Speed**: evaluating hundreds of price alerts every minute across thousands
   of assets is instant because there are no disk I/O bottlenecks.
-- **Ephemeral session key**: a random 32-byte session key is generated per
-  process (no `MASTER_KEY` env var anymore); it is zeroized on drop.
+- **Ephemeral session key**: a random 32-byte key is generated per process in
+  `Config::from_env` (`src/config.rs`, `Zeroizing<[u8;32]>` — no `MASTER_KEY` env
+  var anymore); it is zeroized on drop. Encryption helpers live in
+  `src/security/cipher.rs`.
 
 ### Persistence
 - Every mutation serializes the portfolio into versioned JSON
@@ -104,7 +106,7 @@ underperformance detection and role assignment.
 
 ---
 
-## 4. Trading Module Schema (`src/trading/store.rs`)
+## 4. Trading Module Schema (`src/trading/store/`)
 
 The trading module keeps a **separate SQLite file per engine mode**
 (`trading_sim.db` for simulation, `trading_live.db` for live) with an identical
@@ -125,6 +127,11 @@ schema, so paper trading is a 1:1 rehearsal of live behavior.
 | `trade_recommendations` | Commander-mode advice lifecycle: PENDING → EXECUTED / REJECTED / EXPIRED, with guardrails re-checked at the actual fill price |
 | `trade_tasks` | Standing trade tasks (advisor mode): monthly budget, alerts/day cap, tranches, margin, execution mode |
 | `exchange_fees` | Per-mode exchange fee config (buy/sell %) used by the no-loss invariant and advisor sizing |
+| `regime_profiles` | Per-symbol, per-regime winning engine config learned from history, consumed by `trade regime` and `strategy regimes` |
+| `seasonality_stats` | Per-symbol calendar-month average return + sample count, used as training/analysis context |
+| `experiments` | Recorded engine-config comparisons over rolling windows: score, avg PnL, drawdown, win rate, profitable ratio, cold-lot ratio, windows beating buy-and-hold |
+| `task_sim_runs` | Recorded `trade task sim|grid` replays: window, budget, fees, trades, realized/unrealized PnL, win rate, score |
+| `fake_trades` | Synthetic fills written by task simulation and scenario replays; kept separate from `trade_executions` so they never pollute the real ledger |
 
 ### Key invariants (enforced in `src/trading/engine.rs`)
 - **No-loss exit**: a lot may only be sold when

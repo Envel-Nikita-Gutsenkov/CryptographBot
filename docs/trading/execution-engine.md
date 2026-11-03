@@ -1,74 +1,52 @@
 # Execution Engine — Algorithmic Trade Executor
 
-The Execution Engine is a **deterministic Rust algorithm** that runs continuously.
-It does not think — it only evaluates conditions and executes trades.
+> **Status:** this page is a design sketch of the trigger-based sandbox. The
+> shipped engine is **event-driven and deterministic**: it has no `tokio` loop
+> and no `ActiveTrigger` table. A tick is produced by `trade tick` or `/trade`,
+> and `TradingEngine::plan_buy` / `plan_sell` return a plan that is applied
+> explicitly. The structs and function names below are therefore illustrative,
+> not a map of the current source. For the shipped behaviour see
+> [`architecture.md`](architecture.md) and [`../commands.md`](../commands.md).
+
+The Execution Engine is a **deterministic algorithm**: the same config, tick and
+ledger always produce the same decision.
 
 ---
 
-## Engine Lifecycle
+## Engine Lifecycle (shipped)
+
+```text
+trade tick SYMBOL PRICE
+  -> load EngineConfig + operator constraints
+  -> TradingEngine::observe(MarketTick)
+  -> plan_buy / plan_sell  (returns Decision<Plan>)
+  -> apply plan            (execute_buy / execute_sell)
+  -> persist to trade_lots + trade_executions
+```
+
+There is no autonomous polling loop: the cadence comes from whatever invokes
+the command. Anything below that assumes a `run_execution_engine` interval is a
+design target, not shipped behaviour.
+
+---
+
+## Design Sketch (not shipped)
+
+The original sandbox design used a background loop and a trigger table:
 
 ```rust
+// DESIGN TARGET — not present in src/trading
 pub async fn run_execution_engine(
     sqlite: Arc<SqliteStore>,
     store: Arc<Store>,
     crypto: Arc<CryptoClient>,
     ai_wake_tx: tokio::sync::mpsc::UnboundedSender<()>,
 ) {
-    let mut interval = tokio::time::interval(Duration::from_secs(300)); // 5 min
+    let mut interval = tokio::time::interval(Duration::from_secs(300));
 
     loop {
         interval.tick().await;
-
-        // 1. Fetch consensus prices for all tracked assets
-        let symbols = get_tracked_symbols(&store);
-        let prices = fetch_consensus_prices(&crypto, &symbols).await;
-
-        // 2. Load active triggers
-        let triggers = store.read().active_triggers.clone();
-
-        // 3. Evaluate each trigger
-        for trigger in triggers {
-            if trigger.status != TriggerStatus::Active {
-                continue;
-            }
-
-            // Check expiry
-            if let Some(expires) = trigger.expires_at {
-                if Utc::now() > expires {
-                    cancel_trigger(&store, trigger.id, "Expired").await;
-                    continue;
-                }
-            }
-
-            // Get current price
-            let current_price = match prices.get(&trigger.symbol) {
-                Some(p) => *p,
-                None => continue, // skip if price unavailable
-            };
-
-            // Evaluate condition
-            let should_fire = evaluate_condition(&trigger.condition, current_price);
-
-            if should_fire {
-                // Route through risk manager
-                let portfolio = store.read().virtual_portfolio.clone();
-                let risk_result = check_risk_rules(&trigger, &portfolio, current_price);
-
-                match risk_result {
-                    RiskResult::Approved => {
-                        execute_virtual_trade(&store, &sqlite, &trigger, current_price).await;
-                        // Wake up AI
-                        let _ = ai_wake_tx.send(());
-                    }
-                    RiskResult::Vetoed { rule, reason } => {
-                        mark_trigger_vetoed(&store, &sqlite, trigger.id, &rule, &reason).await;
-                    }
-                }
-            }
-
-            // Increment tick counter
-            increment_trigger_ticks(&store, trigger.id).await;
-        }
+        // fetch consensus prices, evaluate triggers, route through risk rules…
     }
 }
 ```
@@ -236,38 +214,34 @@ async fn fetch_consensus_prices(
 
 ---
 
-## Engine Configuration
+## Engine Configuration (shipped)
+
+The real `EngineConfig` (`src/trading/engine.rs`) is serialized into
+`engine_configs`, so every run is reproducible and auditable:
 
 ```rust
 pub struct EngineConfig {
-    /// Tick interval in seconds (default: 300 = 5 minutes).
-    pub tick_interval_secs: u64,
-
-    /// Maximum concurrent triggers to evaluate per tick.
-    pub max_triggers_per_tick: usize,
-
-    /// Minimum consensus confidence to use a price (0.0–1.0).
-    pub min_consensus_confidence: f64,
-
-    /// If a price source hasn't updated in N seconds, skip it.
-    pub price_staleness_secs: u64,
-
-    /// Auto-cancel triggers older than N hours (dead man's switch).
-    pub trigger_max_age_hours: f64,
-}
-
-impl Default for EngineConfig {
-    fn default() -> Self {
-        Self {
-            tick_interval_secs: 300,
-            max_triggers_per_tick: 50,
-            min_consensus_confidence: 0.33,
-            price_staleness_secs: 120,
-            trigger_max_age_hours: 168.0, // 7 days
-        }
-    }
+    pub min_profit_margin: f64,
+    pub taker_fee_rate: f64,
+    pub tranche_count: u32,
+    pub min_tranche_fraction: f64,
+    pub max_spread_pct: f64,
+    pub crash_drop_pct: f64,
+    pub crash_window_secs: i64,
+    pub ath_lookback_days: i64,          // ATH guard lookback, 0 = off
+    pub max_buy_from_high_pct: f64,      // skip buys within X% of the high
+    pub min_dip_from_high_pct: f64,      // conviction mode, 0 = off
+    pub max_runup_pct: f64,              // run-up guard, 0 = off
+    pub trend_filter: TrendFilter,       // Off / Sma50 / GoldenCross
+    pub trend_exit: bool,
+    pub take_profit_pct: f64,
+    pub trail_pct: f64,                  // trailing stop, 0 = off
+    pub profit_mode: ProfitMode,         // Reinvest / Separate / Partial
 }
 ```
+
+The design sketch used a `tick_interval_secs` field. It is **not** part of the
+shipped struct: ticks are event-driven, so there is no interval to configure.
 
 ---
 

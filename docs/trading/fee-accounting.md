@@ -1,4 +1,9 @@
-# Fee Accounting & Real P&L Simulation
+# Fee Accounting & Real P&L Simulation (design draft)
+
+> **Status:** partially shipped. `exchange_fees` stores per-mode buy/sell
+> percentages, and those fees are applied by the no-loss invariant and advisor
+> sizing (`trade fee --buy P --sell P`). Slippage and gas modelling below are a
+> design target.
 
 To make paper trading realistic, every virtual trade simulates the costs that
 would occur in a real trading environment.

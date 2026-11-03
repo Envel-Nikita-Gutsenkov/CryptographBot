@@ -1,6 +1,11 @@
-# AI Toolset — Function Calling API
+# AI Toolset — Function Calling API (design draft)
 
-The AI Strategist interacts with the trading system exclusively through a
+> **Status:** design draft. The shipped strategist does not expose a function-
+> calling toolset; it produces structured advice through the prompt builders in
+> `src/trading/advisor.rs` and `analyze.rs`, stored as recommendations. The tools
+> below are a proposal.
+
+The AI Strategist was designed to interact with the trading system exclusively through a
 structured JSON function-calling interface. It cannot execute trades directly.
 
 ---

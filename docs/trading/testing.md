@@ -1,4 +1,8 @@
-# Testing Framework — Paper Trading Sandbox
+# Testing Framework — Paper Trading Sandbox (design draft)
+
+> **Status:** partially shipped. Unit tests, `scenarios/*.json` with `--fast`,
+> historical backtests and `task sim|grid` replays exist. Live shadow mode and
+> fuzzing below are a design target.
 
 The testing strategy operates at four levels, from fully synthetic to fully live.
 
@@ -29,16 +33,16 @@ Every pure function is tested in isolation.
 
 ### Test Categories
 
-| Module | What's Tested | File |
+| Module | What's Tested | Where the tests live |
 |---|---|---|
-| `trading/risk.rs` | All 12 risk rules: approve, veto, edge cases | `tests/trading/risk_tests.rs` |
-| `trading/triggers.rs` | Trigger evaluation: PriceBelow, PriceAbove, TrailingStop, TakeProfit, StopLoss, TimeDecay | `tests/trading/trigger_tests.rs` |
-| `trading/fees.rs` | Fee calculation, slippage estimation, break-even math | `tests/trading/fee_tests.rs` |
-| `trading/engine.rs` | Execution flow with mock prices | `tests/trading/engine_tests.rs` |
-| `trading/ai_brain.rs` | Tool call parsing, JSON output validation | `tests/trading/ai_brain_tests.rs` |
-| `trading/risk_params.rs` | Parameter validation, safe ranges, hazard detection | `tests/trading/risk_params_tests.rs` |
-| `crypto/consensus.rs` | Existing + trading-specific outlier scenarios | (existing) |
-| `db/sqlite.rs` | Virtual trade CRUD, journal persistence | `tests/trading/db_tests.rs` |
+| `trading/engine.rs` | Buy/sell planning, no-loss invariant, ATH and run-up guards, tranche sizing | `mod tests` in the same file |
+| `trading/strategies.rs` | Profile validation, candidate grids, apply/delete behaviour | `mod tests` in the same file |
+| `trading/advisor.rs` | Advisor sizing with fees, guardrails, recommendation lifecycle | `mod tests` in the same file |
+| `trading/backtest.rs` | Window replay, multi-source history fallback | `mod tests` + `tests/history_fallback_test.rs` |
+| `trading/store/` | Schema migration, CRUD for lots / allocations / configs / tasks | `src/trading/store/tests.rs` |
+| `trading/debate.rs` | Verdict parsing and prompt construction | `mod tests` in the same file |
+| `trading/regime.rs`, `experiment.rs`, `sim` code | Regime classification, experiment scoring, task replays | `mod tests` in each file |
+| `crypto/consensus.rs` | Quote consensus and outlier rejection | `tests/consensus_tests.rs`, `tests/new_providers_test.rs` |
 
 ### Example: Risk Rule Unit Test
 
@@ -484,13 +488,12 @@ jobs:
 
 | Module | Target Coverage | Critical Paths |
 |---|---|---|
-| `trading/risk.rs` | 100% | Every rule + every edge case |
-| `trading/triggers.rs` | 100% | Every condition type + boundary values |
-| `trading/fees.rs` | 95% | Fee math, slippage model, break-even |
-| `trading/engine.rs` | 90% | Full execution flow, error paths |
-| `trading/ai_brain.rs` | 85% | Tool parsing, prompt construction |
-| `trading/risk_params.rs` | 100% | Every parameter range boundary + hazard |
-| `trading/moe_validator.rs` | 80% | Critic logic, debate flow |
+| `trading/engine.rs` | 100% | No-loss invariant, every guard, boundary prices |
+| `trading/strategies.rs` | 95% | Profile validation, grid generation |
+| `trading/advisor.rs` | 90% | Sizing, fees, recommendation transitions |
+| `trading/backtest.rs` | 90% | Window replay, history fallback, empty windows |
+| `trading/store/` | 95% | Migrations, CRUD, transaction integrity |
+| `trading/regime.rs` / `experiment.rs` | 85% | Classification thresholds, score aggregation |
 
 ---
 

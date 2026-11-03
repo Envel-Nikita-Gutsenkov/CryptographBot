@@ -4,24 +4,27 @@
 
 **A self-hosted crypto intelligence bot for Telegram — portfolio, market data and AI analysis in one place.**
 
-[![Rust](https://img.shields.io/badge/Rust-2021-f74c00?style=flat-square&logo=rust&logoColor=white)](#)
-[![License](https://img.shields.io/badge/License-AGPL--3.0-blue?style=flat-square)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-430%2B-brightgreen?style=flat-square)](#)
-[![Data](https://img.shields.io/badge/price%20sources-16-informational?style=flat-square)](#market-data)
-[![Math](https://img.shields.io/badge/analytics-deterministic%20%C2%B7%20AI--free-success?style=flat-square)](#the-engine-deterministic-math-no-model-calls)
+<p>
+  <a href="#the-engine-deterministic-math-no-model-calls"><img src="https://img.shields.io/badge/Architecture-Rust-f74c00?style=for-the-badge&logo=rust&logoColor=white" alt="Rust"></a>
+  <a href="#the-engine-deterministic-math-no-model-calls"><img src="https://img.shields.io/badge/Engine-deterministic%20math-2ea44f?style=for-the-badge" alt="Deterministic engine"></a>
+  <a href="#market-data"><img src="https://img.shields.io/badge/Data-16%20quote%20sources-4b32c3?style=for-the-badge" alt="16 quote sources"></a>
+  <a href="#highlights"><img src="https://img.shields.io/badge/Tests-437%2B-brightgreen?style=for-the-badge" alt="Tests"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPLv3-blue?style=for-the-badge" alt="License"></a>
+</p>
 
 </div>
 
 > [!WARNING]
 > **Personal project — provided as-is.**
 >
-> Cryptograph is a hobby project written for personal use. It is not maintained
-> as a product: no support, no guarantees, no liability. If you deploy it, you
-> are responsible for your keys, your server and your money.
+> Cryptograph is a personal hobby project, published as a demo and portfolio
+> piece. It is not a product: no support, no guarantees, no liability. If you
+> deploy it, you are responsible for your keys, your server and your money.
 >
-> Cryptograph is **not financial advice**. It is an assistant: language models
-> hallucinate, providers go stale, and models make mistakes. Never invest based
-> on a bot's output.
+> The output can be wrong. The deterministic models are estimates with printed
+> error bars, quote providers can go stale, and language models can invent
+> numbers. Treat the bot as an assistant that shows its work, not as an
+> authority.
 
 ---
 
@@ -111,10 +114,10 @@ used only to narrate the result.
 
 | Layer | What it produces | Method |
 |---|---|---|
-| Volatility | daily σ | 20-close sample stddev blended 50/50 with a RiskMetrics EWMA (λ = 0.94) |
-| Drift | daily log μ | weighted 20/50/200-day log returns, regime-adjusted, RSI-clamped |
+| Volatility | daily sigma | 20-close sample stddev blended 50/50 with a RiskMetrics EWMA (lambda = 0.94) |
+| Drift | daily log mu | weighted 20/50/200-day log returns, regime-adjusted, RSI-clamped |
 | Regime | BULL / BEAR / SIDEWAYS / DIP / EUPHORIA | SMA20/50/200 structure, drawdown depth, RSI, ATH distance |
-| Cone | price target + ~68% band per horizon | Student-t quantiles (ν = 4) over a drift-error-inflated σ |
+| Cone | price target + ~68% band per horizon | Student-t quantiles (nu = 4) over a drift-error-inflated sigma |
 | Touch probability | P(level hit at least once) | closed-form first-passage law for Brownian motion with drift |
 | Accumulation ladder | limit prices, cash weights, new average | left-tail quantiles + Martingale allocation + cost-basis algebra |
 | Capitulation | 0–100 "buy now" score | Z-score, RSI, volume spike, lower wick, futures flush |
@@ -124,19 +127,20 @@ used only to narrate the result.
 
 ### Volatility
 
-Daily log returns `r_t = ln(P_t / P_{t−1})`. The estimate blends a slow sample
+Daily log returns `r_t = ln(P_t / P_{t-1})`. The estimate blends a slow sample
 stddev with a responsive EWMA, because the sample lags a regime change while the
 EWMA overreacts to a single spike:
 
-```
-σ²_EWMA,t = λ · σ²_EWMA,t−1 + (1 − λ) · r²_t          λ = 0.94
-σ_t       = 0.5 · std₂₀(r) + 0.5 · √σ²_EWMA,t          floor 0.3%/day
+```text
+var_ewma,t = lambda * var_ewma,t-1 + (1 - lambda) * r_t^2      lambda = 0.94
+sigma_t    = 0.5 * stddev_20(r) + 0.5 * sqrt(var_ewma,t)       floor 0.3%/day
 ```
 
 ### Drift
 
-```
-μ = (0.5·r₂₀ + 0.3·r₅₀ + 0.2·r₂₀₀) / Σw      w renormalised over available windows
+```text
+mu = (0.5 * r_20 + 0.3 * r_50 + 0.2 * r_200) / sum(w)
+     w renormalised over the windows that are actually available
 ```
 
 Then a regime term and an RSI extreme term are applied, and the result is
@@ -157,21 +161,22 @@ moving the model.
 
 ### The cone
 
-Two independent uncertainties are added in quadrature: diffusion (`σ·√h`) and
-the error of the drift estimate itself (`(σ/√N)·h`, which grows linearly, not as
-a square root). This is the term a plain random-walk cone ignores — and the
-reason 90-day coverage used to sit near 50% instead of 68%.
+Two independent uncertainties are added in quadrature: diffusion
+(`sigma * sqrt(h)`) and the error of the drift estimate itself
+(`(sigma / sqrt(N)) * h`, which grows linearly, not as a square root). This is
+the term a plain random-walk cone ignores — and the reason 90-day coverage used
+to sit near 50% instead of 68%.
 
-```
-σ_h   = √( σ²·h + (σ²/N)·h² )              N = 200
-μ_h   = μ · scale / √(1 + h / decay)       momentum decays with the horizon
-target = P₀ · exp(μ_h · h)                 cumulative drift clamped to ±35%
-band   = target · exp(±q · σ_h)            q = t⁻¹(0.8413; ν = 4) ≈ 1.142
-P(up)  = 1 − T_ν(−μ_h·h / σ_h)
+```text
+sigma_h = sqrt( sigma^2 * h + (sigma^2 / N) * h^2 )       N = 200
+mu_h    = mu * scale / sqrt(1 + h / decay)                momentum decays with horizon
+target  = P0 * exp(mu_h * h)                              cumulative drift clamped to +/-35%
+band    = target * exp(+/- q * sigma_h)                   q = inv_t(0.8413, nu = 4) ~ 1.142
+P(up)   = 1 - T_nu(-mu_h * h / sigma_h)
 ```
 
-The Student-t quantile replaces the Gaussian 1σ because crypto returns are
-fat-tailed: at ν = 4 the band is ~14% wider, which is what turns an
+The Student-t quantile replaces the Gaussian 1-sigma band because crypto returns
+are fat-tailed: at nu = 4 the band is ~14% wider, which is what turns an
 under-covered long horizon into an honest one.
 
 ### Touch probability
@@ -179,21 +184,22 @@ under-covered long horizon into an honest one.
 For a level `L` below spot, the chance of touching it at least once within `H`
 days follows the running-minimum law of Brownian motion with drift:
 
-```
-a = ln(L / P₀)
-P_touch(H) = Φ((a − μH)/(σ√H)) + exp(2μa/σ²) · Φ((a + μH)/(σ√H))
+```text
+a = ln(L / P0)
+P_touch(H) = Phi((a - mu*H) / (sigma*sqrt(H)))
+           + exp(2*mu*a / sigma^2) * Phi((a + mu*H) / (sigma*sqrt(H)))
 ```
 
-The second term is evaluated in log space — with small σ and negative drift it
-otherwise overflows to `inf` while the CDF underflows to zero.
+The second term is evaluated in log space: with a small sigma and a negative
+drift it otherwise overflows to `inf` while the CDF underflows to zero.
 
 ### Accumulation ladder
 
-```
-Z₁₄ = ln(P / anchor) / (σ · √14)                anchor = 14-day rolling high
-limitₖ = P₀ · exp(μ·30 + tₖ · σ₃₀)              tₖ = t⁻¹(qₖ; ν = 4)
-qₖ = 12% / 4% / 1%                              cash weights 20% / 35% / 45%
-new_avg = (pos·avg + spend/limit) / (pos + spend/limit)
+```text
+Z14     = ln(P / anchor) / (sigma * sqrt(14))       anchor = 14-day rolling high
+limit_k = P0 * exp(mu * 30 + t_k * sigma_30)        t_k = inv_t(q_k, nu = 4)
+q_k     = 12% / 4% / 1%                             cash weights 20% / 35% / 45%
+new_avg = (pos * avg + spend / limit) / (pos + spend / limit)
 ```
 
 The anchor is a rolling high rather than the previous close, so a slow bleed does
@@ -204,20 +210,20 @@ Capitulation score (0–100, normalised over the signals that are available):
 
 | Signal | Points |
 |---|---|
-| `Z₁₄ ≤ −2.0` | 40 |
+| `Z14 <= -2.0` | 40 |
 | RSI14 < 25 | 25 |
-| volume > SMA20 + 2·stddev | 20 |
+| volume > SMA20 + 2 * stddev | 20 |
 | lower wick > 50% of range | 15 |
 | futures longs flushed | 15 |
 
 ### Bottom radar
 
-```
-score = 55 · (capitulation / max)
-      + 15 · clip((40 − RSI) / 20)
-      + 15 · clip((−1 − Z₁₄) / 1.5)
-      + 5 · volume spike + 5 · long wick + 5 · OI flush
-      − discount when a deeper bucket is still likely to print
+```text
+score = 55 * (capitulation / max)
+      + 15 * clip((40 - RSI) / 20)
+      + 15 * clip((-1 - Z14) / 1.5)
+      + 5 * volume spike + 5 * long wick + 5 * OI flush
+      - discount when a deeper bucket is still likely to print
 ```
 
 ### Futures tape
@@ -226,10 +232,10 @@ The derivatives read is a truth table, not a model output:
 
 | Price 24h | Open interest | Read |
 |---|---|---|
-| ≤ −1% | ≤ −3% | longs flushed — selling is exhausting |
-| ≤ −1% | ≥ +3% | shorts piling — the fall can continue |
-| ≥ +1% | ≥ +3% | trend up |
-| any | any, funding ≤ −0.015% | squeeze risk |
+| <= -1% | <= -3% | longs flushed — selling is exhausting |
+| <= -1% | >= +3% | shorts piling — the fall can continue |
+| >= +1% | >= +3% | trend up |
+| any | any, funding <= -0.015% | squeeze risk |
 
 ### Calibration and honesty
 
@@ -239,8 +245,9 @@ search over the symbol's own history (8 × 4 × 6 = 192 combinations, 400-day
 window, stepped origins, no look-ahead). The objective penalises a dishonest
 cone as much as a wrong point estimate:
 
-```
-score = MAPE + 0.5·miss_rate + 1.0·|coverage − 0.68| + 2.0·mean_h|coverage_h − 0.68|
+```text
+score = MAPE + 0.5 * miss_rate + 1.0 * |coverage - 0.68|
+      + 2.0 * mean_h |coverage_h - 0.68|
 ```
 
 The last term is per horizon, so five well-covered short horizons cannot hide an
@@ -478,6 +485,7 @@ cryptograph wipe-knowledge                 # reset caches, keep users/goals/memo
 | [Architecture](docs/architecture.md) | Components, data flow, worker topology |
 | [System guide](docs/system_guide.md) | Database schema and algorithmic workflows |
 | [AI pipeline](docs/ai_pipeline_guide.md) | Model pools, routing, budgets, failure handling |
+| [AI payloads](docs/ai_payloads.md) | Exactly what is sent to models: prompt blocks and wire format |
 | [AI analytics](docs/ai_analytics.md) | MoE pipeline and scoring internals |
 | [System brain](docs/system_brain_guide.md) | Scheduler and worker supervision |
 | [Database](docs/database.md) | Schema reference |

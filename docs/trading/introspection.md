@@ -1,4 +1,9 @@
-# AI Introspection & Transparency
+# AI Introspection & Transparency (design draft)
+
+> **Status:** partially shipped. `trade analyze` shows the market state and the
+> engine verdict, `trade regime` shows the selected config, and `trade
+> backtests|lessons` expose recorded evidence. The live brain view and decision
+> proofs below are a design target.
 
 > **Role:** System Architect  
 > **Principle:** The AI is not a black box. Every thought, every tool call,

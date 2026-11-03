@@ -1,4 +1,10 @@
-# Data Models — Paper Trading Sandbox
+# Data Models — Paper Trading Sandbox (design draft)
+
+> **Status:** design draft, not the shipped schema. The engine ships specific-lot
+> accounting (`trade_lots`, `strategy_allocations`, `operator_constraints`,
+> `engine_configs`, …) — see [database.md](../database.md) §4. The
+> `VirtualPortfolio` / `ActiveTrigger` / `TradingJournal` shapes below were the
+> original sandbox proposal and are kept for reference only.
 
 All models are serialized with `serde` and stored both in-memory (RAM Store) and persisted to SQLite.
 

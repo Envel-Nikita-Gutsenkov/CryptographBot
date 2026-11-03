@@ -1,4 +1,8 @@
-# Agent Architecture — Multi-Step AI Thinking
+# Agent Architecture — Multi-Step AI Thinking (design draft)
+
+> **Status:** design draft. The shipped bot uses a bounded AI pipeline
+> (generators + critic, see [ai_pipeline_guide.md](../ai_pipeline_guide.md)), not
+> an autonomous 20-step agent with sub-agent delegation.
 
 > **Role:** System Architect  
 > **Core Idea:** The AI is not a single prompt→response. It's an **agent**

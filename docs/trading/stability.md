@@ -1,4 +1,9 @@
-# Stability, Fault Tolerance & Predictability
+# Stability, Fault Tolerance & Predictability (design draft)
+
+> **Status:** partially shipped. SQLite WAL, per-fill transactions, schema
+> self-migration and corruption recovery are in place. The predictability
+> contract below is partly aspirational; the shipped guarantees are listed at the
+> end of this page.
 
 > **Role:** System Architect  
 > **Principle:** The system must degrade gracefully, never corrupt data,
@@ -57,17 +62,15 @@ NORMAL       CRASH!        RESTART        RECOVERED
 ```
 
 On restart:
-1. SQLite WAL is replayed (automatic)
-2. Virtual portfolio is reloaded from `virtual_trades` table
-3. Active triggers are reloaded from `active_triggers` table
-4. The last AI cycle timestamp is checked — if > 2x normal interval,
-   the user is alerted: "Bot was offline for X hours. N triggers may have
-   been missed. Review active triggers."
-5. Execution Engine resumes from next tick
+1. SQLite WAL is replayed (automatic), then `PRAGMA integrity_check` runs
+2. The trading ledger is reloaded from `trade_lots`, `strategy_allocations` and `engine_configs`
+3. Operator constraints are reloaded from `operator_constraints`
+4. The engine is reconstructed lazily on the next `trade tick` / `/trade` call
+5. If the DB is corrupt it is renamed to `*.corrupt.<ts>` and a fresh file boots, so the bot always starts
 
-**What is lost on crash:** In-memory state since last SQLite write (at most
-5 minutes of engine ticks). This is acceptable — the next tick will re-evaluate
-all triggers against current prices.
+**What is lost on crash:** nothing that was already applied — every fill is written
+inside the same transaction as the lot update. State that only existed in a
+running process (an uncommitted plan) is simply re-derived on the next tick.
 
 ### 3. Graceful Degradation
 
@@ -177,7 +180,7 @@ guaranteed NOT to do, regardless of what it "thinks":
 | Never run AI cycle more than once per 30 min | Rate limiter |
 | Never execute a trigger older than 7 days | Dead man's switch |
 | Never trade an unapproved asset | Asset whitelist |
-| Never skip risk validation | All trades route through risk.rs |
+| Never skip risk validation | All trades route through `engine.rs` constraints and the no-loss invariant |
 
 ### Soft Boundaries (Enforced by AI Prompt)
 
@@ -269,17 +272,20 @@ The system makes these promises to the user:
 2. **You will always know why a trade happened.** Every trade links to a
    Decision Proof with full evidence chain.
 
-3. **You can stop everything with one command.** `/trade stop` cancels all
-   triggers immediately. No delay, no override by AI.
+3. **You can stop everything with one command.** `trade pause <alloc-id>`
+   suspends a capital pool and `trade rule <SYM> pause-buy` blocks entries
+   immediately. No AI override is possible.
 
 4. **The system will tell you when something is wrong.** Anomalies are detected
    and reported proactively — not discovered later in logs.
 
-5. **Your data survives crashes.** SQLite WAL + backup flow ensure no more
-   than 5 minutes of state loss on catastrophic failure.
+5. **Your data survives crashes.** SQLite WAL plus per-fill transactions mean a
+   committed trade is never half-written; the next tick rebuilds the in-memory
+   engine from the ledger.
 
 6. **The AI cannot go rogue.** Hard boundaries in code are stronger than any
    prompt instruction. The risk manager is immutable to AI.
 
-7. **You can verify everything.** `trade-verify` recalculates all state from
-   the immutable trade log. If numbers don't match, the system flags it.
+7. **You can verify everything.** `trade export --format csv|json` dumps the full
+   ledger and audit trail, and `trade backtest` replays real history through the
+   same engine code path.

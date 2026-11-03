@@ -1,4 +1,9 @@
-# Risk Management — Hardcoded Safety Rules
+# Risk Management — Hardcoded Safety Rules (design draft)
+
+> **Status:** partially shipped. `operator_constraints` (ceiling / floor /
+> drawdown / pause flags) and the no-loss invariant are enforced by
+> `src/trading/engine.rs`. The general veto-rule engine described below is a
+> design target.
 
 The Risk Manager is a **pure function layer** that the AI cannot access, modify,
 or override. Every trade proposal passes through these rules. A veto is final.

@@ -1,5 +1,10 @@
 r# Trading Strategies — Safe & Profitable Playbook
 
+> **Status:** partially shipped. The catalog (`trade strategies`,
+> `strategy apply|train|delete`) and builtin profiles exist in
+> `src/trading/strategies.rs`. The playbook below is analyst guidance, not a
+> description of code.
+
 > **Role:** Crypto Analyst & Strategy Architect  
 > **Principle:** Every strategy must have a verifiable edge, defined risk, and
 > a clear reason WHY it should work. No "AI magic" — only testable hypotheses.

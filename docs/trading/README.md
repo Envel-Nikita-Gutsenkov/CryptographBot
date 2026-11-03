@@ -38,9 +38,10 @@ and take profit only when the no-loss invariant is satisfied.
 | DEX quote + manual sign + fill reconciliation (`trade dex quote|sign|reconcile`) | ✅ implemented (needs wallet keys for live swap submission) |
 
 The canonical engineering plan is
-[`TRADING_MODULE_PLAN.md`](TRADING_MODULE_PLAN.md). The CLI is the 1:1 testing
-surface for every trading command; see the
-the repository test suite (`cargo test`) for verified behavior.
+[`TRADING_MODULE_PLAN.md`](TRADING_MODULE_PLAN.md) (kept as a historical design
+document). The CLI is the 1:1 testing surface for every trading command; the
+repository test suite (`cargo test`) is the source of truth for verified
+behaviour.
 
 ---
 
@@ -48,30 +49,36 @@ the repository test suite (`cargo test`) for verified behavior.
 
 | Document | Description | Status |
 |---|---|---|
-| [`TRADING_MODULE_PLAN.md`](TRADING_MODULE_PLAN.md) | Canonical engineering plan: architecture, schema, invariants, command matrix, backtesting, testing | ✅ current |
-| [`architecture.md`](architecture.md) | High-level system architecture, component diagram, data flow | ⏳ design |
-| [`data-models.md`](data-models.md) | All data structures: VirtualPortfolio, ActiveTrigger, VirtualTrade, TradingJournal | ⏳ design |
-| [`execution-engine.md`](execution-engine.md) | Rust algorithmic engine: trigger evaluation, trade execution, consensus pricing | ⏳ design |
-| [`risk-management.md`](risk-management.md) | Hardcoded risk rules + safe ranges + control levels + integrity verification + hazard detection | ⏳ design |
-| [`ai-tools.md`](ai-tools.md) | AI Function Calling API: all 11 tools available to the AI strategist | ⏳ design |
-| [`moe-pipeline.md`](moe-pipeline.md) | MoE double-checking + Adversarial Debate (AI vs AI battle) + Decision Proofs with evidence chain | ⏳ design |
-| [`fee-accounting.md`](fee-accounting.md) | Fee simulation, slippage modeling, gas estimation, real P&L calculation | ⏳ design |
+| [`TRADING_MODULE_PLAN.md`](TRADING_MODULE_PLAN.md) | Historical engineering plan (schema, invariants, command matrix, backtesting, testing) | 📜 historical |
+| [`architecture.md`](architecture.md) | Strategist–executor separation, component diagram, data flow | 🧩 partial — engine and risk layers shipped; the continuous sandbox loop is design |
+| [`data-models.md`](data-models.md) | Older `VirtualPortfolio` / `ActiveTrigger` / `TradingJournal` shapes | ⏳ design — the shipped schema is in [database.md](../database.md) §4 |
+| [`execution-engine.md`](execution-engine.md) | Tick evaluation, trade execution, consensus pricing | 🧩 shipped equivalent — event-driven ticks, no autonomous loop |
+| [`risk-management.md`](risk-management.md) | Veto rule engine, safe ranges, hazard detection | 🧩 partial — operator constraints and the no-loss invariant are shipped; the veto engine is design |
+| [`ai-tools.md`](ai-tools.md) | JSON function-calling toolset for the strategist | ⏳ design |
+| [`moe-pipeline.md`](moe-pipeline.md) | Double-checking, adversarial debate, decision proofs | 🧩 partial — sell-debate and critic exist; the full debate loop is design |
+| [`fee-accounting.md`](fee-accounting.md) | Fee/slippage simulation and real P&L | 🧩 partial — `exchange_fees` drives the invariant and advisor sizing; full simulation is design |
 | [`user-commands.md`](user-commands.md) | Telegram `/trade` + `/tradetask` mirrors, CLI 1:1 surface | ✅ implemented |
-| [`dex-execution.md`](dex-execution.md) | Jupiter/0x quotes, manual sign, fill reconciliation, Belarus P2P on-ramp | ✅ implemented |
+| [`dex-execution.md`](dex-execution.md) | Jupiter/0x quotes, manual sign, fill reconciliation, Belarus P2P on-ramp | ✅ implemented (live swaps need wallet keys) |
 | [`regime-adaptation.md`](regime-adaptation.md) | Market-regime classifier, auto config selection, AI vs algorithm roles | ✅ implemented |
 | [`vulnerability-response.md`](vulnerability-response.md) | 7 critical vulnerabilities + mitigations | ✅ current |
-| [`logging-analytics.md`](logging-analytics.md) | Log export, performance analytics, decision attribution, file formats | ⏳ design |
-| [`model-training.md`](model-training.md) | AI learning system: performance review, strategy evolution, A/B testing | ⏳ design |
-| [`strategies.md`](strategies.md) | **CRYPTO ANALYST:** 5 safe strategies with concrete entry/exit rules, expected metrics, anti-patterns | ⏳ design |
-| [`agent-architecture.md`](agent-architecture.md) | **ARCHITECT:** Multi-step agent thinking (≤20 steps), sub-agent delegation, search, budget | ⏳ design |
-| [`introspection.md`](introspection.md) | **TRANSPARENCY:** Live brain view, decision proofs, stats dashboard, model attribution | ⏳ design |
-| [`stability.md`](stability.md) | **RELIABILITY:** Fault tolerance, crash recovery, graceful degradation, predictability contract | ⏳ design |
-| [`testing.md`](testing.md) | Full testing: unit tests, CLI mock scenarios, historical backtest, live shadow, fuzzing | ⏳ design |
-| [`security.md`](security.md) | Security measures, dead man's switch, audit trail, emergency stop | ⏳ design |
+| [`logging-analytics.md`](logging-analytics.md) | Log export, performance analytics, attribution | 🧩 partial — `trade export`, backtest runs and lessons are shipped; the journal is design |
+| [`model-training.md`](model-training.md) | Performance review, strategy evolution, A/B testing | 🧩 partial — `strategy train`, `tune`, `lessons`, `training_stats` are shipped |
+| [`strategies.md`](strategies.md) | Strategy playbook: entry/exit rules, expected metrics, anti-patterns | 🧩 partial — catalog and profiles are shipped; the playbook is advisory |
+| [`agent-architecture.md`](agent-architecture.md) | Multi-step agent thinking (≤20 steps), sub-agent delegation | ⏳ design |
+| [`introspection.md`](introspection.md) | Live brain view, decision proofs, stats dashboard | 🧩 partial — `trade analyze`, regime and recorded runs are shipped |
+| [`stability.md`](stability.md) | Fault tolerance, crash recovery, graceful degradation | 🧩 partial — supervision, checkpointing and schema migration are shipped |
+| [`testing.md`](testing.md) | Unit tests, CLI scenarios, historical backtest, shadow, fuzzing | 🧩 partial — unit tests, scenarios and backtests are shipped; shadow/fuzzing are design |
+| [`security.md`](security.md) | Dead man's switch, audit trail, emergency stop | 🧩 partial — ACL, audit tables and pause controls are shipped |
 
-> "⏳ design" documents describe the *target* paper-trading sandbox. The parts
-> already shipped (CLI engine, invariants, backtests, scenarios) are documented
-> in [`TRADING_MODULE_PLAN.md`](TRADING_MODULE_PLAN.md).
+> **Legend.** ✅ implemented = the command or subsystem exists and is covered by the
+> test suite. 🧩 partial = some of the described behaviour ships under a different
+> design (the shipped schema lives in [database.md](../database.md)). ⏳ design =
+> target behaviour that is not in the code yet. 📜 historical = kept for context,
+> not a description of the current system.
+>
+> The shipped behaviour is documented in
+> [`TRADING_MODULE_PLAN.md`](TRADING_MODULE_PLAN.md) and the
+> [command reference](../commands.md).
 
 ---
 

@@ -174,9 +174,10 @@ tranches and never realizes a loss:
   chasing tops (verified: no buy at the Nov-2021 peak).
 - **`trade backtest`** — replay real history through the engine (multi-source
   failover: Binance → CryptoCompare → CoinGecko); `--batch` sweeps rolling
-  windows over 2020–2026 for BTC/ETH/SOL/LINK (win-rate 100%, zero realized
-  losses by design). Windows with too few candles (pre-listing noise) are
-  skipped.
+  windows over 2020–2026 for BTC/ETH/SOL/LINK. The no-loss invariant means the
+  simulation never books a loss on a closed lot — that is a property of the rule,
+  not evidence that the strategy cannot lose money. Windows with too few candles
+  (pre-listing noise) are skipped, and results are reported per window.
 - **`trade strategies` / `strategy apply|train|delete`** — builtin and trained
   strategy profiles; `strategy train --grid-full --threads N` parallelizes the
   sweep; **`trade seed`** bundles the best profiles + lessons + stats into
