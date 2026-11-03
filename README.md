@@ -144,18 +144,18 @@ mu = (0.5 * r_20 + 0.3 * r_50 + 0.2 * r_200) / sum(w)
 ```
 
 Then a regime term and an RSI extreme term are applied, and the result is
-clamped to ±0.5%/day so one parabolic week cannot fabricate a trend:
+clamped to +/-0.5%/day so one parabolic week cannot fabricate a trend:
 
 | Regime | Adjustment |
 |---|---|
 | `SIDEWAYS` | momentum zeroed — a flat market has no slope to extrapolate |
-| `EUPHORIA` | ×0.5, mean-reversion risk dominates near the ATH |
+| `EUPHORIA` | x0.5, mean-reversion risk dominates near the ATH |
 | `DIP` | +0.08%/day, expect a modest bounce |
-| `BEAR` | −0.03%/day |
+| `BEAR` | -0.03%/day |
 | `BULL` | +0.02%/day |
-| RSI14 ≥ 70 / ≤ 30 | −/+ 0.08%/day |
+| RSI14 >= 70 / <= 30 | -/+ 0.08%/day |
 
-Seasonality uses the **median** monthly return, capped at ±0.02%/day. A calendar
+Seasonality uses the **median** monthly return, capped at +/-0.02%/day. A calendar
 month is roughly eight samples, so the mean is noise and the cap keeps it from
 moving the model.
 
@@ -241,7 +241,7 @@ The derivatives read is a truth table, not a model output:
 
 Only the geometry above is fixed. Three parameters — momentum half-life, drift
 shrink and cone width — are re-fitted **per symbol** by a walk-forward grid
-search over the symbol's own history (8 × 4 × 6 = 192 combinations, 400-day
+search over the symbol's own history (8 x 4 x 6 = 192 combinations, 400-day
 window, stepped origins, no look-ahead). The objective penalises a dishonest
 cone as much as a wrong point estimate:
 

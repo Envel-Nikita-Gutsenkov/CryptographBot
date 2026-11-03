@@ -49,7 +49,7 @@ for the same inputs. The formulas, constants and calibration methodology live in
 - **`/forecast SYMBOL`** — a horizon ladder (`1/3/5/7/14/30/90/180d` for BTC/ETH,
   shortened for younger alts) built from log-drift with horizon damping, a
   volatility-scaled ~68% cone, and probabilities of finishing above spot. The
-  cone uses a Student-t quantile (ν=4) instead of the Gaussian 1σ and adds the
+  cone uses a Student-t quantile (nu=4) instead of the Gaussian 1-sigma and adds the
   drift's own estimation error in quadrature, so long horizons are not
   artificially tight; volatility blends the 20-close stddev with a RiskMetrics
   EWMA. In a `SIDEWAYS` regime the momentum term is zeroed — a flat market has

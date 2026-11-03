@@ -18,9 +18,9 @@ numbers — it can only read them.
 ## 1. Notation and input
 
 - `P_t` — daily close, ascending, one row per UTC day.
-- `r_t = ln(P_t / P_{t−1})` — daily log return.
-- `h` — horizon in days. `σ` — daily volatility as a fraction (`0.036` = 3.6%).
-- `μ` — daily log drift.
+- `r_t = ln(P_t / P_t-1)` — daily log return.
+- `h` — horizon in days. `sigma` — daily volatility as a fraction (`0.036` = 3.6%).
+- `mu` — daily log drift.
 - `N` — number of closes the drift was fitted on; fixed at 200 for the drift
   estimation-error term.
 - Non-positive closes are dropped before any transform; a series shorter than
@@ -31,12 +31,14 @@ numbers — it can only read them.
 ## 2. Volatility
 
 ```text
-σ²_EWMA,t = λ · σ²_EWMA,t−1 + (1 − λ) · r²_t        λ = 0.94  (RiskMetrics daily)
-σ_E       = √σ²_EWMA,t                              seeded with the first 20 r²
-σ_t       = 0.5 · std₂₀(r) + 0.5 · σ_E              floor 0.3%/day, hard cap 10 (1000%/day) against corrupt data
+var_ewma,t = lambda * var_ewma,t-1 + (1 - lambda) * r_t^2    lambda = 0.94  (RiskMetrics daily)
+sigma_E    = sqrt(var_ewma,t)                               seeded with the first 20 r^2
+sigma_t    = 0.5 * stddev_20(r) + 0.5 * sigma_E             floor 0.3%/day
 ```
 
-Why a blend: `std₂₀` is stable but lags a regime change; EWMA reacts to the
+The hard cap is `10.0` (1000%/day) and exists purely as a corrupt-data guard.
+
+Why a blend: `stddev_20` is stable but lags a regime change; EWMA reacts to the
 latest shock but overreacts to a single print. The floor exists because a
 perfectly flat series has zero dispersion, which collapses the cone to a point
 and makes every horizon equally "certain".
@@ -44,36 +46,36 @@ and makes every horizon equally "certain".
 ## 3. Drift
 
 ```text
-r_k   = ln(P_last / P_{last−k}) / k        for k ∈ {20, 50, 200}
-μ_raw = Σ(w_k · r_k) / Σ(w_k)              w = 0.5 / 0.3 / 0.2, renormalised over available k
+r_k   = ln(P_last / P_last-k) / k           for k in {20, 50, 200}
+mu_raw = sum(w_k * r_k) / sum(w_k)          w = 0.5 / 0.3 / 0.2, renormalised over available k
 ```
 
 Regime term:
 
-| Regime | Effect on `μ_raw` | Reason |
+| Regime | Effect on `mu_raw` | Reason |
 |---|---|---|
 | `SIDEWAYS` | set to 0 | a flat market has no slope; a leaked 20-day slope created fake downtrends |
-| `EUPHORIA` | × 0.5 | mean-reversion risk dominates near the ATH |
-| `DIP` | + 0.0008 | fear zone tends to bounce, conservatively |
-| `BEAR` | − 0.0003 | structural downtrend |
-| `BULL` | + 0.0002 | structural uptrend |
+| `EUPHORIA` | `* 0.5` | mean-reversion risk dominates near the ATH |
+| `DIP` | `+ 0.0008` | fear zone tends to bounce, conservatively |
+| `BEAR` | `- 0.0003` | structural downtrend |
+| `BULL` | `+ 0.0002` | structural uptrend |
 
 RSI term, applied only when the series actually has dispersion (a flat series
 reads RSI = 100 as an artifact):
 
 ```text
-RSI14 ≥ 70  →  μ −= 0.0008
-RSI14 ≤ 30  →  μ += 0.0008
+RSI14 >= 70  ->  mu -= 0.0008
+RSI14 <= 30  ->  mu += 0.0008
 ```
 
-Hard clamps: `|μ| ≤ 0.005` per day, `|μ·h| ≤ 0.35` cumulative over any horizon.
-A short-term momentum spike is not extrapolated into a fantasy year.
+Hard clamps: `|mu| <= 0.005` per day, `|mu * h| <= 0.35` cumulative over any
+horizon. A short-term momentum spike is not extrapolated into a fantasy year.
 
 ### Seasonality
 
 ```text
-months with N ≥ 2      → median monthly return m
-adjustment             = clip(m / 100 / 30, ±0.0002)   per day
+months with N >= 2    ->  median monthly return m
+adjustment            = clip(m / 100 / 30, -0.0002, +0.0002)   per day
 ```
 
 The median is used instead of the mean because a calendar month has roughly
@@ -89,8 +91,8 @@ First match wins, evaluated on the same close series:
 
 | Order | Regime | Condition |
 |---|---|---|
-| 1 | `DIP` | `P < SMA50 · 0.90` **and** `P ≥ SMA200 · 0.80` |
-| 2 | `EUPHORIA` | within 5% of the ATH **and** `RSI14 ≥ 65` **and** `P > SMA20 · 1.03` |
+| 1 | `DIP` | `P < SMA50 * 0.90` **and** `P >= SMA200 * 0.80` |
+| 2 | `EUPHORIA` | within 5% of the ATH **and** `RSI14 >= 65` **and** `P > SMA20 * 1.03` |
 | 3 | `BEAR` | `SMA20 < SMA50` **and** `P < SMA200` |
 | 4 | `BULL` | `SMA20 > SMA50` **and** `P > SMA200` |
 | 5 | `SIDEWAYS` | everything else, including series shorter than 20 closes |
@@ -106,21 +108,21 @@ flat series at its high from reading as euphoria.
 Two independent uncertainties add in quadrature:
 
 ```text
-σ_h    = √( σ²·h + (σ²/N)·h² )                     N = 200
-μ_h    = μ · scale / √(1 + h/decay)                momentum decays with horizon
-target = P₀ · exp(μ_h · h)                          cumulative drift clamped ±35%
-low    = target · exp(−q · σ_h)
-high   = target · exp(+q · σ_h)
-P(up)  = 1 − T_ν(−μ_h·h / σ_h)
-conf   = clip(1 / (1 + 4·σ_h), 0.05, 0.95)
+sigma_h = sqrt( sigma^2 * h + (sigma^2 / N) * h^2 )     N = 200
+mu_h    = mu * scale / sqrt(1 + h / decay)              momentum decays with horizon
+target  = P0 * exp(mu_h * h)                            cumulative drift clamped to +/-35%
+low     = target * exp(-q * sigma_h)
+high    = target * exp(+q * sigma_h)
+P(up)   = 1 - T_nu(-mu_h * h / sigma_h)
+conf    = clip(1 / (1 + 4 * sigma_h), 0.05, 0.95)
 ```
 
-- `q = t⁻¹(0.84135; ν = 4) ≈ 1.142`. `ν = 4` widens the ~68% band by ~14%
+- `q = inv_t(0.84135, nu = 4) ~ 1.142`. `nu = 4` widens the ~68% band by ~14%
   versus the Gaussian and matches crypto's fat-tailed daily returns.
-- `σ²·h` is diffusion (random walk). `(σ²/N)·h²` is the drift's own estimation
-  error: the fitted drift is only known to `σ/√N`, and that error compounds
-  linearly with `h`. At `h = 1` it is negligible; at `h = 90` it adds ~20% width;
-  at `h = 180` ~38%.
+- `sigma^2 * h` is diffusion (random walk). `(sigma^2 / N) * h^2` is the drift's
+  own estimation error: the fitted drift is only known to `sigma / sqrt(N)`, and
+  that error compounds linearly with `h`. At `h = 1` it is negligible; at
+  `h = 90` it adds ~20% width; at `h = 180` ~38%.
 - `confidence` is reported per horizon and shrinks as the cone widens. It is a
   trust weight, not a probability.
 
@@ -128,22 +130,23 @@ conf   = clip(1 / (1 + 4·σ_h), 0.05, 0.95)
 
 ## 6. Touch and terminal probabilities
 
-For `L < P₀`, `a = ln(L / P₀)`:
+For `L < P0`, with `a = ln(L / P0)`:
 
 ```text
-P_touch(H) = Φ((a − μH)/(σ√H)) + exp(2μa/σ²) · Φ((a + μH)/(σ√H))
-P_close_below(H) = Φ((a − μH)/(σ√H))
+P_touch(H) = Phi((a - mu*H) / (sigma*sqrt(H)))
+           + exp(2*mu*a / sigma^2) * Phi((a + mu*H) / (sigma*sqrt(H)))
+P_close_below(H) = Phi((a - mu*H) / (sigma*sqrt(H)))
 ```
 
 The first is the running-minimum law for Brownian motion with drift ("does it
 ever get there"), the second is the terminal probability ("is it still cheap
-when I would buy"). Both use `σ_eff = σ · q` — the same effective diffusion as
-the drawn cone — so a bucket placed on the visible band reports the same
-probability the band implies.
+when I would buy"). Both use `sigma_eff = sigma * q` — the same effective
+diffusion as the drawn cone — so a bucket placed on the visible band reports the
+same probability the band implies.
 
 Numerical care: the exponential is evaluated in log space
-(`2μa/σ² + ln Φ(z₂)`), because with small `σ` and negative `μ` the factor
-overflows while the CDF underflows, producing `NaN`.
+(`2*mu*a / sigma^2 + ln Phi(z2)`), because with small `sigma` and negative `mu`
+the factor overflows while the CDF underflows, producing `NaN`.
 
 ---
 
@@ -151,19 +154,19 @@ overflows while the CDF underflows, producing `NaN`.
 
 ```text
 anchor  = max(close) over the last 14 days
-Z₁₄     = ln(P / anchor) / (σ · √14)
-σ₃₀     = cone width at h = 30 (same function as /forecast)
-limitₖ  = P₀ · exp(μ·30 + tₖ · σ₃₀),   tₖ = t⁻¹(qₖ; ν = 4)
+Z14     = ln(P / anchor) / (sigma * sqrt(14))
+sigma_30 = cone width at h = 30 (same function as /forecast)
+limit_k = P0 * exp(mu * 30 + t_k * sigma_30),   t_k = inv_t(q_k, nu = 4)
 q       = 12% / 4% / 1%
-weights = 20% / 35% / 45%  (protect mode: 10% / 35% / 55%)
-new_avg = (pos·avg + spend/limit) / (pos + spend/limit)
+weights = 20% / 35% / 45%   (protect mode: 10% / 35% / 55%)
+new_avg = (pos * avg + spend / limit) / (pos + spend / limit)
 ```
 
 Anchoring to a rolling high rather than the previous close is deliberate: with a
 previous-close anchor, a slow bleed would walk the ladder down every day and
 never trigger.
 
-The average-entry guard activates when `P > avg · 1.25`; a bucket is flagged
+The average-entry guard activates when `P > avg * 1.25`; a bucket is flagged
 when it would raise `avg` by more than 10%, and the allocation shifts to the
 deeper buckets instead.
 
@@ -174,25 +177,25 @@ Points are summed and normalised over the signals that are actually available
 
 | Signal | Points |
 |---|---|
-| `Z₁₄ ≤ −2.0` | 40 |
+| `Z14 <= -2.0` | 40 |
 | `RSI14 < 25` | 25 |
-| volume > `SMA20 + 2·stddev` | 20 |
+| volume > `SMA20 + 2 * stddev` | 20 |
 | lower wick > 50% of candle range | 15 |
 | futures longs flushed | 15 |
 
 ```text
-ratio  = score / max_score
-≥ 0.80 CAPITULATION · ≥ 0.50 ALERT · ≥ 0.25 WATCH · else SLEEP
+ratio = score / max_score
+>= 0.80 CAPITULATION | >= 0.50 ALERT | >= 0.25 WATCH | else SLEEP
 ```
 
 ### Futures tape
 
 | Price 24h | Open interest 24h | Read |
 |---|---|---|
-| ≤ −1% | ≤ −3% | `LongsFlushed` — selling is exhausting |
-| ≤ −1% | ≥ +3% | `ShortsPiling` — the fall can continue |
-| ≥ +1% | ≥ +3% | `TrendUp` |
-| any | funding ≤ −0.015% | `SqueezeRisk` |
+| `<= -1%` | `<= -3%` | `LongsFlushed` — selling is exhausting |
+| `<= -1%` | `>= +3%` | `ShortsPiling` — the fall can continue |
+| `>= +1%` | `>= +3%` | `TrendUp` |
+| any | funding `<= -0.015%` | `SqueezeRisk` |
 | otherwise | — | `Neutral` |
 
 ---
@@ -200,10 +203,10 @@ ratio  = score / max_score
 ## 8. Bottom radar (`/bottom`)
 
 ```text
-score  = 55 · (capitulation / max_score)
-       + 15 · clip((40 − RSI14) / 20)
-       + 15 · clip((−1 − Z₁₄) / 1.5)
-       + 5 · [volume spike] + 5 · [long wick] + 5 · [OI flush]
+score = 55 * (capitulation / max_score)
+      + 15 * clip((40 - RSI14) / 20)
+      + 15 * clip((-1 - Z14) / 1.5)
+      +  5 * [volume spike] + 5 * [long wick] + 5 * [OI flush]
 ```
 
 Then the score is discounted when the shallowest bucket still has a high
@@ -212,10 +215,10 @@ bottom yet".
 
 | Score | Band |
 |---|---|
-| 60–100 | BOTTOM LIKELY |
-| 35–59 | NEAR BOTTOM |
-| 20–34 | WATCH |
-| 0–19 | NOT A BOTTOM |
+| 60-100 | BOTTOM LIKELY |
+| 35-59 | NEAR BOTTOM |
+| 20-34 | WATCH |
+| 0-19 | NOT A BOTTOM |
 
 ---
 
@@ -225,19 +228,19 @@ The geometry above is fixed. Three parameters are fitted per symbol:
 
 | Parameter | Grid |
 |---|---|
-| `decay` (momentum half-life, days) | 10, 20, 30, 45, 60, 90, 180, ∞ |
+| `decay` (momentum half-life, days) | 10, 20, 30, 45, 60, 90, 180, infinite |
 | `drift_scale` | 0.3, 0.5, 0.75, 1.0 |
 | `vol_mult` (cone width) | 0.7, 0.85, 1.0, 1.15, 1.3, 1.45 |
 
 Walk-forward setup: the last 400 days, origins every 3 days, each origin using
 only closes up to that point. Nearest-horizon samples where the outcome is not
-yet realised are skipped. 8 × 4 × 6 = 192 combinations, scored by:
+yet realised are skipped. 8 x 4 x 6 = 192 combinations, scored by:
 
 ```text
 score = MAPE
-      + 0.5 · miss_rate
-      + 1.0 · |coverage − 0.68|
-      + 2.0 · mean_h |coverage_h − 0.68|
+      + 0.5 * miss_rate
+      + 1.0 * |coverage - 0.68|
+      + 2.0 * mean_h |coverage_h - 0.68|
 ```
 
 `mean_h` is the per-horizon term: without it, five well-covered short horizons
@@ -256,7 +259,7 @@ For each horizon, the same replay produces:
 
 ```text
 direction_hit_rate = hits / samples
-MAPE               = mean |target/actual − 1| · 100
+MAPE               = mean |target / actual - 1| * 100
 coverage           = share of outcomes inside [low, high]
 effective_origins  = samples / h        (overlapping windows are not independent)
 Wilson interval    = binomial CI on the hit rate
@@ -294,28 +297,28 @@ Not a statistical model, but the same rule applies — it must not depend on a
 language model's judgement. Over cached headlines:
 
 1. Extract an incident class from a keyword set (`hack`, `exploit`, `breach`,
-   `drain`, `stolen`, …); `hackathon` is removed first.
+   `drain`, `stolen`, ...); `hackathon` is removed first.
 2. Extract the affected entity where one is named.
 3. Significance gate:
-   - custody entity (exchange / bridge / stablecoin) → always report;
-   - wallet brand → only together with an active-compromise word;
-   - generic class → only above the major-loss threshold parsed from the text.
+   - custody entity (exchange / bridge / stablecoin) -> always report;
+   - wallet brand -> only together with an active-compromise word;
+   - generic class -> only above the major-loss threshold parsed from the text.
 4. Deduplicate per topic, so alternating incidents cannot re-trigger each other.
 
 ---
 
 ## 13. Known limitations
 
-- **Fat tails are modelled, not solved.** `ν = 4` widens the band correctly on
+- **Fat tails are modelled, not solved.** `nu = 4` widens the band correctly on
   average; a liquidation cascade can still leave it in one candle.
 - **Drift is not predictive at short horizons.** Direction hit rates hover near
   a coin flip, and the reports say so. The value is in calibrated uncertainty
   and in pricing a level, not in calling the next candle.
 - **Seasonality is informational only.** Eight samples per month cannot support
-  a decision; the ±0.02%/day cap enforces that.
+  a decision; the +/-0.02%/day cap enforces that.
 - **Long horizons are structurally weaker.** Cone coverage at a quarter degrades
   because a single regime can end inside it; calibration reports that instead of
   hiding it.
-- **Quantiles and thresholds are engineering choices.** `ν = 4`, the 12%/4%/1%
+- **Quantiles and thresholds are engineering choices.** `nu = 4`, the 12%/4%/1%
   bucket quantiles and the Z-score bands are tuned for crypto drawdowns, not
   derived from first principles.

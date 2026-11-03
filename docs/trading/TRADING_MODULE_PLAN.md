@@ -557,7 +557,7 @@ symbol. History is fetched once per symbol and sliced per window — no per-run
 API calls. Each candidate is scored:
 
 ```
-score = avg_pnl_pct − 0.5·avg_max_dd_pct − 20·cold_ratio + 8·profitable_ratio + 5·win_rate
+score = avg_pnl_pct - 0.5*avg_max_dd_pct - 20*cold_ratio + 8*profitable_ratio + 5*win_rate
 ```
 
 - `avg_pnl_pct` — mean window PnL (reward).

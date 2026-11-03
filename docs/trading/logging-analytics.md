@@ -120,11 +120,11 @@ formatted report template.
 
 | Metric | Formula | Description |
 |---|---|---|
-| Total Return | `(current_value - initial_capital) / initial_capital × 100` | Overall portfolio performance |
-| Realized P&L | `Σ(sell_net_value - cost_basis_portion)` | Profit/loss from closed positions |
-| Unrealized P&L | `Σ(holding × current_price - remaining_cost_basis)` | Paper profit/loss |
-| Max Drawdown | `max(peak_value - trough_value) / peak_value × 100` | Largest peak-to-trough decline |
-| Sharpe Ratio | `(mean_daily_return - risk_free_rate) / stddev_daily_return × √365` | Risk-adjusted return |
+| Total Return | `(current_value - initial_capital) / initial_capital * 100` | Overall portfolio performance |
+| Realized P&L | `sum(sell_net_value - cost_basis_portion)` | Profit/loss from closed positions |
+| Unrealized P&L | `sum(holding * current_price - remaining_cost_basis)` | Paper profit/loss |
+| Max Drawdown | `max(peak_value - trough_value) / peak_value * 100` | Largest peak-to-trough decline |
+| Sharpe Ratio | `(mean_daily_return - risk_free_rate) / stddev_daily_return * sqrt(365)` | Risk-adjusted return |
 
 ### Trading Metrics
 
