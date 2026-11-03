@@ -39,7 +39,7 @@ pub use model_select::handle_model_cmd;
 pub use news::{handle_news_callback, handle_news_cmd};
 pub use portfolio::{
     handle_add, handle_adjust, handle_correct, handle_invested_cmd, handle_move, handle_pnl_chart,
-    handle_portfolio, handle_portfolio_chart, handle_purchase_history,
+    handle_portfolio, handle_portfolio_chart, handle_purchase_history, handle_purchase_history_cmd,
 };
 pub use price::{handle_price, handle_top};
 pub use settings::{handle_convert, handle_settings, handle_watchlist};

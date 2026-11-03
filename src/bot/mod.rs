@@ -109,6 +109,7 @@ fn build_handler() -> UpdateHandler<anyhow::Error> {
         .branch(case![Command::Correct(a)].endpoint(handle_correct_cmd))
         .branch(case![Command::Adjust(a)].endpoint(handle_adjust_cmd))
         .branch(case![Command::Invested(a)].endpoint(handle_invested_cmd))
+        .branch(case![Command::History(a)].endpoint(handle_history_cmd))
         .branch(case![Command::Alert(a)].endpoint(handle_alert_cmd))
         .branch(case![Command::Wallet(a)].endpoint(handle_wallet_cmd))
         .branch(case![Command::Watchlist(a)].endpoint(handle_watchlist_cmd))
@@ -295,6 +296,16 @@ async fn handle_revoke_cmd(
 
 async fn handle_acl_cmd(bot: Bot, msg: Message, acl: Arc<AccessControl>) -> anyhow::Result<()> {
     handlers::handle_acl_list(bot, msg, acl).await
+}
+
+async fn handle_history_cmd(
+    bot: Bot,
+    msg: Message,
+    store: Arc<Store>,
+    config: Arc<Config>,
+    args: String,
+) -> anyhow::Result<()> {
+    handlers::handle_purchase_history_cmd(bot, msg, store, config, args).await
 }
 
 async fn handle_help(bot: Bot, msg: Message) -> anyhow::Result<()> {

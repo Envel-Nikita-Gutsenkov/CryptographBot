@@ -334,14 +334,14 @@ pub async fn handle_portfolio(
             } else {
                 (p.purchases.iter().filter(|x| &x.symbol == sym).map(|x| x.cost_usd).sum(), false)
             };
-            
+
             let avg_entry = if *amt > 0.0 { cost / amt } else { 0.0 };
             let pnl = val - cost;
             let pnl_pct = if cost > 0.0 { pnl / cost * 100.0 } else { 0.0 };
-            
+
             let emoji = if pnl >= 0.0 { "🟢" } else { "🔴" };
             let pnl_str = format!("{emoji} ${:.2} ({:+.1}%)", pnl, pnl_pct);
-            
+
             lines.push(format!(
                 "{} <b>{}</b>: {}\n└ Entry: ${:.2} | Price: ${:.2}\n└ Value: ${:.2} | PnL: {}",
                 symbol_emoji(sym), sym, fmt_crypto(*amt, sym), avg_entry, price, val, pnl_str
@@ -829,14 +829,14 @@ pub async fn handle_advice(
             let esc_sym = crate::format::esc(sym);
             if ratio <= 0.80 {
                 let diff = (1.0 - ratio) * 100.0;
-                holding_advice.push(format!("🟢 *{}*: Down *{:.1}%* below your average buy price \\(avg: *{}*, current: *{}*\\)\\. Excellent opportunity to *DCA \\(average down\\)* to lower your entry cost\\.", 
+                holding_advice.push(format!("🟢 *{}*: Down *{:.1}%* below your average buy price \\(avg: *{}*, current: *{}*\\)\\. Excellent opportunity to *DCA \\(average down\\)* to lower your entry cost\\.",
                     esc_sym, diff, crate::format::esc(&crate::format::fmt_price(*avg)), crate::format::esc(&crate::format::fmt_price(current))));
             } else if ratio >= 1.50 {
                 let diff = (ratio - 1.0) * 100.0;
-                holding_advice.push(format!("🔴 *{}*: Up *{:.1}%* profit \\(avg: *{}*, current: *{}*\\)\\. Consider scaling out/taking partial profits \\(e.g\\. 10\\-20%\\) if it is nearing your target\\.", 
+                holding_advice.push(format!("🔴 *{}*: Up *{:.1}%* profit \\(avg: *{}*, current: *{}*\\)\\. Consider scaling out/taking partial profits \\(e.g\\. 10\\-20%\\) if it is nearing your target\\.",
                     esc_sym, diff, crate::format::esc(&crate::format::fmt_price(*avg)), crate::format::esc(&crate::format::fmt_price(current))));
             } else {
-                holding_advice.push(format!("⚪ *{}*: trading near cost basis \\(avg: *{}*, current: *{}*\\)\\. Hold position\\.", 
+                holding_advice.push(format!("⚪ *{}*: trading near cost basis \\(avg: *{}*, current: *{}*\\)\\. Hold position\\.",
                     esc_sym, crate::format::esc(&crate::format::fmt_price(*avg)), crate::format::esc(&crate::format::fmt_price(current))));
             }
         }
@@ -852,7 +852,7 @@ pub async fn handle_advice(
     for quote in &quotes {
         if watchlist.contains(&quote.symbol) || quote.symbol == "BTC" || quote.symbol == "ETH" {
             if quote.change_7d.unwrap_or(0.0) < -10.0 {
-                dips.push(format!("🔥 *{}* has dropped *{:.1}%* in the last 7 days! Price is *{}*\\. Strong candidate to buy the dip\\.", 
+                dips.push(format!("🔥 *{}* has dropped *{:.1}%* in the last 7 days! Price is *{}*\\. Strong candidate to buy the dip\\.",
                     crate::format::esc(&quote.symbol), quote.change_7d.unwrap_or(0.0).abs(), crate::format::esc(&crate::format::fmt_price(quote.price_usd))));
             }
         }
@@ -938,6 +938,35 @@ pub async fn handle_purchase_history(
     store: Arc<Store>,
     config: Arc<Config>,
 ) -> anyhow::Result<()> {
+    send_purchase_history(bot, msg, store, config, None).await
+}
+
+/// `/history [SYM]` — the same report as the *Purchase History* button, with an
+/// optional symbol filter. The command existed in [`crate::bot::commands`] but
+/// was never wired into the update tree, so `/history` silently fell through to
+/// the AI text handler. It is now a real command.
+pub async fn handle_purchase_history_cmd(
+    bot: Bot,
+    msg: Message,
+    store: Arc<Store>,
+    config: Arc<Config>,
+    args: String,
+) -> anyhow::Result<()> {
+    let symbol = args
+        .split_whitespace()
+        .next()
+        .map(|s| s.trim_start_matches('/').to_uppercase())
+        .filter(|s| !s.is_empty());
+    send_purchase_history(bot, msg, store, config, symbol).await
+}
+
+async fn send_purchase_history(
+    bot: Bot,
+    msg: Message,
+    store: Arc<Store>,
+    config: Arc<Config>,
+    symbol: Option<String>,
+) -> anyhow::Result<()> {
     if !config.is_admin(msg.chat.id.0 as u64) {
         bot.send_message(msg.chat.id, "⛔ Unauthorized").await?;
         return Ok(());
@@ -946,20 +975,58 @@ pub async fn handle_purchase_history(
     let user_id = msg.chat.id.0 as u64;
 
     let html_msg = store.read(user_id, |p| {
-        if p.purchases.is_empty() {
-            return String::from("📭 <b>No purchase history found.</b>");
+        let filter = symbol.as_deref();
+        let mut sorted_purchases: Vec<_> = p
+            .purchases
+            .iter()
+            .filter(|pur| match filter {
+                Some(sym) => pur.symbol.eq_ignore_ascii_case(sym),
+                None => true,
+            })
+            .cloned()
+            .collect();
+
+        if sorted_purchases.is_empty() {
+            return match filter {
+                Some(sym) => format!("📭 <b>No purchases found for {sym}.</b>"),
+                None => String::from("📭 <b>No purchase history found.</b>"),
+            };
         }
 
-        let mut lines = Vec::new();
-        lines.push(String::from("📜 <b>Purchase History</b>\n"));
-
-        let mut sorted_purchases = p.purchases.clone();
         sorted_purchases.sort_by(|a, b| b.date.cmp(&a.date));
+
+        let mut lines = Vec::new();
+        lines.push(match filter {
+            Some(sym) => format!("📜 <b>Purchase History · {sym}</b>\n"),
+            None => String::from("📜 <b>Purchase History</b>\n"),
+        });
+
+        // Per-asset summary: amount, total cost and the cost-basis average the
+        // rest of the bot (forecast/dip/sniper) compares against.
+        let mut summary: std::collections::BTreeMap<String, (f64, f64)> =
+            std::collections::BTreeMap::new();
+        for pur in &sorted_purchases {
+            let entry = summary.entry(pur.symbol.clone()).or_insert((0.0, 0.0));
+            entry.0 += pur.amount;
+            entry.1 += pur.cost_usd;
+        }
+        lines.push(String::from("<b>Asset · Amount · Avg entry · Cost</b>"));
+        for (sym, (amount, cost)) in &summary {
+            let avg = if *amount > 0.0 { cost / amount } else { 0.0 };
+            lines.push(format!(
+                "<code>{}</code> · {} · ${:.2} · ${:.2}",
+                sym,
+                fmt_crypto(*amount, sym),
+                avg,
+                cost
+            ));
+        }
+        lines.push(String::new());
 
         for pur in &sorted_purchases {
             let date_str = pur.date.format("%Y-%m-%d").to_string();
             let cost_str = format!("${:.2}", pur.cost_usd);
-            
+
             lines.push(format!(
                 "<b>#{} | {} | {}</b>\n└ Amount: {} | Cost: {}\n└ Source: {}",
                 pur.id, date_str, pur.symbol, fmt_crypto(pur.amount, &pur.symbol), cost_str, pur.source
