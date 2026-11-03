@@ -386,6 +386,25 @@ impl BottomSignal {
         for h in &self.hits {
             s.push_str(&format!("signal: {}\n", h.label(russian)));
         }
+        if let Some(d) = self.derivatives {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(f) = d.funding_avg_pct {
+                parts.push(format!("funding {:+.3}%/8h", f * 100.0));
+            }
+            if let Some(oi) = d.oi_change_24h_pct {
+                parts.push(format!("OI24h {oi:+.1}%"));
+            }
+            if let Some(ls) = d.long_short_ratio {
+                parts.push(format!("L/S {ls:.2}"));
+            }
+            if !parts.is_empty() {
+                s.push_str(&format!(
+                    "futures: {} · {}\n",
+                    parts.join(" · "),
+                    d.read.verdict(russian)
+                ));
+            }
+        }
         s.push_str(&format!(
             "verdict: {}\nplan: {}\n",
             self.verdict.label(russian),
@@ -624,5 +643,8 @@ mod tests {
         assert!(html.contains("funding"));
         assert!(html.contains("OI 24ч"));
         assert!(html.contains("лонги вымыты"));
+        let plain = bottom_signal(&r).plain(false);
+        assert!(plain.contains("futures:"));
+        assert!(plain.contains("longs flushed"));
     }
 }
