@@ -66,6 +66,8 @@ pub enum Command {
         description = "Tail-risk accumulation: /sniper BTC | cash 1000 | protect on|off | alerts on|off"
     )]
     Sniper(String),
+    #[command(description = "Bottom radar: /bottom BTC | is this the bottom, should I buy?")]
+    Bottom(String),
     #[command(description = "AI memory notes: /memo text | list | del N")]
     Memo(String),
     #[command(description = "Proactive goals: /goal text | list | del N | done N | resume N")]

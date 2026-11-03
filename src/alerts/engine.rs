@@ -158,23 +158,27 @@ async fn process_user(
              Never answer with only a market description — always end with a concrete recommendation.",
             prompt_context, portfolio_context, memory_context
         );
-        if let Ok(comment) = crate::crypto::ai::pipeline::call_with_critic(
-            &req_client,
-            &config.gemini_api_key,
-            &prompt,
-            None,
-            false,
-            true,
-            cmc.sqlite().unwrap(),
-        )
-        .await
-        {
-            if !comment.is_empty() {
-                let escaped_comment = html_escape(&comment.trim().to_string());
-                combined_msg.push_str(&format!(
-                    "\n\n🤖 <b>AI Advice:</b> <i>{}</i>",
-                    escaped_comment
-                ));
+        // `sqlite` is optional in some deployments; never panic on a missing
+        // store — just skip the AI narration layer.
+        if let Some(sqlite) = cmc.sqlite() {
+            if let Ok(comment) = crate::crypto::ai::pipeline::call_with_critic(
+                &req_client,
+                &config.gemini_api_key,
+                &prompt,
+                None,
+                false,
+                true,
+                sqlite,
+            )
+            .await
+            {
+                if !comment.is_empty() {
+                    let escaped_comment = html_escape(&comment.trim().to_string());
+                    combined_msg.push_str(&format!(
+                        "\n\n🤖 <b>AI Advice:</b> <i>{}</i>",
+                        escaped_comment
+                    ));
+                }
             }
         }
     }

@@ -344,6 +344,58 @@ async fn main_inner() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // `cargo run -- bottom BTC cash=1000 avg=64255 pos=0.5` — the explicit
+    // "is this the bottom, should I buy?" reading (score + concrete level).
+    if args.len() > 2 && (args[1] == "bottom" || args[1] == "--bottom") {
+        let config = Arc::new(config::Config::from_env()?);
+        if let Some(parent) = std::path::Path::new(&config.sqlite_db).parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        db::SqliteStore::initialize_schema(&config.sqlite_db)?;
+        let sqlite = Arc::new(db::SqliteStore::new(&config.sqlite_db)?);
+        let cmc = Arc::new(crypto::CryptoClient::new(
+            &config.cmc_api_key,
+            &config.coingecko_api_key,
+            &config.coincap_api_key,
+            &config.cryptocompare_api_key,
+            Some(sqlite.clone()),
+        ));
+        let mut syms: Vec<String> = Vec::new();
+        let mut avg: Option<f64> = None;
+        let mut cash = 0.0_f64;
+        let mut pos = 0.0_f64;
+        let mut protect = true;
+        for a in &args[2..] {
+            if let Some(v) = a.strip_prefix("avg=") {
+                avg = v.parse().ok();
+            } else if let Some(v) = a.strip_prefix("cash=") {
+                cash = v.parse().unwrap_or(0.0);
+            } else if let Some(v) = a.strip_prefix("pos=") {
+                pos = v.parse().unwrap_or(0.0);
+            } else if let Some(v) = a.strip_prefix("protect=") {
+                protect = !matches!(v.to_lowercase().as_str(), "off" | "0" | "false");
+            } else {
+                syms.push(a.to_uppercase());
+            }
+        }
+        if syms.is_empty() {
+            syms.push("BTC".into());
+        }
+        for sym in syms.iter() {
+            match bot::handlers::build_bottom_signal(
+                sym, &cmc, &sqlite, None, avg, pos, cash, protect,
+            )
+            .await
+            {
+                Ok(s) => println!("{}\n", s.plain(false)),
+                Err(e) => println!("{sym}: bottom analysis failed — {e}\n"),
+            }
+        }
+        return Ok(());
+    }
+
     // `cargo run -- backtest BTC [ETH ...]` — walk-forward accuracy of the
     // shipped model vs the calibrated one, over a long and a short window. This
     // answers "was the previous release accurate?" without the Telegram bot.

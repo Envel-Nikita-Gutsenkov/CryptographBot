@@ -254,6 +254,35 @@ impl GeminiClient {
         generate_quick(&prompt, db).await
     }
 
+    /// Narrate a deterministic bottom-radar reading. The score, level and
+    /// verdict are fixed by the caller; the model may explain them but must not
+    /// invent numbers, catalysts or a different recommendation.
+    pub async fn bottom_commentary(
+        &self,
+        symbol: &str,
+        report_text: &str,
+        db: std::sync::Arc<crate::db::sqlite::SqliteStore>,
+    ) -> anyhow::Result<String> {
+        let prompt = format!(
+            "You are a crypto analyst. Below is a DETERMINISTIC bottom-radar reading for {symbol}: \
+             a 14-day drawdown Z-score, RSI14, a 0-100 bottom score, the concrete buy level, \
+             the probability that level is touched in 30 days, and a rule-based verdict.\n\n\
+             Rules:\n\
+             - Start with one bold headline line (<b>...</b>) of at most 12 words.\n\
+             - Then 3-5 short bullet lines, each starting with \"• \". Cover: which bottom \
+             signals fired, how likely a deeper level still prints, and what the verdict means \
+             for a buy-the-dip plan.\n\
+             - End with one line starting with \"<b>Watch:</b> \" naming the level to watch.\n\
+             - Use ONLY the numbers in the reading. Do NOT invent prices, dates, catalysts or \
+             news. Do NOT overrule the verdict. Never claim a bottom is guaranteed. \
+             - Do not add any disclaimer or warning line.\
+             - Plain text with only <b> tags; no markdown, no code blocks.\n\
+             - Keep it under 900 characters.\n\n\
+             BOTTOM RADAR:\n{report_text}"
+        );
+        generate_quick(&prompt, db).await
+    }
+
     #[allow(dead_code)]
     pub async fn generate_alert_comment(
         &self,

@@ -467,7 +467,7 @@ pub fn new_avg_entry(
     Some((avg * position_size + spend_usd) / total_qty)
 }
 
-fn price_decimals(p: f64) -> usize {
+pub(crate) fn price_decimals(p: f64) -> usize {
     if p >= 1000.0 {
         0
     } else if p >= 100.0 {
@@ -481,7 +481,7 @@ fn price_decimals(p: f64) -> usize {
     }
 }
 
-fn fmt_money(v: f64, decimals: usize) -> String {
+pub(crate) fn fmt_money(v: f64, decimals: usize) -> String {
     if !v.is_finite() {
         return "—".into();
     }

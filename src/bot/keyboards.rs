@@ -321,7 +321,12 @@ pub fn forecast_actions(symbol: &str) -> InlineKeyboardMarkup {
             "🩸 Sniper",
             &format!("snp:cmd:{symbol}"),
         ),
-        row1("🏠 Main Menu", "menu"),
+        row2(
+            "🧭 Bottom",
+            &format!("btm:fx:{symbol}"),
+            "🏠 Main Menu",
+            "menu",
+        ),
     ])
 }
 
@@ -335,7 +340,12 @@ pub fn dip_actions(symbol: &str) -> InlineKeyboardMarkup {
             "🔄 Refresh",
             &format!("dip:fx:{symbol}"),
         ),
-        row1("🩸 Sniper", &format!("snp:cmd:{symbol}")),
+        row2(
+            "🩸 Sniper",
+            &format!("snp:cmd:{symbol}"),
+            "🧭 Bottom",
+            &format!("btm:fx:{symbol}"),
+        ),
         row1("🏠 Main Menu", "menu"),
     ])
 }
@@ -351,10 +361,30 @@ pub fn sniper_actions(symbol: &str) -> InlineKeyboardMarkup {
             &format!("snp:fx:{symbol}"),
         ),
         row2(
-            "🪙 Dip zones",
-            &format!("dip:fx:{symbol}"),
             "📈 Forecast",
             &format!("fc:fx:{symbol}"),
+            "🧭 Bottom",
+            &format!("btm:fx:{symbol}"),
+        ),
+        row1("🏠 Main Menu", "menu"),
+    ])
+}
+
+/// Actions attached to a Bottom Radar message: AI narration, refresh, and a
+/// jump to the reports it is built on.
+pub fn bottom_actions(symbol: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new([
+        row2(
+            "🧠 AI Analysis",
+            &format!("btm:ai:{symbol}"),
+            "🔄 Refresh",
+            &format!("btm:fx:{symbol}"),
+        ),
+        row2(
+            "🩸 Sniper",
+            &format!("snp:cmd:{symbol}"),
+            "🪙 Dip zones",
+            &format!("dip:fx:{symbol}"),
         ),
         row1("🏠 Main Menu", "menu"),
     ])

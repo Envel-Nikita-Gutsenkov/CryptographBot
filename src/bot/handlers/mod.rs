@@ -4,6 +4,7 @@ pub mod ai_patch;
 pub mod alert;
 pub mod ask;
 pub mod backup;
+pub mod bottom;
 pub mod dip;
 pub mod fng;
 pub mod forecast;
@@ -29,6 +30,7 @@ pub use alert::{
 };
 pub use ask::handle_ask_cmd;
 pub use backup::{handle_backup, handle_restore_document};
+pub use bottom::{build_bottom_signal, handle_bottom_callback, handle_bottom_cmd};
 pub use dip::{build_dip_report, handle_dip_callback, handle_dip_cmd};
 pub use fng::handle_fng_cmd;
 pub use forecast::{build_forecast, handle_forecast_callback, handle_forecast_cmd};

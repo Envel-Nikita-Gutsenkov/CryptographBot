@@ -19,6 +19,7 @@
 pub mod advisor;
 pub mod analyze;
 pub mod backtest;
+pub mod bottom;
 pub mod cli;
 pub mod debate;
 pub mod dex;
@@ -47,6 +48,8 @@ pub use backtest::{
     batch_summary, fetch_history, fetch_history_blocking, run_backtest, run_batch, windows,
     BacktestConfig, BacktestResult, BatchConfig, TradeRecord, DEFAULT_CRASH_WINDOW_DAILY_SECS,
 };
+#[allow(unused_imports)]
+pub use bottom::{bottom_signal, BottomSignal, BottomVerdict, Hit};
 #[allow(unused_imports)]
 pub use debate::{build_sell_debate_prompt, parse_verdict, run_sell_debate, DebateOutcome};
 #[allow(unused_imports)]

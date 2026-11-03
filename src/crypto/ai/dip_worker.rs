@@ -20,7 +20,7 @@ use crate::{
     config::Config,
     crypto::CryptoClient,
     db::{SqliteStore, Store},
-    trading::{sniper::CapBand, DipVerdict},
+    trading::{bottom::bottom_signal, sniper::CapBand, DipVerdict},
 };
 
 /// Daily cadence. The first scan waits a little so it does not compete with the
@@ -326,6 +326,10 @@ async fn scan_sniper(
             }
         };
 
+        // Bottom radar: an explicit "this looks like the bottom, consider
+        // buying" ping, independent of whether the coin is already held.
+        let bottom = bottom_signal(&report);
+
         // A reached bucket is the most actionable signal: spot is already inside
         // the limit order. Only useful when there is cash to deploy.
         let event = if cash > 0.0 {
@@ -345,6 +349,14 @@ async fn scan_sniper(
                     "cap",
                 )
             })
+        })
+        .or_else(|| {
+            // Only the strong band fires a push; the score is bucketed so a
+            // slowly drifting reading cannot spam (dedup+cooldown still apply).
+            bottom
+                .verdict
+                .is_buy()
+                .then(|| (format!("{sym}:btm:{}", bottom.bottom_score / 10), "bottom"))
         });
 
         let Some((key, kind)) = event else {
@@ -362,11 +374,21 @@ async fn scan_sniper(
         } else {
             "🩸 Dip Sniper signal"
         };
-        let text = format!("<b>{title}</b>\n\n{}", report.render_html(russian));
+        let (text, markup) = if kind == "bottom" {
+            (
+                format!("<b>{title}</b>\n\n{}", bottom.render_html(russian)),
+                keyboards::bottom_actions(sym),
+            )
+        } else {
+            (
+                format!("<b>{title}</b>\n\n{}", report.render_html(russian)),
+                keyboards::sniper_actions(sym),
+            )
+        };
         let sent = bot
             .send_message(ChatId(user_id as i64), &text)
             .parse_mode(teloxide::types::ParseMode::Html)
-            .reply_markup(keyboards::sniper_actions(sym))
+            .reply_markup(markup)
             .await;
         if let Err(e) = sent {
             warn!("Sniper worker: send to {user_id} failed: {e}");

@@ -377,22 +377,19 @@ pub async fn handle_sniper_callback(
             let config_task = config.clone();
             tokio::spawn(async move {
                 let ai = GeminiClient::new(&config_task.gemini_api_key);
-                let commentary = if ai.is_configured() {
-                    match tokio::time::timeout(
-                        Duration::from_secs(60),
-                        ai.forecast_commentary(&sym, &report.plain(russian), sqlite_task),
-                    )
-                    .await
-                    {
-                        Ok(Ok(t)) if !t.trim().is_empty() => Some(t),
-                        Ok(Err(e)) => {
-                            warn!("Sniper AI commentary failed for {sym}: {e}");
-                            None
-                        }
-                        _ => None,
+                // Fast single-pass: the multi-provider chain decides, not one key.
+                let commentary = match tokio::time::timeout(
+                    Duration::from_secs(50),
+                    ai.forecast_commentary(&sym, &report.plain(russian), sqlite_task),
+                )
+                .await
+                {
+                    Ok(Ok(t)) if !t.trim().is_empty() => Some(t),
+                    Ok(Err(e)) => {
+                        warn!("Sniper AI commentary failed for {sym}: {e}");
+                        None
                     }
-                } else {
-                    None
+                    _ => None,
                 };
                 let _ = bot_task.delete_message(chat, loading.id).await;
                 let verdict = html_escape::encode_text(&report.verdict(russian)).to_string();

@@ -123,6 +123,7 @@ fn build_handler() -> UpdateHandler<anyhow::Error> {
         .branch(case![Command::Forecast(a)].endpoint(handle_forecast_cmd))
         .branch(case![Command::Dip(a)].endpoint(handle_dip_cmd))
         .branch(case![Command::Sniper(a)].endpoint(handle_sniper_cmd))
+        .branch(case![Command::Bottom(a)].endpoint(handle_bottom_cmd))
         .branch(case![Command::Memo(a)].endpoint(handle_memo_cmd))
         .branch(case![Command::Goal(a)].endpoint(handle_goal_cmd))
         .branch(case![Command::Plan(a)].endpoint(handle_plan_cmd))
@@ -177,6 +178,10 @@ fn build_handler() -> UpdateHandler<anyhow::Error> {
         .branch(
             dptree::filter(|q: CallbackQuery| q.data.as_deref().unwrap_or("").starts_with("snp:"))
                 .endpoint(handle_sniper_cb),
+        )
+        .branch(
+            dptree::filter(|q: CallbackQuery| q.data.as_deref().unwrap_or("").starts_with("btm:"))
+                .endpoint(handle_bottom_cb),
         );
     // The generic callback handler needs `MyDialogue` (alert/wallet/AI wizard
     // flows), so it stays inside a dialogue context. Those buttons always sit on
@@ -331,6 +336,7 @@ async fn handle_help(bot: Bot, msg: Message) -> anyhow::Result<()> {
                      • <code>/forecast</code> [SYMS] — Deterministic forecast for 1/3/5/7/14/30/90/180 days + your avg entry vs the dip band (e.g. <code>/forecast BTC ETH</code>); <code>/forecast verify</code> — backtest on realized history\n\
                      • <code>/dip</code> [SYMS] — Dip zones, P(touch level within 7/14/30/90d) and a buy-the-dip verdict vs your average entry (e.g. <code>/dip BTC</code>)\n\
                      • <code>/sniper</code> [SYMS] — Hardcore Dip Sniper: cash pool, three left-tail limit buckets, P(touch) and the resulting average entry; <code>/sniper cash 1000</code> | <code>/sniper protect on|off</code> | <code>/sniper alerts on|off</code>\n\
+                     • <code>/bottom</code> [SYMS] — Bottom radar: an explicit is-this-the-bottom, should-I-buy verdict with a concrete buy level and a 0–100 bottom score (works for coins you do not hold yet)\n\
                      • <code>/memo [text]</code> — AI memory note (e.g. <code>/memo invest 100 USD at a time</code>); <code>/memo list</code> | <code>/memo del N</code>\n\
                      • <code>/goal [text]</code> — Proactive goal; AI alerts you when market conditions fit (e.g. <code>/goal want to spend 400 USD on crypto this month</code>); <code>/goal list</code> | <code>/goal progress N text</code> | <code>/goal done N</code> | <code>/goal del N</code>\n\
                      • <code>/plan</code> — Plan dashboard menu; <code>/plan status</code> | <code>/plan check</code> (ask the AI about your plan now) | <code>/plan ask question</code>\n\
@@ -525,6 +531,18 @@ async fn handle_sniper_cmd(
     args: String,
 ) -> anyhow::Result<()> {
     handlers::handle_sniper_cmd(bot, msg, store, cmc, sqlite, config, args).await
+}
+
+async fn handle_bottom_cmd(
+    bot: Bot,
+    msg: Message,
+    store: Arc<Store>,
+    cmc: Arc<CryptoClient>,
+    sqlite: Arc<crate::db::SqliteStore>,
+    config: Arc<Config>,
+    args: String,
+) -> anyhow::Result<()> {
+    handlers::handle_bottom_cmd(bot, msg, store, cmc, sqlite, config, args).await
 }
 async fn handle_patch_cmd_ep(
     bot: Bot,
@@ -1019,6 +1037,18 @@ async fn handle_sniper_cb(
     sqlite: Arc<crate::db::SqliteStore>,
 ) -> anyhow::Result<()> {
     handlers::handle_sniper_callback(bot, q, store, cmc, sqlite, config).await
+}
+
+/// Bottom-radar callbacks (`btm:ai:SYM`, `btm:fx:SYM`).
+async fn handle_bottom_cb(
+    bot: Bot,
+    q: CallbackQuery,
+    store: Arc<Store>,
+    cmc: Arc<CryptoClient>,
+    config: Arc<Config>,
+    sqlite: Arc<crate::db::SqliteStore>,
+) -> anyhow::Result<()> {
+    handlers::handle_bottom_callback(bot, q, store, cmc, sqlite, config).await
 }
 
 async fn handle_callback(
@@ -1606,7 +1636,14 @@ mod handler_smoke_tests {
 
         let handler = build_handler();
 
-        for text in ["/ver", "/b", "/sniper", "/forecast BTC", "просто текст"] {
+        for text in [
+            "/ver",
+            "/b",
+            "/sniper",
+            "/bottom",
+            "/forecast BTC",
+            "просто текст",
+        ] {
             let mut deps = dptree::deps![
                 bot.clone(),
                 me.clone(),
