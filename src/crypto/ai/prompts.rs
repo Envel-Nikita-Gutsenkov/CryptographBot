@@ -223,7 +223,7 @@ pub fn build_ask_prompt(
         None => String::new(),
     };
 
-    let intel_section = if market_intel_context.trim().is_empty() {
+    let mut intel_section = if market_intel_context.trim().is_empty() {
         String::new()
     } else {
         format!("ON-CHAIN & MARKET INTELLIGENCE:\n{market_intel_context}\n\n")
@@ -246,8 +246,9 @@ pub fn build_ask_prompt(
     // exceed that (market data + news + web search + history), which made every
     // Groq generator fail with HTTP 413 and the whole pipeline die. Assemble
     // the prompt, then progressively truncate the least-critical blocks (web
-    // search -> news -> market data) and rebuild until it fits. The question,
-    // portfolio, memory and system instructions are always kept intact.
+    // search -> news -> market data -> on-chain intel) and rebuild until it
+    // fits. The question, portfolio, memory and system instructions are always
+    // kept intact.
     // ~16k chars ≈ ~5.3k tokens, under the smallest provider gate
     // (Groq refuses prompts above ~6000 tokens, 3 chars/token).
     const PROMPT_CHAR_BUDGET: usize = 16_000;
@@ -302,10 +303,15 @@ pub fn build_ask_prompt(
         // Over budget: cut the largest non-empty, least-critical block and
         // rebuild. Prefer web search, then news, then market data.
         let over = prompt.len() - PROMPT_CHAR_BUDGET;
-        let target = [&mut web_section, &mut news_context, &mut market_data]
-            .into_iter()
-            .filter(|b| !b.is_empty())
-            .max_by_key(|b| b.len());
+        let target = [
+            &mut web_section,
+            &mut news_context,
+            &mut market_data,
+            &mut intel_section,
+        ]
+        .into_iter()
+        .filter(|b| !b.is_empty())
+        .max_by_key(|b| b.len());
         let Some(block) = target else {
             // Nothing left to cut — return the best we can do.
             return prompt;
@@ -372,6 +378,16 @@ pub fn build_proactive_prompt(
     previous_analysis: Option<&str>,
     preferred_lang: &str,
 ) -> String {
+    // Groq's free tier refuses prompts above ~6000 tokens (3 chars/token); the
+    // goal-check prompt carries news, on-chain intel, the previous scan and the
+    // portfolio alongside goals/memos, and used to assemble ~9.8k tokens so
+    // every Groq generator refused it. Goals, memos and the market snapshot are
+    // the ground truth and stay intact; the rest is budgeted.
+    let portfolio_context = crate::format::truncate_middle(portfolio_context, 2_500);
+    let market_snapshot = crate::format::truncate_middle(market_snapshot, 3_000);
+    let market_intel = crate::format::truncate_middle(market_intel, 1_200);
+    let news_context = crate::format::truncate_middle(news_context, 5_000);
+    let previous_analysis = previous_analysis.map(|p| crate::format::truncate_middle(p, 1_500));
     let prev = previous_analysis
         .map(|p| format!("PREVIOUS SCAN ANALYSIS (from the last scan; do not repeat alerts already sent unless conditions changed):\n{p}\n\n"))
         .unwrap_or_default();
@@ -574,6 +590,29 @@ mod tests {
         assert!(prompt.contains(portfolio));
         assert!(prompt.contains("BTC 75000"));
         assert!(!prompt.contains("truncated to fit provider window"));
+    }
+
+    #[test]
+    fn proactive_prompt_stays_under_groq_gate() {
+        // The goal-check prompt used to assemble ~9.8k tokens and every Groq
+        // generator refused it, so the hourly scan silently fell back.
+        let big = "x".repeat(40_000);
+        let p = build_proactive_prompt(
+            "2026-11-03",
+            &big,
+            &big,
+            &big,
+            &big,
+            "goal 7: buy dip",
+            "memo: invest 100 USD/week",
+            Some(&big),
+            "en",
+        );
+        let tokens = crate::crypto::ai::providers::estimate_tokens(&p);
+        assert!(tokens < 6_000, "goal-check prompt is {tokens} tokens");
+        // Ground truth (goals, memos) must survive.
+        assert!(p.contains("goal 7: buy dip"));
+        assert!(p.contains("invest 100 USD/week"));
     }
 
     #[test]
