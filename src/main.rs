@@ -165,6 +165,53 @@ async fn main_inner() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // `cargo run -- --commentary BTC` — exercise the exact on-demand AI path the
+    // forecast table's "AI analysis" button uses, and print how long it took.
+    // This is the only way to verify the button without tapping Telegram.
+    if args.len() > 2 && args[1] == "--commentary" {
+        let config = Arc::new(config::Config::from_env()?);
+        db::SqliteStore::initialize_schema(&config.sqlite_db)?;
+        let sqlite = Arc::new(db::SqliteStore::new(&config.sqlite_db)?);
+        let cmc = Arc::new(crypto::CryptoClient::new(
+            &config.cmc_api_key,
+            &config.coingecko_api_key,
+            &config.coincap_api_key,
+            &config.cryptocompare_api_key,
+            Some(sqlite.clone()),
+        ));
+        let mut failed = false;
+        for sym in args[2..].iter() {
+            let sym = sym.to_uppercase();
+            let f = match bot::handlers::build_forecast(&sym, &cmc, &sqlite, None).await {
+                Ok(f) => f,
+                Err(e) => {
+                    println!("{sym}: forecast failed — {e}");
+                    failed = true;
+                    continue;
+                }
+            };
+            let ai = crypto::ai::GeminiClient::new(&config.gemini_api_key);
+            let started = std::time::Instant::now();
+            match ai
+                .forecast_commentary(&sym, &f.render(), sqlite.clone())
+                .await
+            {
+                Ok(t) => println!("[{sym}] OK in {}ms\n{}\n", started.elapsed().as_millis(), t),
+                Err(e) => {
+                    println!(
+                        "[{sym}] FAILED after {}ms — {e}",
+                        started.elapsed().as_millis()
+                    );
+                    failed = true;
+                }
+            }
+        }
+        if failed {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     // `cargo run -- forecast BTC [ETH ...]` — deterministic multi-horizon
     // forecast (1/3/5/7/14/30/90/180d) from the local history cache merged with
     // the intraday rows in SQLite. No AI call, no API quota.
