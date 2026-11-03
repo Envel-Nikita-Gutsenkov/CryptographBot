@@ -248,9 +248,9 @@ pub fn build_ask_prompt(
     // the prompt, then progressively truncate the least-critical blocks (web
     // search -> news -> market data) and rebuild until it fits. The question,
     // portfolio, memory and system instructions are always kept intact.
-    // ~24k chars ≈ ~6000 tokens, a safe margin under the smallest Groq
-    // window (qwen3.8-27b caps at 7000 ITPM).
-    const PROMPT_CHAR_BUDGET: usize = 24_000;
+    // ~16k chars ≈ ~5.3k tokens, under the smallest provider gate
+    // (Groq refuses prompts above ~6000 tokens, 3 chars/token).
+    const PROMPT_CHAR_BUDGET: usize = 16_000;
     let mut market_data = market_data.to_string();
     let mut news_context = news_context.to_string();
     loop {
@@ -435,6 +435,13 @@ pub fn lang_instruction(code: &str) -> &'static str {
 /// Cheap-model reviewer: verifies the two powerful drafts against the ground
 /// truth snapshot and merges them into one corrected JSON draft.
 pub fn build_proactive_reviewer_prompt(prompt: &str, draft_a: &str, draft_b: &str) -> String {
+    // Groq's free tier refuses prompts above ~6000 tokens (3 chars/token), and
+    // this prompt carries the full goal-check context plus two long drafts — it
+    // used to assemble ~10k tokens, so every Groq reviewer failed and the merge
+    // stage silently disappeared. Budget each block so the merge always runs.
+    let prompt = crate::format::truncate_middle(prompt, 6_000);
+    let draft_a = crate::format::truncate_middle(draft_a, 3_600);
+    let draft_b = crate::format::truncate_middle(draft_b, 3_600);
     format!(
         "You are a meticulous data verifier for a goal-check AI.\n\n\
         ORIGINAL REQUEST (contains the ground-truth market snapshot — verify every number against it):\n{prompt}\n\n\
@@ -451,6 +458,9 @@ pub fn build_proactive_reviewer_prompt(prompt: &str, draft_a: &str, draft_b: &st
 
 /// Final critic: powerful model fact-checks the merged draft.
 pub fn build_proactive_critic_prompt(prompt: &str, merged_draft: &str) -> String {
+    // Same Groq window as the reviewer: keep the ground truth, trim the draft.
+    let prompt = crate::format::truncate_middle(prompt, 5_000);
+    let merged_draft = crate::format::truncate_middle(merged_draft, 7_500);
     format!(
         "You are the final fact-checking critic for a goal-check AI.\n\n\
         ORIGINAL REQUEST (ground truth snapshot and rules):\n{prompt}\n\n\
@@ -466,6 +476,9 @@ pub fn build_proactive_critic_prompt(prompt: &str, merged_draft: &str) -> String
 /// verdict JSON before it is finalized. Bounded to one call — if it fails or
 /// returns unusable JSON, the critic's output is kept.
 pub fn build_proactive_reflection_prompt(prompt: &str, critic_json: &str) -> String {
+    // Same Groq window as the reviewer/critic.
+    let prompt = crate::format::truncate_middle(prompt, 5_000);
+    let critic_json = crate::format::truncate_middle(critic_json, 7_500);
     format!(
         "You are a meticulous quality-control reviewer for a goal-check AI.\n\n\
         ORIGINAL REQUEST (ground truth snapshot and rules):\n{prompt}\n\n\

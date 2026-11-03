@@ -15,6 +15,28 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
     out
 }
 
+/// Keep the head and the tail of `s`, dropping the middle. Used when a prompt
+/// block has instructions at the start and machine-readable ids/rules at the
+/// end — plain truncation would silently drop the ids.
+pub fn truncate_middle(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        return s.to_string();
+    }
+    const MARKER: &str = "\n… (middle trimmed to fit the provider window) …\n";
+    let marker_len = MARKER.chars().count();
+    if max <= marker_len + 20 {
+        return truncate_chars(s, max);
+    }
+    let keep = max - marker_len;
+    let head = keep * 3 / 5;
+    let tail = keep - head;
+    let mut out: String = chars[..head].iter().collect();
+    out.push_str(MARKER);
+    out.extend(chars[chars.len() - tail..].iter());
+    out
+}
+
 // ── Cache normalization ──
 
 /// Compact, formatting-free version of an AI-generated summary for cache storage.
@@ -430,7 +452,20 @@ pub fn format_fng(fng: &FearAndGreed) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{plain_for_cache, redact_secrets, truncate_chars};
+    use super::{plain_for_cache, redact_secrets, truncate_chars, truncate_middle};
+
+    #[test]
+    fn truncate_middle_keeps_head_and_tail() {
+        let s: String = (0..200).map(|i| format!("{i}.")).collect();
+        let body = format!("HEAD{}{}TAIL", s, s);
+        let t = truncate_middle(&body, 200);
+        assert!(t.starts_with("HEAD"));
+        assert!(t.ends_with("TAIL"));
+        assert!(t.contains("middle trimmed"));
+        assert!(t.chars().count() <= 200 + 10);
+        // Short input is returned unchanged.
+        assert_eq!(truncate_middle("abc", 10), "abc");
+    }
 
     #[test]
     fn plain_for_cache_strips_markdown_and_emoji() {
