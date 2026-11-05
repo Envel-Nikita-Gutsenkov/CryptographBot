@@ -159,16 +159,15 @@ pub fn render_symbol(
 
     let longest = windows.last().unwrap();
     text.push_str(&format!(
-        "\nYTD window: {} ago {} → now {} · high {} · low {}",
+        "\nRange {}d: {} – {} · now {:.0}% of range",
         if longest.is_partial() {
-            format!("{}d (covered)", longest.days)
+            longest.covered_days
         } else {
-            format!("{}d", longest.days)
+            longest.days
         },
-        fmt_price(longest.start_price),
-        fmt_price(current),
-        fmt_price(longest.high),
         fmt_price(longest.low),
+        fmt_price(longest.high),
+        longest.in_range_pct,
     ));
 
     if windows.iter().any(|w| w.is_partial()) {
