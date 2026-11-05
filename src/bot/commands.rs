@@ -11,6 +11,8 @@ pub enum Command {
     Help,
     #[command(description = "Get prices: /price or /price BTC ETH")]
     Price(String),
+    #[command(description = "Long-range prices: /long BTC | 90/180/360-day change, low/high")]
+    Long(String),
     #[command(description = "Top N coins by volume: /top 10")]
     Top(String),
     #[command(description = "Portfolio overview")]

@@ -398,6 +398,19 @@ pub fn bottom_actions(symbol: &str) -> InlineKeyboardMarkup {
     ])
 }
 
+/// Compact menu attached to `/long` cards: just the windows that command is
+/// about, so every button leads to a chart that actually opens.
+pub fn long_range_menu(symbol: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new([
+        vec![
+            btn("📉 90D", &format!("chart:{symbol}:90d")),
+            btn("📉 180D", &format!("chart:{symbol}:180d")),
+            btn("📉 1Y", &format!("chart:{symbol}:365d")),
+        ],
+        row1("🏠 Main Menu", "menu"),
+    ])
+}
+
 pub fn chart_period_menu(symbol: &str, active_period: &str) -> InlineKeyboardMarkup {
     let p1d = if active_period == "1d" {
         "• 1D •"

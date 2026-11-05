@@ -100,6 +100,7 @@ fn build_handler() -> UpdateHandler<anyhow::Error> {
         .branch(case![Command::B].endpoint(handle_start))
         .branch(case![Command::Help].endpoint(handle_help))
         .branch(case![Command::Price(a)].endpoint(handle_price_cmd))
+        .branch(case![Command::Long(a)].endpoint(handle_long_cmd))
         .branch(case![Command::Top(a)].endpoint(handle_top_cmd))
         .branch(case![Command::Portfolio].endpoint(handle_portfolio_cmd))
         .branch(case![Command::Pnl].endpoint(handle_pnl_cmd))
@@ -319,6 +320,7 @@ async fn handle_help(bot: Bot, msg: Message) -> anyhow::Result<()> {
     let help_text = "🤖 <b>Cryptograph Bot Command Reference</b>\n\n\
                      📈 <b>Market Intelligence</b>\n\
                      • <code>/price</code> [SYMS] — Get current quotes (e.g. <code>/price BTC ETH SOL</code>)\n\
+                     • <code>/long</code> [SYMS] — Long-range view: 90/180/360-day change, window low/high and where the price sits in that range (e.g. <code>/long BTC ETH SOL LINK</code>)\n\
                      • <code>/top</code> [N] — Top N coins by 24h volume (e.g. <code>/top 10</code>)\n\
                      • <code>/convert</code> [AMT] [FROM] [TO] — Currency converter (e.g. <code>/convert 100 BYN BTC</code>)\n\n\
                      💼 <b>Portfolio Management</b>\n\
@@ -394,6 +396,18 @@ async fn handle_price_cmd(
     let user_id = msg.from().map(|u| u.id.0).unwrap_or(msg.chat.id.0 as u64);
     handlers::handle_price(bot, msg, user_id, store, cmc, config, args).await
 }
+async fn handle_long_cmd(
+    bot: Bot,
+    msg: Message,
+    store: Arc<Store>,
+    cmc: Arc<CryptoClient>,
+    sqlite: Arc<crate::db::SqliteStore>,
+    config: Arc<Config>,
+    args: String,
+) -> anyhow::Result<()> {
+    handlers::handle_long_cmd(bot, msg, store, cmc, sqlite, config, args).await
+}
+
 async fn handle_top_cmd(
     bot: Bot,
     msg: Message,
