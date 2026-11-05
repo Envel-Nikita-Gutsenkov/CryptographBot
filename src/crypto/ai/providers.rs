@@ -1090,6 +1090,20 @@ pub async fn probe_all_models(
             out.push(r);
         }
     }
+
+    // One line per sweep so an operator can confirm the button actually ran and
+    // see what broke without opening the chat.
+    let ok = out.iter().filter(|r| r.ok).count();
+    tracing::info!("AI probe: {}/{} models answered", ok, out.len());
+    for r in out.iter().filter(|r| !r.ok) {
+        tracing::warn!(
+            "AI probe failed: {}/{} HTTP {}: {}",
+            r.provider,
+            r.model,
+            r.status,
+            r.detail
+        );
+    }
     out
 }
 
