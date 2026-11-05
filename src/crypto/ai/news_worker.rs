@@ -110,6 +110,9 @@ pub async fn run_news_cycle(
         let m_data = crypto.get_global_metrics().await;
         let m_str = m_data.map(|m| format!("Global Market Context:\nFear & Greed Index: 50\nTotal Market Cap: {}\n24h Volume: {}\nBTC Dom: {}%\nETH Dom: {}%", m.total_market_cap, m.total_volume_24h, m.btc_dominance, m.eth_dominance)).unwrap_or_default();
 
+        // Let a user's /ask own the provider quotas while it runs.
+        crate::crypto::ai::pools::background_gate(std::time::Duration::from_secs(20)).await;
+
         // Run Single Pass Pipeline
         let verified_summary = match crate::crypto::ai::pipeline::summarize_news_single_pass(
             symbol,
@@ -264,6 +267,7 @@ mod tests {
         println!("--- RUNNING MOE PIPELINE FOR BTC ---");
         let test_db =
             std::sync::Arc::new(crate::db::sqlite::SqliteStore::new("test_news.db").unwrap());
+        crate::crypto::ai::pools::background_gate(std::time::Duration::from_secs(20)).await;
         let final_summary: String = crate::crypto::ai::pipeline::generate_moe_pipeline(
             &prompt_base,
             Some("No previous summary. Everything is fine."),

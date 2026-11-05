@@ -1,5 +1,6 @@
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::AtomicUsize;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -355,6 +356,43 @@ pub fn provider_exhausted_until(provider: &str) -> Option<Instant> {
         .filter(|until| Instant::now() < *until)
 }
 
+/// Number of user-facing AI requests currently in flight.
+static INTERACTIVE_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// RAII guard marking an interactive (user-initiated) AI request. While at
+/// least one is alive, background workers back off before spending a provider
+/// quota: free tiers are small enough that a volatility-triggered sweep of
+/// news/watcher/macro jobs can drain every key and leave a user's /ask with
+/// nothing — the exact "лимиты исчерпаны" the owner saw during a price drop.
+pub struct InteractiveGuard;
+
+impl InteractiveGuard {
+    pub fn acquire() -> Self {
+        INTERACTIVE_ACTIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for InteractiveGuard {
+    fn drop(&mut self) {
+        INTERACTIVE_ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+pub fn interactive_active() -> bool {
+    INTERACTIVE_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) > 0
+}
+
+/// Called by background workers before an AI call. Yields while the owner is
+/// waiting for an answer, but never blocks a worker forever: after `max_wait`
+/// it proceeds anyway so scheduled jobs cannot starve.
+pub async fn background_gate(max_wait: std::time::Duration) {
+    let deadline = Instant::now() + max_wait;
+    while interactive_active() && Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
 pub fn is_provider_exhausted(provider: &str) -> bool {
     provider_exhausted_until(provider).is_some()
 }
@@ -440,6 +478,98 @@ pub(crate) fn interleave_by_provider(models: Vec<ModelConfig>) -> Vec<ModelConfi
     out
 }
 
+/// Whether the env carries a key for this provider (lower-case provider name).
+/// A missing key is the most common reason a whole provider silently drops out
+/// of the pool, so both selection and diagnostics use this single definition.
+pub(crate) fn key_available(provider_lower: &str) -> bool {
+    match provider_lower {
+        "gemini" => !std::env::var("GEMINI_API_KEY")
+            .unwrap_or_default()
+            .is_empty(),
+        "openrouter" => !std::env::var("OPENROUTER_API_KEY")
+            .unwrap_or_default()
+            .is_empty(),
+        "groq" => !std::env::var("GROQ_API_KEY").unwrap_or_default().is_empty(),
+        "mistral" => !std::env::var("MISTRAL_API_KEY")
+            .unwrap_or_default()
+            .is_empty(),
+        "nvidia" => !std::env::var("NVIDIA_API_KEY")
+            .unwrap_or_default()
+            .is_empty(),
+        "cohere" => !std::env::var("COHERE_API_KEY")
+            .unwrap_or_default()
+            .is_empty(),
+        "cerebras" => !std::env::var("CEREBRAS_API_KEY")
+            .unwrap_or_default()
+            .is_empty(),
+        "huggingface" | "hf" => !std::env::var("HF_API_KEY").unwrap_or_default().is_empty(),
+        "cloudflare" | "cf" => !std::env::var("CLOUDFLARE_API_TOKEN")
+            .unwrap_or_default()
+            .is_empty(),
+        "deepseek" | "ds" => !std::env::var("DEEPSEEK_API_KEY")
+            .unwrap_or_default()
+            .is_empty(),
+        _ => false,
+    }
+}
+
+/// One-screen snapshot of why the pool may be empty at failure time: benched
+/// models, exhausted provider quotas, models dead for today, providers with no
+/// key. Callers print this next to an error so "no provider answered" becomes
+/// actionable instead of a blanket claim that every provider was tried.
+pub fn pool_status_report() -> Vec<String> {
+    let mut lines = Vec::new();
+    let now = Instant::now();
+
+    if let Some(map) = CIRCUIT_BREAKER.get() {
+        let mut bench: Vec<String> = map
+            .iter()
+            .filter(|e| *e.value() > now)
+            .map(|e| {
+                let secs = e.value().saturating_duration_since(now).as_secs();
+                format!("{} (~{}s)", e.key(), secs)
+            })
+            .collect();
+        bench.sort();
+        if !bench.is_empty() {
+            lines.push(format!("⛔ В бане: {}", bench.join(", ")));
+        }
+    }
+
+    if let Some(q) = quota_report() {
+        lines.push(format!("📉 Исчерпаны: {q}"));
+    }
+
+    let dead = dead_models_today();
+    if !dead.is_empty() {
+        lines.push(format!("💀 Мертвы сегодня: {}", dead.join(", ")));
+    }
+
+    let models = load_all_models();
+    let mut no_key: Vec<String> = models
+        .iter()
+        .map(|m| m.provider.clone())
+        .filter(|p| !key_available(&p.to_lowercase()))
+        .collect();
+    no_key.sort();
+    no_key.dedup();
+    if !no_key.is_empty() {
+        lines.push(format!("🔑 Нет ключа: {}", no_key.join(", ")));
+    }
+
+    let usable_count = models
+        .iter()
+        .filter(|m| {
+            key_available(&m.provider.to_lowercase()) && !is_provider_exhausted(&m.provider)
+        })
+        .count();
+    lines.push(format!(
+        "✅ Кандидатов в пуле: {usable_count}/{}",
+        models.len()
+    ));
+    lines
+}
+
 pub fn get_available_models(role: Option<&str>) -> Vec<String> {
     let mut models_file = ModelsFile {
         models: load_all_models(),
@@ -464,37 +594,6 @@ pub fn get_available_models(role: Option<&str>) -> Vec<String> {
             "news" | "macro" => 1,
             "watcher" => 2,
             _ => 3,
-        }
-    }
-    fn key_available(provider_lower: &str) -> bool {
-        match provider_lower {
-            "gemini" => !std::env::var("GEMINI_API_KEY")
-                .unwrap_or_default()
-                .is_empty(),
-            "openrouter" => !std::env::var("OPENROUTER_API_KEY")
-                .unwrap_or_default()
-                .is_empty(),
-            "groq" => !std::env::var("GROQ_API_KEY").unwrap_or_default().is_empty(),
-            "mistral" => !std::env::var("MISTRAL_API_KEY")
-                .unwrap_or_default()
-                .is_empty(),
-            "nvidia" => !std::env::var("NVIDIA_API_KEY")
-                .unwrap_or_default()
-                .is_empty(),
-            "cohere" => !std::env::var("COHERE_API_KEY")
-                .unwrap_or_default()
-                .is_empty(),
-            "cerebras" => !std::env::var("CEREBRAS_API_KEY")
-                .unwrap_or_default()
-                .is_empty(),
-            "huggingface" | "hf" => !std::env::var("HF_API_KEY").unwrap_or_default().is_empty(),
-            "cloudflare" | "cf" => !std::env::var("CLOUDFLARE_API_TOKEN")
-                .unwrap_or_default()
-                .is_empty(),
-            "deepseek" | "ds" => !std::env::var("DEEPSEEK_API_KEY")
-                .unwrap_or_default()
-                .is_empty(),
-            _ => false,
         }
     }
 
@@ -619,6 +718,30 @@ mod tests {
         mark_provider_exhausted("ExpiredProvider", Instant::now() - Duration::from_secs(1));
         assert!(!is_provider_exhausted("ExpiredProvider"));
         assert!(!quota_report().unwrap().contains("ExpiredProvider"));
+    }
+
+    #[test]
+    fn pool_status_report_always_states_candidate_count() {
+        // The error text in /ask leans on this line to explain the failure, so
+        // it must always be present, even when nothing is benched or missing.
+        let report = pool_status_report();
+        let last = report.last().expect("report must never be empty");
+        assert!(
+            last.starts_with("✅ Кандидатов в пуле:"),
+            "unexpected tail line: {last}"
+        );
+    }
+
+    #[test]
+    fn pool_status_report_names_benched_models() {
+        let provider = crate::crypto::ai::providers::Provider::Gemini;
+        ban_provider_model(&provider, "status-report-probe", 60);
+        let report = pool_status_report().join("\n");
+        assert!(
+            report.contains("status-report-probe"),
+            "a benched model must be visible in the report: {report}"
+        );
+        clear_provider_model_ban(&provider, "status-report-probe");
     }
 
     #[test]

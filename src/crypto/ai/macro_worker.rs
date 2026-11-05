@@ -63,6 +63,9 @@ pub async fn run_macro_worker(sqlite: Arc<SqliteStore>, crypto: Arc<CryptoClient
             global_str, history_context
         );
 
+        // Let a user's /ask own the provider quotas while it runs.
+        crate::crypto::ai::pools::background_gate(std::time::Duration::from_secs(20)).await;
+
         // 4. Run through single-pass lightweight LLM (borrowing the summarize_news_single_pass logic)
         let verified_summary = match crate::crypto::ai::pipeline::summarize_news_single_pass(
             "GLOBAL",

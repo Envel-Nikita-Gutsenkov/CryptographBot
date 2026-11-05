@@ -427,6 +427,8 @@ async fn check_user(
     if !ai.is_configured() {
         return Ok(());
     }
+    // Let a user's /ask own the provider quotas while it runs.
+    crate::crypto::ai::pools::background_gate(Duration::from_secs(20)).await;
 
     let symbols = collect_symbols(store, user_id);
     if symbols.is_empty() {

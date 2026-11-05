@@ -142,6 +142,31 @@ async fn fetch_free_models(
     if key.is_empty() {
         return Ok(Vec::new());
     }
+    // The /models endpoint answers 200 even for a revoked or deleted account,
+    // so validating there proves nothing. /key is the only cheap call that
+    // reports whether the token can actually be used for chat completions;
+    // without this gate the ranker happily writes an overlay full of models
+    // that every real request will reject with 401.
+    let key_check = client
+        .get("https://openrouter.ai/api/v1/key")
+        .header("Authorization", format!("Bearer {key}"))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await;
+    match key_check {
+        Ok(r) if r.status().is_success() => {}
+        Ok(r) => {
+            tracing::warn!(
+                "OpenRouter key rejected (HTTP {}) — skipping free-model discovery",
+                r.status().as_u16()
+            );
+            return Ok(Vec::new());
+        }
+        Err(e) => {
+            tracing::warn!("OpenRouter key check failed ({e}) — skipping discovery");
+            return Ok(Vec::new());
+        }
+    }
     let resp = client
         .get("https://openrouter.ai/api/v1/models")
         .header("Authorization", format!("Bearer {key}"))

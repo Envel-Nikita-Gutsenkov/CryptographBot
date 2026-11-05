@@ -321,9 +321,11 @@ pub async fn call_with_critic(
     };
     let critic_prompt = build_moe_critic_prompt(prompt, &draft_a, &draft_b, format_instruction);
 
-    // 3. Run Critic Queue (bounded by the shared deadline — N critics × 25s
-    //    used to exceed it and take the whole answer down with them)
-    let critic_budget = std::cmp::min(remaining(), std::time::Duration::from_secs(45));
+    // 3. Run Critic Queue (bounded by the shared deadline). Each critic got 25s,
+    //    which reasoning-capable models (deepseek-v4-flash) consistently blew,
+    //    so every /ask silently degraded to the raw generator draft. A 40s
+    //    per-critic slice with a 55s stage budget still fits the 135s deadline.
+    let critic_budget = std::cmp::min(remaining(), std::time::Duration::from_secs(55));
     let (critic_model, critic_res, critic_ok) = match tokio::time::timeout(
         critic_budget,
         run_dynamic_critic(
@@ -663,7 +665,7 @@ pub async fn run_dynamic_critic(
             println!(">> [AI Model Call] Critic {}", critic);
         }
         match tokio::time::timeout(
-            std::time::Duration::from_secs(25),
+            super::providers::CRITIC_CALL_TIMEOUT,
             super::providers::call_any_model_with_search(
                 &client,
                 &gemini_key,
@@ -692,8 +694,16 @@ pub async fn run_dynamic_critic(
                 continue;
             }
             Err(_) => {
-                tracing::warn!("Critic {} timed out after 25s", critic);
-                last_err = anyhow::anyhow!("Critic {} timed out after 25s", critic);
+                tracing::warn!(
+                    "Critic {} timed out after {}s",
+                    critic,
+                    super::providers::CRITIC_CALL_TIMEOUT.as_secs()
+                );
+                last_err = anyhow::anyhow!(
+                    "Critic {} timed out after {}s",
+                    critic,
+                    super::providers::CRITIC_CALL_TIMEOUT.as_secs()
+                );
                 continue;
             }
         }

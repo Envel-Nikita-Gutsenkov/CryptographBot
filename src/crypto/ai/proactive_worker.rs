@@ -655,6 +655,7 @@ async fn run_goal_pipeline_traced_with<F: Fn(&str, &str)>(
     let mut reviewer_model = String::new();
     let mut merged = String::new();
     let mut last_err = anyhow::anyhow!("No reviewer models available");
+    crate::crypto::ai::pools::background_gate(Duration::from_secs(20)).await;
     for reviewer in reviewers {
         let call = tokio::time::timeout(
             Duration::from_secs(90),
@@ -710,6 +711,7 @@ async fn run_goal_pipeline_traced_with<F: Fn(&str, &str)>(
     let mut critic_model = String::new();
     let mut final_res = String::new();
     let mut last_err = anyhow::anyhow!("No critic models available");
+    crate::crypto::ai::pools::background_gate(Duration::from_secs(20)).await;
     for critic in critics {
         let call = tokio::time::timeout(
             Duration::from_secs(90),

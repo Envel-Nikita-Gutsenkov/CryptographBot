@@ -1,3 +1,9 @@
+/// Per-critic wall-clock slice. Reasoning-capable critics need more than the
+/// old 25s (deepseek-v4-flash timed out on every /ask, so the pipeline always
+/// fell back to the raw generator draft). Kept in one place so the pipeline
+/// budget and the log lines cannot drift apart.
+pub const CRITIC_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(40);
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Provider {
     Gemini,
@@ -303,131 +309,141 @@ async fn dispatch_provider_call(
 }
 
 /// Last-resort fallback used when the whole model pool is dead/skipped (rate
-/// limits, quota exhaustion, circuit breakers). Tries several independent
-/// providers in order — Cohere, Groq, OpenRouter, then Gemini — so a single
-/// provider outage (e.g. Gemini quota) can't hard-fail the pipeline.
+/// limits, quota exhaustion, circuit breakers).
+///
+/// Runs independent providers **in parallel waves** instead of one after
+/// another: the old sequential chain spent up to 20s per dead provider, so a
+/// single 429 early in the list (Cohere's monthly trial cap) could burn the
+/// whole /ask budget before DeepSeek was even tried — which is exactly how
+/// "лимиты исчерпаны" appeared while a healthy provider was still available.
 /// Returns (provider_label, text) on first success.
 pub async fn call_last_resort(
     client: &reqwest::Client,
     gemini_key: &str,
     prompt: &str,
 ) -> anyhow::Result<(String, String)> {
-    // Each provider is independent and bounded by a short timeout so a hanging
-    // provider (e.g. Gemini 2.5-flash) can't stall the whole fallback.
-    async fn try_provider<F, Fut>(label: &str, provider: &str, fut: F) -> Option<(String, String)>
+    use futures::future::BoxFuture;
+    use futures::stream::{FuturesUnordered, StreamExt};
+
+    type Job = BoxFuture<'static, Option<(String, String)>>;
+
+    // Each job is bounded and self-contained: it skips providers whose key-wide
+    // quota is already gone and records quota/auth failures for the pool.
+    fn job<F>(label: &'static str, provider: &'static str, fut: F) -> Job
     where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = anyhow::Result<String>>,
+        F: std::future::Future<Output = anyhow::Result<String>> + Send + 'static,
     {
-        // Never touch a provider whose key-wide quota is already gone — this is
-        // what turned a quota outage into minutes of pointless timeouts.
-        if crate::crypto::ai::pools::is_provider_exhausted(provider) {
-            return None;
-        }
-        match tokio::time::timeout(std::time::Duration::from_secs(20), fut()).await {
-            Ok(Ok(res)) => Some((label.to_string(), res)),
-            Ok(Err(e)) => {
-                let err_s = e.to_string();
-                if let Some(secs) = crate::crypto::ai::pools::quota_cooldown_secs(&err_s) {
-                    crate::crypto::ai::pools::mark_provider_exhausted(
-                        provider,
-                        std::time::Instant::now() + std::time::Duration::from_secs(secs),
-                    );
-                } else if err_s.contains("401") || err_s.contains("User not found") {
-                    // A revoked/invalid key never recovers on its own. Park the
-                    // provider for a day instead of probing it on every fallback
-                    // (OpenRouter's dead key produced one wasted call per answer).
-                    crate::crypto::ai::pools::mark_provider_exhausted(
-                        provider,
-                        std::time::Instant::now() + std::time::Duration::from_secs(86_400),
-                    );
+        Box::pin(async move {
+            if crate::crypto::ai::pools::is_provider_exhausted(provider) {
+                return None;
+            }
+            match tokio::time::timeout(std::time::Duration::from_secs(45), fut).await {
+                Ok(Ok(res)) => {
+                    crate::crypto::ai::pools::record_model_outcome(label, true);
+                    Some((label.to_string(), res))
                 }
-                tracing::warn!("Last-resort {} failed: {}", label, e);
-                None
+                Ok(Err(e)) => {
+                    let err_s = e.to_string();
+                    crate::crypto::ai::pools::record_model_outcome(label, false);
+                    if let Some(secs) = crate::crypto::ai::pools::quota_cooldown_secs(&err_s) {
+                        crate::crypto::ai::pools::mark_provider_exhausted(
+                            provider,
+                            std::time::Instant::now() + std::time::Duration::from_secs(secs),
+                        );
+                    } else if err_s.contains("401") || err_s.contains("User not found") {
+                        // A revoked/invalid key never recovers on its own. Park it
+                        // for a day instead of probing it on every fallback.
+                        crate::crypto::ai::pools::mark_provider_exhausted(
+                            provider,
+                            std::time::Instant::now() + std::time::Duration::from_secs(86_400),
+                        );
+                    }
+                    tracing::warn!("Last-resort {} failed: {}", label, e);
+                    None
+                }
+                Err(_) => {
+                    tracing::warn!("Last-resort {} timed out after 45s", label);
+                    None
+                }
             }
-            Err(_) => {
-                tracing::warn!("Last-resort {} timed out after 20s", label);
-                None
-            }
-        }
+        })
     }
 
-    // DeepSeek first: it is the only provider in the pool with a zero error
-    // rate over the last week, so the last-resort chain must not depend on
-    // Cohere/Groq being healthy.
-    if let Some(r) = try_provider("deepseek-v4-flash", "DeepSeek", || {
-        call_deepseek_model("deepseek-v4-flash", prompt)
-    })
-    .await
-    {
-        return Ok(r);
+    /// Run one parallel wave; return the first success or None if all failed.
+    async fn wave(jobs: Vec<Job>) -> Option<(String, String)> {
+        let mut set: FuturesUnordered<Job> = jobs.into_iter().collect();
+        while let Some(res) = set.next().await {
+            if let Some(ok) = res {
+                return Some(ok);
+            }
+        }
+        None
     }
-    // Mistral: independent vendor with its own quota buckets.
-    if let Some(r) = try_provider("mistral-large-4", "Mistral", || {
-        call_mistral_model(client, "mistral-large-4", prompt)
-    })
-    .await
-    {
-        return Ok(r);
-    }
-    if let Some(r) = try_provider("ministral-8b", "Mistral", || {
-        call_mistral_model(client, "ministral-8b-latest", prompt)
-    })
-    .await
-    {
-        return Ok(r);
-    }
-    // Cohere.
-    if let Some(r) = try_provider("command-a-reasoning", "Cohere", || {
-        call_cohere_model(client, "command-a-reasoning-08-2025", prompt)
-    })
-    .await
-    {
-        return Ok(r);
-    }
-    if let Some(r) = try_provider("command-a-plus", "Cohere", || {
-        call_cohere_model(client, "command-a-plus-05-2026", prompt)
-    })
-    .await
-    {
-        return Ok(r);
-    }
-    // Groq.
-    if let Some(r) = try_provider("gpt-oss-120b", "Groq", || {
-        call_groq_model(client, "openai/gpt-oss-120b", prompt)
-    })
-    .await
-    {
-        return Ok(r);
-    }
-    // Cloudflare Workers AI.
-    if let Some(r) = try_provider("llama-4-scout-cf", "Cloudflare", || {
-        call_cloudflare_model(client, "@cf/meta/llama-4-scout-17b-16e-instruct", prompt)
-    })
-    .await
-    {
-        return Ok(r);
-    }
-    if let Some(r) = try_provider("qwen3-30b-cf", "Cloudflare", || {
-        call_cloudflare_model(client, "@cf/qwen/qwen3-30b-a3b-fp8", prompt)
-    })
-    .await
-    {
-        return Ok(r);
-    }
-    // Gemini last (free tier quota is easily exhausted, one bucket per model).
-    let fallback_body = serde_json::json!({
+
+    // Wave 1: independent vendors with their own quota buckets. DeepSeek is the
+    // most reliable paid key; Mistral/Groq/Cloudflare cover the free tiers.
+    let (c, gp) = (client.clone(), prompt.to_string());
+    let gk = gemini_key.to_string();
+    let gemini_body = serde_json::json!({
         "contents": [{"parts": [{"text": prompt}]}]
     });
-    for gemini_model in ["gemini-2.5-flash", "gemini-2.5-flash-lite"] {
-        let body = fallback_body.clone();
-        if let Some(r) = try_provider(gemini_model, "Gemini", || {
-            call_gemini_model(client, gemini_key, gemini_model, &body)
-        })
-        .await
-        {
-            return Ok(r);
+
+    let mut w1: Vec<Job> = Vec::new();
+    w1.push(job("deepseek-v4-flash", "DeepSeek", {
+        let p = gp.clone();
+        async move { call_deepseek_model("deepseek-v4-flash", &p).await }
+    }));
+    w1.push(job("ministral-14b", "Mistral", {
+        let (c, p) = (c.clone(), gp.clone());
+        async move { call_mistral_model(&c, "ministral-14b-latest", &p).await }
+    }));
+    w1.push(job("gpt-oss-120b", "Groq", {
+        let (c, p) = (c.clone(), gp.clone());
+        async move { call_groq_model(&c, "openai/gpt-oss-120b", &p).await }
+    }));
+    w1.push(job("llama-4-scout-cf", "Cloudflare", {
+        let (c, p) = (c.clone(), gp.clone());
+        async move {
+            call_cloudflare_model(&c, "@cf/meta/llama-4-scout-17b-16e-instruct", &p).await
         }
+    }));
+    if let Some(r) = wave(w1).await {
+        return Ok(r);
+    }
+
+    // Wave 2: second models plus the easily-exhausted free tiers. Reaching this
+    // means wave 1 failed or was fully benched, so the extra calls are justified.
+    let mut w2: Vec<Job> = Vec::new();
+    w2.push(job("mistral-large-4", "Mistral", {
+        let (c, p) = (c.clone(), gp.clone());
+        async move { call_mistral_model(&c, "mistral-large-4", &p).await }
+    }));
+    w2.push(job("gpt-oss-20b", "Groq", {
+        let (c, p) = (c.clone(), gp.clone());
+        async move { call_groq_model(&c, "openai/gpt-oss-20b", &p).await }
+    }));
+    w2.push(job("qwen3-30b-cf", "Cloudflare", {
+        let (c, p) = (c.clone(), gp.clone());
+        async move { call_cloudflare_model(&c, "@cf/qwen/qwen3-30b-a3b-fp8", &p).await }
+    }));
+    w2.push(job("command-a-reasoning", "Cohere", {
+        let (c, p) = (c.clone(), gp.clone());
+        async move { call_cohere_model(&c, "command-a-reasoning-08-2025", &p).await }
+    }));
+    for gemini_model in ["gemini-2.5-flash-lite", "gemini-2.5-flash"] {
+        let body = gemini_body.clone();
+        let (c, k) = (c.clone(), gk.clone());
+        let label: &'static str = if gemini_model == "gemini-2.5-flash-lite" {
+            "gemini-2.5-flash-lite"
+        } else {
+            "gemini-2.5-flash"
+        };
+        w2.push(job(label, "Gemini", async move {
+            call_gemini_model(&c, &k, gemini_model, &body).await
+        }));
+    }
+    if let Some(r) = wave(w2).await {
+        return Ok(r);
     }
 
     Err(anyhow::anyhow!("All last-resort providers failed"))
@@ -938,16 +954,14 @@ async fn call_deepseek_model(model: &str, prompt: &str) -> anyhow::Result<String
         return Err(anyhow::anyhow!("DEEPSEEK_API_KEY not configured"));
     }
 
-    // Serialize DeepSeek calls so budget check + settle are race-free (hard cap,
-    // DeepSeek has no per-key limits so we enforce them here).
-    static CALL_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-    let _guard = CALL_LOCK
-        .get_or_init(|| tokio::sync::Mutex::new(()))
-        .lock()
-        .await;
-
+    // Serialize ONLY the short budget bookkeeping below — never the network
+    // call. The old global lock was held for the whole request, so a DeepSeek
+    // generator running 30-120s made the DeepSeek critic wait and time out on
+    // every /ask (the logs showed "Critic deepseek-v4-flash timed out"), which
+    // in turn degraded answers to the raw generator draft. DeepSeek has no
+    // per-key concurrency limit, so parallel calls are safe.
     let budget = super::deepseek_budget::DeepSeekBudget::instance();
-    budget
+    let reserved = budget
         .reserve(prompt)
         .map_err(|e| anyhow::anyhow!("DeepSeek budget: {}", e))?;
 
@@ -982,7 +996,7 @@ async fn call_deepseek_model(model: &str, prompt: &str) -> anyhow::Result<String
     let used = json["usage"]["total_tokens"]
         .as_i64()
         .unwrap_or_else(|| (prompt.len() as i64 / 4).max(1));
-    budget.settle(used.max(1));
+    budget.settle(reserved, used.max(1));
     budget.record_daily(model, used.max(1));
 
     json["choices"][0]["message"]["content"]

@@ -4,10 +4,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// Hard monthly budget for the paid DeepSeek provider (which has no per-key limits).
 ///
 /// Guarantees:
-/// - **Never exceeds the budget**: DeepSeek calls are serialized by a global call
-///   lock in `call_deepseek_model`; a request slot is consumed atomically and the
-///   token check uses a conservative upper bound (prompt estimate + max output),
-///   so even a single large response cannot push the month over the limit.
+/// - **Never exceeds the budget**: a request slot and a conservative token
+///   estimate are reserved atomically with `fetch_add` + rollback, so parallel
+///   callers cannot overshoot the cap without a lock (a lock held across a
+///   30-120s request was what starved the critic).
 /// - **Survives SQLite failures**: counters are mirrored in RAM. If the DB is
 ///   unavailable, the RAM copy stays authoritative for the rest of the month
 ///   (and is re-synced from the DB on the next month / restart if DB recovers).
@@ -22,6 +22,9 @@ pub struct DeepSeekBudget {
     requests_used: AtomicI64,
     /// Sticky flag: once DB ops fail, keep counting purely in RAM this month.
     db_failed: AtomicBool,
+    /// Unix second of the last DB hydration; throttles `refresh()` so the
+    /// hot path never does a SQLite read (and never needs a call lock).
+    last_refresh: AtomicI64,
 }
 
 static INSTANCE: OnceLock<DeepSeekBudget> = OnceLock::new();
@@ -34,6 +37,7 @@ impl DeepSeekBudget {
             tokens_used: AtomicI64::new(0),
             requests_used: AtomicI64::new(0),
             db_failed: AtomicBool::new(false),
+            last_refresh: AtomicI64::new(0),
         })
     }
 
@@ -53,23 +57,32 @@ impl DeepSeekBudget {
     }
 
     /// Re-sync RAM counters: resets on month rollover, hydrates from DB otherwise.
+    /// Hydration is throttled and uses `fetch_max`, so a concurrent `reserve`
+    /// can never have its increments rolled back by a stale DB read.
     fn refresh(&self) {
         let m = Self::month_now();
         if self.month.swap(m, Ordering::SeqCst) != m {
             self.tokens_used.store(0, Ordering::SeqCst);
             self.requests_used.store(0, Ordering::SeqCst);
             self.db_failed.store(false, Ordering::SeqCst);
+            self.last_refresh.store(0, Ordering::SeqCst);
         }
         if self.db_failed.load(Ordering::SeqCst) {
             return;
         }
+        let now = chrono::Utc::now().timestamp();
+        let last = self.last_refresh.load(Ordering::SeqCst);
+        if now.saturating_sub(last) < 30 {
+            return;
+        }
+        self.last_refresh.store(now, Ordering::SeqCst);
         let db = self.db.lock().unwrap().clone();
         if let Some(weak) = db {
             if let Some(store) = weak.upgrade() {
                 match store.get_monthly_usage("deepseek") {
                     Ok((t, r)) => {
-                        self.tokens_used.store(t, Ordering::SeqCst);
-                        self.requests_used.store(r, Ordering::SeqCst);
+                        self.tokens_used.fetch_max(t, Ordering::SeqCst);
+                        self.requests_used.fetch_max(r, Ordering::SeqCst);
                     }
                     Err(e) => {
                         tracing::warn!("DeepSeek budget: DB read failed, keeping RAM copy: {}", e);
@@ -94,20 +107,22 @@ impl DeepSeekBudget {
             .unwrap_or(500)
     }
 
-    /// Atomically consume one request slot and verify the estimated token cost fits
-    /// the remaining monthly budget. Returns `Err` if the call would exceed either limit.
-    /// Must be called while holding the DeepSeek call lock.
-    pub fn reserve(&self, prompt: &str) -> Result<(), String> {
+    /// Atomically reserve one request slot plus a conservative token estimate.
+    /// Returns the reserved estimate, which [`Self::settle`] must release.
+    /// Safe to call from parallel tasks: no lock, and both caps are enforced
+    /// with fetch_add + rollback, so the month can never overshoot.
+    pub fn reserve(&self, prompt: &str) -> Result<i64, String> {
         self.refresh();
 
-        let used_t = self.tokens_used.load(Ordering::SeqCst);
         // Conservative upper bound for the whole call: prompt tokens (chars/2 is an
         // upper bound even for Cyrillic), max output tokens, plus safety margin.
         let est = (prompt.len() as i64 / 2) + 8192 + 1024;
-        if used_t + est > Self::token_budget() {
+        let after_t = self.tokens_used.fetch_add(est, Ordering::SeqCst) + est;
+        if after_t > Self::token_budget() {
+            self.tokens_used.fetch_sub(est, Ordering::SeqCst);
             return Err(format!(
                 "monthly token budget would be exceeded ({} + ~{} > {})",
-                used_t,
+                after_t - est,
                 est,
                 Self::token_budget()
             ));
@@ -116,18 +131,20 @@ impl DeepSeekBudget {
         let used_r = self.requests_used.fetch_add(1, Ordering::SeqCst) + 1;
         if used_r > Self::req_budget() {
             self.requests_used.fetch_sub(1, Ordering::SeqCst);
+            self.tokens_used.fetch_sub(est, Ordering::SeqCst);
             return Err(format!(
                 "monthly request budget exceeded ({} / {})",
                 used_r - 1,
                 Self::req_budget()
             ));
         }
-        Ok(())
+        Ok(est)
     }
 
-    /// Commit the actual tokens used by a successful call (RAM + best-effort DB).
-    pub fn settle(&self, tokens: i64) {
+    /// Release the reservation from [`Self::reserve`] and commit the actual usage.
+    pub fn settle(&self, reserved: i64, tokens: i64) {
         let t = tokens.max(1);
+        self.tokens_used.fetch_sub(reserved, Ordering::SeqCst);
         self.tokens_used.fetch_add(t, Ordering::SeqCst);
         if self.db_failed.load(Ordering::SeqCst) {
             return;

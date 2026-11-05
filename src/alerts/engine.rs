@@ -161,6 +161,7 @@ async fn process_user(
         // `sqlite` is optional in some deployments; never panic on a missing
         // store — just skip the AI narration layer.
         if let Some(sqlite) = cmc.sqlite() {
+            crate::crypto::ai::pools::background_gate(std::time::Duration::from_secs(20)).await;
             if let Ok(comment) = crate::crypto::ai::pipeline::call_with_critic(
                 &req_client,
                 &config.gemini_api_key,

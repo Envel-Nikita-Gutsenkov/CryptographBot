@@ -67,6 +67,11 @@ pub async fn handle_ask_cmd(
     let reply_context = reply_context_from(&msg);
 
     tokio::spawn(async move {
+        // Mark this as a user-facing request for its whole lifetime: background
+        // workers pause before spending provider quotas while it runs, so a
+        // volatility sweep cannot drain the free tiers and leave the answer
+        // empty ("лимиты исчерпаны" during a price drop).
+        let _interactive = crate::crypto::ai::pools::InteractiveGuard::acquire();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let progress_bot = bot_task.clone();
         let progress_chat = chat_id;
@@ -132,24 +137,22 @@ pub async fn handle_ask_cmd(
                 } else {
                     err_str
                 };
-                // Name the exhausted quotas so the failure is actionable instead
-                // of a generic "AI failed". If nothing is actually benched, do not
-                // claim the quotas are gone — say the providers simply did not answer.
-                let quota = crate::crypto::ai::pools::quota_report();
-                let msg = match quota {
-                    Some(q) => format!(
-                        "❌ AI pipeline failed: {safe_err}\n\n\
-                         Лимиты исчерпаны у: {q}.\n\
-                         Остальные провайдеры перепробованы и не ответили.\n\
-                         /forecast, /dip, /sniper и /portfolio работают без AI."
-                    ),
-                    None => format!(
-                        "❌ AI pipeline failed: {safe_err}\n\n\
-                         Ни один провайдер не дал ответа, но ни один и не помечен\n\
-                         как исчерпавший лимит — смотри /aihealth.\n\
-                         /forecast, /dip, /sniper и /portfolio работают без AI."
-                    ),
-                };
+                // Show what actually happened to the pool instead of claiming
+                // "the rest of the providers did not answer": models are skipped
+                // by benches, day-deaths and missing keys long before any request
+                // is made, so the old wording was simply false and made /aihealth
+                // look broken. pool_status_report() prints the real state.
+                let mut msg = format!(
+                    "❌ AI не дал ответа: {safe_err}\n\nСостояние пула на момент ошибки:\n"
+                );
+                for line in crate::crypto::ai::pools::pool_status_report() {
+                    msg.push_str(&line);
+                    msg.push('\n');
+                }
+                msg.push_str(
+                    "\nПолная картина и перепроверка: /aihealth → 🔄 Recheck now.\n\
+                     /forecast, /dip, /sniper и /portfolio работают без AI.",
+                );
                 bot_task.send_message(chat_id, msg).await.ok();
             }
         }
