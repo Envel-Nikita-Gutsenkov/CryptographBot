@@ -23,7 +23,7 @@ use crate::{
 };
 
 /// Windows shown for every symbol, in days.
-pub const WINDOWS: [i64; 3] = [90, 180, 360];
+pub const WINDOWS: [i64; 4] = [60, 90, 180, 360];
 
 /// Cap the number of symbols so one call cannot fan out into dozens of history
 /// requests against rate-limited providers.
@@ -177,6 +177,67 @@ pub fn render_symbol(
     text
 }
 
+/// Build the long-range card for one symbol from the cheapest available
+/// history source (disk cache → SQLite → provider). `live_price` wins over the
+/// last close when the caller already has a fresh quote.
+pub async fn build_long_card(
+    symbol: &str,
+    cmc: &CryptoClient,
+    sqlite: &SqliteStore,
+    live_price: Option<f64>,
+    now_ms: i64,
+) -> Option<String> {
+    let sym = symbol.to_uppercase();
+    let series = crate::bot::handlers::forecast::load_series(&sym, cmc, sqlite).await;
+    if series.is_empty() {
+        warn!("/long: no series for {sym}");
+        return None;
+    }
+    let current = live_price
+        .filter(|p| *p > 0.0)
+        .or_else(|| series.last().map(|&(_, p)| p))?;
+    let windows = compute_windows(&series, current, now_ms);
+    Some(render_symbol(&sym, current, series.len(), &windows))
+}
+
+/// Send long-range cards for `symbols` (usually 1 or the whole watchlist).
+async fn send_cards(
+    bot: &Bot,
+    chat_id: teloxide::types::ChatId,
+    symbols: &[String],
+    cmc: &CryptoClient,
+    sqlite: &SqliteStore,
+) -> anyhow::Result<usize> {
+    if symbols.is_empty() {
+        return Ok(0);
+    }
+
+    let typing = bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing);
+    let sym_refs: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
+    let (_, quotes) = tokio::join!(typing, cmc.get_quotes(&sym_refs));
+    let quotes = quotes.unwrap_or_default();
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut sent = 0usize;
+    for sym in symbols {
+        let live = quotes
+            .iter()
+            .find(|q| q.symbol.eq_ignore_ascii_case(sym))
+            .map(|q| q.price_usd);
+        let Some(text) = build_long_card(sym, cmc, sqlite, live, now_ms).await else {
+            bot.send_message(chat_id, format!("📊 {sym}: no history available"))
+                .await?;
+            continue;
+        };
+        bot.send_message(chat_id, text)
+            .parse_mode(ParseMode::Html)
+            .reply_markup(keyboards::long_range_menu(sym))
+            .await?;
+        sent += 1;
+    }
+    Ok(sent)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_long_cmd(
     bot: Bot,
@@ -193,11 +254,7 @@ pub async fn handle_long_cmd(
         return Ok(());
     }
 
-    let mut symbols: Vec<String> = args
-        .split_whitespace()
-        .filter(|w| w.chars().all(|c| c.is_ascii_alphanumeric()))
-        .map(|w| w.to_uppercase())
-        .collect();
+    let mut symbols = parse_symbols(&args);
     if symbols.is_empty() {
         symbols = store.read(user_id, |p| p.settings.default_watchlist.clone());
     }
@@ -212,48 +269,65 @@ pub async fn handle_long_cmd(
     symbols.dedup();
     symbols.truncate(MAX_SYMBOLS);
 
-    let typing = bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing);
-    let sym_refs: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
-    let (_, quotes) = tokio::join!(typing, cmc.get_quotes(&sym_refs));
-    let quotes = quotes.unwrap_or_default();
-
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    let mut sent = 0usize;
-
-    for sym in &symbols {
-        // Daily closes come from the disk cache / SQLite first; the provider is
-        // only consulted when the cache cannot cover a year.
-        let series = crate::bot::handlers::forecast::load_series(sym, &cmc, &sqlite).await;
-        if series.is_empty() {
-            warn!("/long: no series for {sym}");
-            bot.send_message(msg.chat.id, format!("📊 {sym}: no history available"))
-                .await?;
-            continue;
-        }
-
-        let current = quotes
-            .iter()
-            .find(|q| q.symbol.eq_ignore_ascii_case(sym))
-            .map(|q| q.price_usd)
-            .filter(|p| *p > 0.0)
-            .or_else(|| series.last().map(|&(_, p)| p))
-            .unwrap_or_default();
-
-        let windows = compute_windows(&series, current, now_ms);
-        let text = render_symbol(sym, current, series.len(), &windows);
-
-        bot.send_message(msg.chat.id, text)
-            .parse_mode(ParseMode::Html)
-            .reply_markup(keyboards::long_range_menu(sym))
-            .await?;
-        sent += 1;
-    }
-
+    let sent = send_cards(&bot, msg.chat.id, &symbols, &cmc, &sqlite).await?;
     if sent == 0 {
         bot.send_message(msg.chat.id, "No data returned for the requested symbols.")
             .await?;
     }
+    Ok(())
+}
 
+fn parse_symbols(args: &str) -> Vec<String> {
+    args.split_whitespace()
+        .filter(|w| w.chars().all(|c| c.is_ascii_alphanumeric()))
+        .map(|w| w.to_uppercase())
+        .collect()
+}
+
+/// `long:SYM` (one symbol) and `long:menu` (the watchlist) — the buttons on
+/// `/price` cards and on the main menu, so the long view is reachable without
+/// typing a command.
+pub async fn handle_long_callback(
+    bot: Bot,
+    q: teloxide::types::CallbackQuery,
+    store: Arc<Store>,
+    cmc: Arc<CryptoClient>,
+    sqlite: Arc<SqliteStore>,
+    config: Arc<Config>,
+) -> anyhow::Result<()> {
+    let _ = bot.answer_callback_query(&q.id).await;
+    let (chat_id, _) = super::forecast::callback_target(&q);
+    let user_id = q.from.id.0;
+    let data = q.data.clone().unwrap_or_default();
+    tracing::info!("long callback: data={data} chat={}", chat_id.0);
+
+    if !config.is_admin(user_id) {
+        bot.send_message(chat_id, "⛔ Unauthorized").await?;
+        return Ok(());
+    }
+
+    let target = data.strip_prefix("long:").unwrap_or_default();
+    let mut symbols = if target.is_empty() || target.eq_ignore_ascii_case("menu") {
+        store.read(user_id, |p| p.settings.default_watchlist.clone())
+    } else {
+        parse_symbols(target)
+    };
+    if symbols.is_empty() {
+        bot.send_message(
+            chat_id,
+            "No symbols configured. Use /watchlist add BTC or /long BTC ETH",
+        )
+        .await?;
+        return Ok(());
+    }
+    symbols.dedup();
+    symbols.truncate(MAX_SYMBOLS);
+
+    let sent = send_cards(&bot, chat_id, &symbols, &cmc, &sqlite).await?;
+    if sent == 0 {
+        bot.send_message(chat_id, "No data returned for the requested symbols.")
+            .await?;
+    }
     Ok(())
 }
 
@@ -273,9 +347,17 @@ mod tests {
         let now = series.last().unwrap().0 + DAY_MS;
         let current = series.last().unwrap().1;
         let w = compute_windows(&series, current, now);
-        assert_eq!(w.len(), 3);
+        assert_eq!(w.len(), 4);
 
-        let d90 = &w[0];
+        let d60 = &w[0];
+        assert_eq!(d60.days, 60);
+        assert!((d60.change_pct - (current / (current - 60.0) - 1.0) * 100.0).abs() < 0.5);
+        assert!(d60.low >= current - 61.0 && d60.low <= current - 59.0);
+        assert!((d60.high - current).abs() < 1e-9);
+        assert!(d60.in_range_pct > 95.0);
+        assert!(!d60.is_partial());
+
+        let d90 = &w[1];
         assert_eq!(d90.days, 90);
         assert!((d90.change_pct - (current / (current - 90.0) - 1.0) * 100.0).abs() < 0.5);
         assert!(d90.low >= current - 91.0 && d90.low <= current - 89.0);
@@ -283,7 +365,8 @@ mod tests {
         assert!(d90.in_range_pct > 95.0);
         assert!(!d90.is_partial());
 
-        let d360 = &w[2];
+        let d360 = &w[3];
+        assert_eq!(d360.days, 360);
         assert!(!d360.is_partial());
     }
 
@@ -293,7 +376,7 @@ mod tests {
         let now = series.last().unwrap().0 + DAY_MS;
         let current = series.last().unwrap().1;
         let w = compute_windows(&series, current, now);
-        assert_eq!(w.len(), 3);
+        assert_eq!(w.len(), 4);
         for x in &w {
             assert!(x.is_partial());
             assert!(x.covered_days <= 30);
@@ -324,6 +407,7 @@ mod tests {
         let now = series.last().unwrap().0 + DAY_MS;
         let w = compute_windows(&series, 39.0, now);
         let text = render_symbol("TEST", 39.0, series.len(), &w);
+        assert!(text.contains("60d*"));
         assert!(text.contains("90d*"));
         assert!(text.contains("180d*"));
         assert!(text.contains("360d*"));

@@ -183,6 +183,10 @@ fn build_handler() -> UpdateHandler<anyhow::Error> {
                 .endpoint(handle_sniper_cb),
         )
         .branch(
+            dptree::filter(|q: CallbackQuery| q.data.as_deref().unwrap_or("").starts_with("long:"))
+                .endpoint(handlers::handle_long_callback),
+        )
+        .branch(
             dptree::filter(|q: CallbackQuery| q.data.as_deref().unwrap_or("").starts_with("aih:"))
                 .endpoint(handlers::handle_aihealth_callback),
         )

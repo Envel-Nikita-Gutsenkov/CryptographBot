@@ -91,19 +91,14 @@ pub fn aihealth_actions() -> InlineKeyboardMarkup {
 
 pub fn main_menu() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new([
-        row2("💵 Prices", cb::PRICE, "📊 Top Movers", cb::TOP10),
-        row2("💼 Portfolio", cb::PORTFOLIO, "📈 P&L", cb::PNL),
-        row2(
-            "🥧 Allocation",
-            cb::DISTRIBUTION,
-            "📋 Transfers",
-            cb::TRANSFERS,
-        ),
-        row2("🔔 Alerts", cb::ALERTS, "👛 Wallets", cb::WALLETS),
-        row2("💱 Convert", cb::CONVERT, "⚙️ Settings", cb::SETTINGS),
-        row2("🧠 AI Analysis", "menu:ai", "🎯 Plan", cb::PLAN),
-        row2("📰 News", "menu:news", "📊 Stats", "setting:stats"),
-        row1("💾 Backup Now", cb::BACKUP),
+        row2("💵 Prices", cb::PRICE, "📉 60–360D", "long:menu"),
+        row2("📊 Top Movers", cb::TOP10, "💼 Portfolio", cb::PORTFOLIO),
+        row2("📈 P&L", cb::PNL, "🥧 Allocation", cb::DISTRIBUTION),
+        row2("📋 Transfers", cb::TRANSFERS, "🔔 Alerts", cb::ALERTS),
+        row2("👛 Wallets", cb::WALLETS, "💱 Convert", cb::CONVERT),
+        row2("⚙️ Settings", cb::SETTINGS, "🧠 AI Analysis", "menu:ai"),
+        row2("🎯 Plan", cb::PLAN, "📰 News", "menu:news"),
+        row2("📊 Stats", "setting:stats", "💾 Backup Now", cb::BACKUP),
     ])
 }
 
@@ -403,6 +398,7 @@ pub fn bottom_actions(symbol: &str) -> InlineKeyboardMarkup {
 pub fn long_range_menu(symbol: &str) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new([
         vec![
+            btn("📉 60D", &format!("chart:{symbol}:60d")),
             btn("📉 90D", &format!("chart:{symbol}:90d")),
             btn("📉 180D", &format!("chart:{symbol}:180d")),
             btn("📉 1Y", &format!("chart:{symbol}:365d")),
@@ -427,6 +423,11 @@ pub fn chart_period_menu(symbol: &str, active_period: &str) -> InlineKeyboardMar
     } else {
         "30D"
     };
+    let p60d = if active_period == "60d" {
+        "• 60D •"
+    } else {
+        "60D"
+    };
     let p90d = if active_period == "90d" {
         "• 90D •"
     } else {
@@ -448,6 +449,9 @@ pub fn chart_period_menu(symbol: &str, active_period: &str) -> InlineKeyboardMar
             btn(p1d, &format!("chart:{symbol}:1d")),
             btn(p7d, &format!("chart:{symbol}:7d")),
             btn(p30d, &format!("chart:{symbol}:30d")),
+            btn(p60d, &format!("chart:{symbol}:60d")),
+        ],
+        vec![
             btn(p90d, &format!("chart:{symbol}:90d")),
             btn(p180d, &format!("chart:{symbol}:180d")),
             btn(p365d, &format!("chart:{symbol}:365d")),

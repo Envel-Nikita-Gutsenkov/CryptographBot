@@ -59,6 +59,10 @@ pub async fn handle_price(
                         "📈 View Chart",
                         &format!("chart:{}:1d", q.symbol),
                     ),
+                    teloxide::types::InlineKeyboardButton::callback(
+                        "📉 60–360D",
+                        &format!("long:{}", q.symbol),
+                    ),
                 ]]);
                 bot.send_message(msg.chat.id, fmt_quote_card(q))
                     .parse_mode(ParseMode::MarkdownV2)
