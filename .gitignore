@@ -52,3 +52,6 @@ judge_baseline.json
 
 # Local agent scratch state
 .commandcode/
+
+# Test artifact: a literal file created when a test passes "sqlite::memory:" as a path
+sqlite::memory:

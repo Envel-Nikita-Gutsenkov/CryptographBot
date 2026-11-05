@@ -490,17 +490,17 @@ async fn build_local_answer(
         .starts_with("ru");
     let mut out = String::new();
     if russian {
-        out.push_str("⚠️ **Все бесплатные AI-провайдеры исчерпали лимит на сегодня.**\n");
+        out.push_str("⚠️ **AI-провайдеры не ответили — отвечаю без AI.**\n");
         if let Some(q) = quota {
             out.push_str(&format!("Лимиты: {q}.\n"));
         }
-        out.push_str("Отвечаю без AI — по твоим реальным данным и локальной модели:\n\n");
+        out.push_str("Ниже — твои реальные данные и расчёт локальной модели:\n\n");
     } else {
-        out.push_str("⚠️ **Every free AI provider is out of quota for today.**\n");
+        out.push_str("⚠️ **AI providers did not respond — answering without AI.**\n");
         if let Some(q) = quota {
             out.push_str(&format!("Limits: {q}.\n"));
         }
-        out.push_str("Answering without AI — from your real data and the local model:\n\n");
+        out.push_str("Below: your real data and the local model output:\n\n");
     }
 
     out.push_str(&format!(

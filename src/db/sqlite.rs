@@ -700,6 +700,21 @@ impl SqliteStore {
         Ok("OK".to_string())
     }
 
+    /// All recorded model health marks: `(provider_id, status, error_msg)`.
+    /// Used by `/aihealth` to show which models are benched right now.
+    pub fn get_all_model_health(&self) -> anyhow::Result<Vec<(String, String, String)>> {
+        let conn = Connection::open(&self.db_path)?;
+        let mut stmt = conn.prepare(
+            "SELECT provider_id, status, coalesce(error_msg, '') FROM model_health ORDER BY provider_id",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            out.push((row.get(0)?, row.get(1)?, row.get(2)?));
+        }
+        Ok(out)
+    }
+
     /// Read token/request usage for a category in the current calendar month.
     /// Returns (tokens, requests); used for per-provider monthly budgets
     /// (e.g. DeepSeek has no per-key limits, so we enforce them here).

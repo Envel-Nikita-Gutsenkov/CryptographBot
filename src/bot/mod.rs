@@ -133,6 +133,7 @@ fn build_handler() -> UpdateHandler<anyhow::Error> {
         .branch(case![Command::TradeTask(a)].endpoint(handle_tradetask_cmd))
         .branch(case![Command::Settings].endpoint(handle_settings_cmd))
         .branch(case![Command::Model(a)].endpoint(handle_model_cmd))
+        .branch(case![Command::Aihealth].endpoint(handle_aihealth_cmd))
         .branch(case![Command::Allow(a)].endpoint(handle_allow_cmd))
         .branch(case![Command::Revoke(a)].endpoint(handle_revoke_cmd))
         .branch(case![Command::Reset].endpoint(handle_reset_cmd))
@@ -656,6 +657,14 @@ async fn handle_model_cmd(
     args: String,
 ) -> anyhow::Result<()> {
     handlers::handle_model_cmd(bot, msg, store, config, args).await
+}
+async fn handle_aihealth_cmd(
+    bot: Bot,
+    msg: Message,
+    config: Arc<Config>,
+    sqlite: Arc<crate::db::SqliteStore>,
+) -> anyhow::Result<()> {
+    handlers::handle_aihealth_cmd(bot, msg, config, sqlite).await
 }
 async fn handle_settings_cmd(
     bot: Bot,

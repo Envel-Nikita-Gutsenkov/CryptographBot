@@ -133,15 +133,22 @@ pub async fn handle_ask_cmd(
                     err_str
                 };
                 // Name the exhausted quotas so the failure is actionable instead
-                // of a generic "AI failed".
+                // of a generic "AI failed". If nothing is actually benched, do not
+                // claim the quotas are gone — say the providers simply did not answer.
                 let quota = crate::crypto::ai::pools::quota_report();
                 let msg = match quota {
                     Some(q) => format!(
                         "❌ AI pipeline failed: {safe_err}\n\n\
-                         Исчерпаны бесплатные лимиты: {q}.\n\
-                         /forecast, /dip и /portfolio работают без AI."
+                         Лимиты исчерпаны у: {q}.\n\
+                         Остальные провайдеры перепробованы и не ответили.\n\
+                         /forecast, /dip, /sniper и /portfolio работают без AI."
                     ),
-                    None => format!("❌ AI pipeline failed: {safe_err}"),
+                    None => format!(
+                        "❌ AI pipeline failed: {safe_err}\n\n\
+                         Ни один провайдер не дал ответа, но ни один и не помечен\n\
+                         как исчерпавший лимит — смотри /aihealth.\n\
+                         /forecast, /dip, /sniper и /portfolio работают без AI."
+                    ),
                 };
                 bot_task.send_message(chat_id, msg).await.ok();
             }

@@ -90,6 +90,8 @@ pub enum Command {
     Settings,
     #[command(description = "Select AI model: /model list | /model set N")]
     Model(String),
+    #[command(description = "Admin: AI provider reliability + bench state")]
+    Aihealth,
     #[command(description = "Admin: allow user access: /allow USER_ID")]
     Allow(String),
     #[command(description = "Admin: revoke user access: /revoke USER_ID")]

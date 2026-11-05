@@ -19,6 +19,67 @@ pub static CIRCUIT_BREAKER: std::sync::OnceLock<DashMap<String, Instant>> =
 pub static PROVIDER_EXHAUSTED: std::sync::OnceLock<DashMap<String, Instant>> =
     std::sync::OnceLock::new();
 
+/// Per-alias outcome counters for the current UTC day (in-memory only).
+/// A model that fails every single call it gets today is silently broken for
+/// today's prompts (typically a TPM gate smaller than our news prompt) and must
+/// stop occupying a selection slot — otherwise every /ask pays its latency.
+/// The counter resets at UTC midnight, so a transient bad day is self-healing.
+static TODAY_OUTCOMES: std::sync::OnceLock<DashMap<String, (String, u32, u32)>> =
+    std::sync::OnceLock::new();
+
+/// Minimum calls before a 100%-failure model is considered dead for the day.
+const DEAD_MIN_CALLS: u32 = 8;
+
+fn today_key() -> String {
+    chrono::Utc::now().format("%Y-%m-%d").to_string()
+}
+
+/// Record one dispatch outcome for `alias` (called by the provider layer).
+pub fn record_model_outcome(alias: &str, ok: bool) {
+    let today = today_key();
+    let map = TODAY_OUTCOMES.get_or_init(DashMap::new);
+    let mut e = map
+        .entry(alias.to_string())
+        .or_insert_with(|| (today.clone(), 0, 0));
+    if e.0 != today {
+        *e = (today, 0, 0);
+    }
+    e.1 = e.1.saturating_add(1);
+    if !ok {
+        e.2 = e.2.saturating_add(1);
+    }
+}
+
+/// True when `alias` has been called at least [`DEAD_MIN_CALLS`] times today and
+/// has failed every single time.
+pub fn model_is_dead_today(alias: &str) -> bool {
+    let Some(map) = TODAY_OUTCOMES.get() else {
+        return false;
+    };
+    let today = today_key();
+    match map.get(alias) {
+        Some(e) => e.0 == today && e.1 >= DEAD_MIN_CALLS && e.2 == e.1,
+        None => false,
+    }
+}
+
+/// Aliases currently considered dead for today, for `/aihealth`.
+pub fn dead_models_today() -> Vec<String> {
+    let Some(map) = TODAY_OUTCOMES.get() else {
+        return Vec::new();
+    };
+    let today = today_key();
+    let mut out: Vec<String> = map
+        .iter()
+        .filter(|e| {
+            e.value().0 == today && e.value().1 >= DEAD_MIN_CALLS && e.value().2 == e.value().1
+        })
+        .map(|e| e.key().clone())
+        .collect();
+    out.sort();
+    out
+}
+
 /// Success memory persisted next to the SQLite DB so it survives restarts.
 /// "model_memory.json" in the same directory as SQLITE_DB (default "crypto.db").
 const MEMORY_FILE: &str = "model_memory.json";
@@ -308,6 +369,37 @@ pub fn is_banned(provider: &crate::crypto::ai::providers::Provider, model_id: &s
     false
 }
 
+/// Round-robin over providers so one provider's four models cannot fill the
+/// head of the list. Relative priority inside each provider is preserved; the
+/// first round takes every provider's best model, the second round their second
+/// best, and so on. Without this, `news` spent its first three calls on
+/// Gemini/Cloudflare while DeepSeek and Mistral sat idle.
+pub(crate) fn interleave_by_provider(models: Vec<ModelConfig>) -> Vec<ModelConfig> {
+    let mut buckets: Vec<(String, Vec<ModelConfig>)> = Vec::new();
+    for m in models {
+        match buckets.iter_mut().find(|(p, _)| *p == m.provider) {
+            Some((_, b)) => b.push(m),
+            None => buckets.push((m.provider.clone(), vec![m])),
+        }
+    }
+    let mut out = Vec::new();
+    let mut round = 0;
+    loop {
+        let mut pushed = false;
+        for (_, bucket) in buckets.iter_mut() {
+            if let Some(m) = bucket.get(round) {
+                out.push(m.clone());
+                pushed = true;
+            }
+        }
+        if !pushed {
+            break;
+        }
+        round += 1;
+    }
+    out
+}
+
 pub fn get_available_models(role: Option<&str>) -> Vec<String> {
     let mut models_file = ModelsFile {
         models: load_all_models(),
@@ -374,7 +466,7 @@ pub fn get_available_models(role: Option<&str>) -> Vec<String> {
         key_available(&m.provider.to_lowercase()) && !is_provider_exhausted(&m.provider)
     }
 
-    let mut available: Vec<String> = Vec::new();
+    let mut primary: Vec<ModelConfig> = Vec::new();
     // Tier 1: exact role match (models built for this task)
     for m in &models_file.models {
         if fast_mode && !is_fast_model(m) {
@@ -389,27 +481,38 @@ pub fn get_available_models(role: Option<&str>) -> Vec<String> {
                 continue;
             }
         }
-        if usable(m) {
-            available.push(m.alias.clone());
+        if usable(m) && !model_is_dead_today(&m.alias) {
+            primary.push(m.clone());
         }
     }
 
     // Tier 2: graceful degradation — append weaker-tier models not already included.
+    let mut fallback: Vec<ModelConfig> = Vec::new();
     if let Some(r) = role {
         let req_tier = role_tier(r);
         for m in &models_file.models {
             if fast_mode && !is_fast_model(m) {
                 continue;
             }
-            if available.contains(&m.alias) || !usable(m) {
+            if primary.iter().any(|p| p.alias == m.alias)
+                || fallback.iter().any(|f| f.alias == m.alias)
+                || !usable(m)
+                || model_is_dead_today(&m.alias)
+            {
                 continue;
             }
             let tier = m.roles.iter().map(|mr| role_tier(mr)).min().unwrap_or(3);
             if tier > req_tier {
-                available.push(m.alias.clone());
+                fallback.push(m.clone());
             }
         }
     }
+
+    let mut available: Vec<String> = interleave_by_provider(primary)
+        .into_iter()
+        .chain(interleave_by_provider(fallback))
+        .map(|m| m.alias)
+        .collect();
 
     if let Ok(g) = LAST_SUCCESSFUL_MODEL.lock() {
         if g.is_none() {
@@ -527,5 +630,47 @@ mod tests {
                 "fast mode leaked slow model {m}"
             );
         }
+    }
+
+    fn mc(provider: &str, alias: &str, priority: i32) -> ModelConfig {
+        ModelConfig {
+            id: alias.to_string(),
+            display: alias.to_string(),
+            alias: alias.to_string(),
+            provider: provider.to_string(),
+            roles: vec!["main".to_string()],
+            priority,
+        }
+    }
+
+    #[test]
+    fn interleave_spreads_providers() {
+        let models = vec![
+            mc("Gemini", "g1", 0),
+            mc("Gemini", "g2", 1),
+            mc("Gemini", "g3", 2),
+            mc("Groq", "q1", 3),
+            mc("Mistral", "m1", 4),
+        ];
+        let out = interleave_by_provider(models);
+        let aliases: Vec<&str> = out.iter().map(|m| m.alias.as_str()).collect();
+        // One model per provider first, then the leftovers in priority order.
+        assert_eq!(aliases, vec!["g1", "q1", "m1", "g2", "g3"]);
+    }
+
+    #[test]
+    fn dead_model_detector_trips_only_on_total_failure() {
+        let alias = "__test_dead_model__";
+        for _ in 0..(DEAD_MIN_CALLS - 1) {
+            record_model_outcome(alias, false);
+        }
+        assert!(!model_is_dead_today(alias));
+        record_model_outcome(alias, false);
+        assert!(model_is_dead_today(alias));
+        assert!(dead_models_today().contains(&alias.to_string()));
+        // A single success means the model is flaky, not dead.
+        record_model_outcome(alias, true);
+        assert!(!model_is_dead_today(alias));
+        assert!(!dead_models_today().contains(&alias.to_string()));
     }
 }

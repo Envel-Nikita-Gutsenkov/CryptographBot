@@ -197,6 +197,8 @@ pub async fn call_single_model(
         let ok = result.is_ok();
         let _ = store.record_model_stats(&provider_str, &info.id, latency_ms, ok, 0.0);
     }
+    // Feed the per-day dead-model detector regardless of DB availability.
+    crate::crypto::ai::pools::record_model_outcome(&info.alias, result.is_ok());
 
     match result {
         Ok(res) => {
@@ -240,10 +242,18 @@ pub async fn call_single_model(
             // so background workers stop hammering it every minute. Burst 429s
             // (no quota marker) keep the existing short/1h behaviour.
             if let Some(secs) = crate::crypto::ai::pools::quota_cooldown_secs(&err_s) {
-                crate::crypto::ai::pools::mark_provider_exhausted(
-                    &provider_str,
-                    std::time::Instant::now() + std::time::Duration::from_secs(secs),
-                );
+                // Gemini free quota is per model *and* per project: a 429 on
+                // gemini-3.5-flash says nothing about gemini-2.5-flash, which
+                // uses a separate bucket. Benching the whole provider there used
+                // to knock healthy Gemini models out of the pool for the day.
+                // Key-wide providers (Cloudflare neurons, Groq TPD) keep the
+                // provider-wide bench.
+                if info.provider != Provider::Gemini {
+                    crate::crypto::ai::pools::mark_provider_exhausted(
+                        &provider_str,
+                        std::time::Instant::now() + std::time::Duration::from_secs(secs),
+                    );
+                }
                 crate::crypto::ai::pools::ban_provider_model(
                     &info.provider,
                     info.id.as_str(),
@@ -330,7 +340,32 @@ pub async fn call_last_resort(
         }
     }
 
-    // Cohere (most reliable free tier in our pool).
+    // DeepSeek first: it is the only provider in the pool with a zero error
+    // rate over the last week, so the last-resort chain must not depend on
+    // Cohere/Groq being healthy.
+    if let Some(r) = try_provider("deepseek-v4-flash", "DeepSeek", || {
+        call_deepseek_model("deepseek-v4-flash", prompt)
+    })
+    .await
+    {
+        return Ok(r);
+    }
+    // Mistral: independent vendor with its own quota buckets.
+    if let Some(r) = try_provider("mistral-large-4", "Mistral", || {
+        call_mistral_model(client, "mistral-large-4", prompt)
+    })
+    .await
+    {
+        return Ok(r);
+    }
+    if let Some(r) = try_provider("ministral-8b", "Mistral", || {
+        call_mistral_model(client, "ministral-8b-latest", prompt)
+    })
+    .await
+    {
+        return Ok(r);
+    }
+    // Cohere.
     if let Some(r) = try_provider("command-a-reasoning", "Cohere", || {
         call_cohere_model(client, "command-a-reasoning-08-2025", prompt)
     })
@@ -353,20 +388,6 @@ pub async fn call_last_resort(
     {
         return Ok(r);
     }
-    if let Some(r) = try_provider("qwen3.8-27b", "Groq", || {
-        call_groq_model(client, "qwen/qwen3.8-27b", prompt)
-    })
-    .await
-    {
-        return Ok(r);
-    }
-    if let Some(r) = try_provider("gpt-oss-20b", "Groq", || {
-        call_groq_model(client, "openai/gpt-oss-20b", prompt)
-    })
-    .await
-    {
-        return Ok(r);
-    }
     // Cloudflare Workers AI.
     if let Some(r) = try_provider("llama-4-scout-cf", "Cloudflare", || {
         call_cloudflare_model(client, "@cf/meta/llama-4-scout-17b-16e-instruct", prompt)
@@ -382,31 +403,19 @@ pub async fn call_last_resort(
     {
         return Ok(r);
     }
-    // OpenRouter free tier (budgeted internally).
-    if let Some(r) = try_provider("glm-5.2:free", "OpenRouter", || {
-        call_openrouter_raw(client, "z-ai/glm-5.2:free", prompt)
-    })
-    .await
-    {
-        return Ok(r);
-    }
-    if let Some(r) = try_provider("nemotron-3-super:free", "OpenRouter", || {
-        call_openrouter_raw(client, "nvidia/nemotron-3-super-120b-a12b:free", prompt)
-    })
-    .await
-    {
-        return Ok(r);
-    }
-    // Gemini last (free tier quota is easily exhausted).
+    // Gemini last (free tier quota is easily exhausted, one bucket per model).
     let fallback_body = serde_json::json!({
         "contents": [{"parts": [{"text": prompt}]}]
     });
-    if let Some(r) = try_provider("gemini-2.5-flash", "Gemini", || {
-        call_gemini_model(client, gemini_key, "gemini-2.5-flash", &fallback_body)
-    })
-    .await
-    {
-        return Ok(r);
+    for gemini_model in ["gemini-2.5-flash", "gemini-2.5-flash-lite"] {
+        let body = fallback_body.clone();
+        if let Some(r) = try_provider(gemini_model, "Gemini", || {
+            call_gemini_model(client, gemini_key, gemini_model, &body)
+        })
+        .await
+        {
+            return Ok(r);
+        }
     }
 
     Err(anyhow::anyhow!("All last-resort providers failed"))
