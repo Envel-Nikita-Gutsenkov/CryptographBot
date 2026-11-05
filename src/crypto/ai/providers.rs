@@ -493,10 +493,12 @@ async fn call_groq_model(
         return Err(anyhow::anyhow!("Groq {model} HTTP {status}: {truncated}"));
     }
     let json = resp.json::<serde_json::Value>().await?;
-    json["choices"][0]["message"]["content"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| anyhow::anyhow!("Failed to parse Groq response for {model}"))
+    extract_message_content(&json).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Failed to parse Groq response for {model}: {}",
+            truncate_error_body(&json.to_string())
+        )
+    })
 }
 
 async fn call_mistral_model(
@@ -528,10 +530,12 @@ async fn call_mistral_model(
         ));
     }
     let json = resp.json::<serde_json::Value>().await?;
-    json["choices"][0]["message"]["content"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| anyhow::anyhow!("Failed to parse Mistral response for {model}"))
+    extract_message_content(&json).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Failed to parse Mistral response for {model}: {}",
+            truncate_error_body(&json.to_string())
+        )
+    })
 }
 
 async fn call_nvidia_model(
@@ -760,6 +764,38 @@ async fn call_huggingface_model(
         .as_str()
         .map(|s| s.to_string())
         .ok_or_else(|| anyhow::anyhow!("Failed to parse HuggingFace response"))
+}
+
+/// Extract the assistant text from an OpenAI-compatible chat response.
+///
+/// Some providers (Mistral among them) return `content` as an array of
+/// `{"type":"text","text":...}` chunks instead of a plain string, and
+/// reasoning models leave `content` empty while filling `reasoning_content`.
+/// A strict `as_str()` on `content` turned such healthy answers into
+/// "Failed to parse" errors and benched the provider for an hour.
+fn extract_message_content(json: &serde_json::Value) -> Option<String> {
+    let msg = &json["choices"][0]["message"];
+    if let Some(s) = msg["content"].as_str() {
+        if !s.trim().is_empty() {
+            return Some(s.to_string());
+        }
+    }
+    if let Some(parts) = msg["content"].as_array() {
+        let joined: String = parts
+            .iter()
+            .filter_map(|p| p["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("");
+        if !joined.trim().is_empty() {
+            return Some(joined);
+        }
+    }
+    if let Some(s) = msg["reasoning_content"].as_str() {
+        if !s.trim().is_empty() {
+            return Some(s.to_string());
+        }
+    }
+    None
 }
 
 fn truncate_error_body(body: &str) -> String {
@@ -991,6 +1027,39 @@ pub async fn call_any_model_with_search(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_content_handles_string_array_and_reasoning() {
+        let as_string = serde_json::json!({
+            "choices": [{"message": {"content": "hello"}}]
+        });
+        assert_eq!(
+            extract_message_content(&as_string).as_deref(),
+            Some("hello")
+        );
+
+        let as_chunks = serde_json::json!({
+            "choices": [{"message": {"content": [
+                {"type": "text", "text": "he"},
+                {"type": "text", "text": "llo"}
+            ]}}]
+        });
+        assert_eq!(
+            extract_message_content(&as_chunks).as_deref(),
+            Some("hello")
+        );
+
+        let reasoning_only = serde_json::json!({
+            "choices": [{"message": {"content": "", "reasoning_content": "thought"}}]
+        });
+        assert_eq!(
+            extract_message_content(&reasoning_only).as_deref(),
+            Some("thought")
+        );
+
+        let empty = serde_json::json!({"choices": [{"message": {"content": "  "}}]});
+        assert!(extract_message_content(&empty).is_none());
+    }
 
     #[test]
     fn estimate_tokens_never_underestimates_large_prompts() {
