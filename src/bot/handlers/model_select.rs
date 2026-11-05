@@ -1,10 +1,14 @@
 use crate::{
+    bot::{handlers::forecast::callback_target, keyboards},
     config::Config,
-    crypto::ai::providers::available_models,
+    crypto::ai::providers::{available_models, probe_all_models, ProbeResult},
     db::{SqliteStore, Store},
 };
 use std::sync::Arc;
-use teloxide::{prelude::*, types::ParseMode};
+use teloxide::{
+    prelude::*,
+    types::{CallbackQuery, ChatId, ParseMode},
+};
 
 pub async fn handle_model_cmd(
     bot: Bot,
@@ -115,8 +119,152 @@ pub async fn handle_aihealth_cmd(
 
     bot.send_message(msg.chat.id, text)
         .parse_mode(ParseMode::Html)
+        .reply_markup(keyboards::aihealth_actions())
         .await?;
     Ok(())
+}
+
+/// `aih:probe` — re-probe every configured model against the live provider.
+/// Admin-only, since it deliberately ignores the circuit breakers.
+pub async fn handle_aihealth_callback(
+    bot: Bot,
+    q: CallbackQuery,
+    config: Arc<Config>,
+    sqlite: Arc<SqliteStore>,
+) -> anyhow::Result<()> {
+    let _ = bot.answer_callback_query(&q.id).await;
+    let data = q.data.clone().unwrap_or_default();
+    if data != "aih:probe" {
+        return Ok(());
+    }
+    let (chat, _) = callback_target(&q);
+    if !config.is_admin(q.from.id.0) {
+        bot.send_message(chat, "⛔ Unauthorized").await?;
+        return Ok(());
+    }
+
+    let total = available_models().len();
+    let loading = bot
+        .send_message(
+            chat,
+            format!("🔄 Probing {total} models against their live APIs…\nThis takes up to ~60s."),
+        )
+        .await?;
+
+    // Dedicated client: the shared one has an 8s budget, too tight for a
+    // cold provider plus a reasoning model. Probes run in the background so the
+    // callback is answered immediately instead of leaving a dead spinner.
+    tokio::spawn(async move {
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(25))
+            .use_rustls_tls()
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = bot
+                    .edit_message_text(chat, loading.id, format!("❌ HTTP client: {e}"))
+                    .await;
+                return;
+            }
+        };
+
+        let results = probe_all_models(&client, &config.gemini_api_key, Some(sqlite)).await;
+        let text = build_probe_text(&results);
+
+        // The loading message carries no markup; if editing fails (e.g. the
+        // message was deleted) fall back to a new message so results are never lost.
+        let edited = bot
+            .edit_message_text(chat, loading.id, text.clone())
+            .parse_mode(ParseMode::Html)
+            .reply_markup(keyboards::aihealth_actions())
+            .await
+            .is_ok();
+        if !edited {
+            let _ = bot
+                .send_message(chat, text)
+                .parse_mode(ParseMode::Html)
+                .reply_markup(keyboards::aihealth_actions())
+                .await;
+        }
+    });
+
+    Ok(())
+}
+
+/// One-line reason for a probe failure, derived from the HTTP status.
+fn probe_note(r: &ProbeResult) -> &'static str {
+    if r.ok {
+        return "ok";
+    }
+    match r.status {
+        0 => "no answer",
+        401 | 403 => "auth/key",
+        402 => "no credits",
+        404 | 410 => "no model",
+        408 => "timeout",
+        413 => "too large",
+        429 => "quota/429",
+        500..=599 => "server",
+        _ => "error",
+    }
+}
+
+/// Render the live-probe result. Pure so the layout and the 4096-char Telegram
+/// limit are testable without a network call.
+pub(crate) fn build_probe_text(results: &[ProbeResult]) -> String {
+    let ok_count = results.iter().filter(|r| r.ok).count();
+    let total = results.len();
+    let slowest = results.iter().map(|r| r.latency_ms).max().unwrap_or(0);
+
+    let mut body = String::from("st   provider   model                    ms   note\n");
+    for r in results {
+        body.push_str(&format!(
+            "{:<4} {:<10} {:<23} {:>5} {}\n",
+            if r.ok { "200" } else { "---" },
+            truncate(&r.provider, 10),
+            truncate(&r.model, 23),
+            r.latency_ms,
+            probe_note(r),
+        ));
+    }
+    if results.is_empty() {
+        body.push_str("no models configured\n");
+    }
+
+    let mut failures = String::new();
+    for r in results.iter().filter(|r| !r.ok) {
+        let code = if r.status == 0 {
+            "-".to_string()
+        } else {
+            r.status.to_string()
+        };
+        failures.push_str(&format!(
+            "\n{} {} [{}] {}",
+            r.provider,
+            r.model,
+            code,
+            truncate(r.detail.trim(), 120),
+        ));
+    }
+
+    let header = format!("🔍 <b>Live probe</b> · {ok_count}/{total} ok · slowest {slowest} ms");
+    let tail = if failures.is_empty() {
+        "\nAll providers answered.".to_string()
+    } else {
+        format!("\n<b>Failures</b>{failures}")
+    };
+
+    let text = format!(
+        "{header}\n<pre>{}</pre>{}",
+        escape_html(&body),
+        escape_html(&tail)
+    );
+    if text.chars().count() > 4000 {
+        text.chars().take(4000).collect::<String>()
+    } else {
+        text
+    }
 }
 
 /// Render the `/aihealth` body. Split out from the handler so the layout and
@@ -261,6 +409,73 @@ mod tests {
             .map(|i| row(&format!("P{i}"), &format!("m{i}"), 10, i))
             .collect();
         let text = build_aihealth_text(&stats, &[], None, &[]);
+        assert!(text.chars().count() <= 4000);
+    }
+
+    fn probe(provider: &str, model: &str, status: u16, ok: bool, detail: &str) -> ProbeResult {
+        ProbeResult {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            status,
+            ok,
+            latency_ms: 1234,
+            detail: detail.to_string(),
+        }
+    }
+
+    #[test]
+    fn probe_text_counts_and_labels_failures() {
+        let results = vec![
+            probe("Mistral", "mistral-large-4", 200, true, ""),
+            probe(
+                "Gemini",
+                "gemini-3.5-flash",
+                429,
+                false,
+                "Gemini gemini-3.5-flash HTTP 429: quota exceeded",
+            ),
+            probe(
+                "Cerebras",
+                "gpt-oss-120b",
+                402,
+                false,
+                "HTTP 402: payment required",
+            ),
+        ];
+        let text = build_probe_text(&results);
+        assert!(text.contains("1/3 ok"), "got: {text}");
+        assert!(text.contains("quota/429"));
+        assert!(text.contains("no credits"));
+        assert!(text.contains("Failures"));
+        // Raw provider error stays visible for diagnosis.
+        assert!(text.contains("quota exceeded"));
+    }
+
+    #[test]
+    fn probe_text_all_green_has_no_failure_section() {
+        let results = vec![probe("Groq", "gpt-oss-120b", 200, true, "")];
+        let text = build_probe_text(&results);
+        assert!(text.contains("1/1 ok"));
+        assert!(text.contains("All providers answered"));
+        assert!(!text.contains("Failures"));
+    }
+
+    #[test]
+    fn probe_text_escapes_html_and_stays_small() {
+        let results: Vec<_> = (0..40)
+            .map(|i| {
+                probe(
+                    "Provider<&",
+                    &format!("model-{i}<tag>"),
+                    500,
+                    false,
+                    "HTTP 500: <html>error</html>",
+                )
+            })
+            .collect();
+        let text = build_probe_text(&results);
+        assert!(!text.contains("<tag>"));
+        assert!(!text.contains("<html>"));
         assert!(text.chars().count() <= 4000);
     }
 }

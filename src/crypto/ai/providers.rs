@@ -142,23 +142,7 @@ pub async fn call_single_model(
     let mut attempts = 0;
     let result = loop {
         attempts += 1;
-        let res = match info.provider {
-            Provider::Gemini => {
-                let body = serde_json::json!({
-                    "contents": [{"parts": [{"text": prompt}]}]
-                });
-                call_gemini_model(client, gemini_key, info.id.as_str(), &body).await
-            }
-            Provider::Groq => call_groq_model(client, info.id.as_str(), prompt).await,
-            Provider::Mistral => call_mistral_model(client, info.id.as_str(), prompt).await,
-            Provider::Nvidia => call_nvidia_model(client, info.id.as_str(), prompt).await,
-            Provider::OpenRouter => call_openrouter_raw(client, info.id.as_str(), prompt).await,
-            Provider::Cohere => call_cohere_model(client, info.id.as_str(), prompt).await,
-            Provider::Cerebras => call_cerebras_model(client, info.id.as_str(), prompt).await,
-            Provider::HuggingFace => call_huggingface_model(client, info.id.as_str(), prompt).await,
-            Provider::Cloudflare => call_cloudflare_model(client, info.id.as_str(), prompt).await,
-            Provider::DeepSeek => call_deepseek_model(info.id.as_str(), prompt).await,
-        };
+        let res = dispatch_provider_call(client, gemini_key, info, prompt).await;
         match &res {
             Err(e) if attempts < 3 => {
                 let err_s = e.to_string();
@@ -287,6 +271,34 @@ pub async fn call_single_model(
             }
             Err(e)
         }
+    }
+}
+
+/// One raw provider/model call with no circuit-breaker, ban, quota or stats
+/// side effects. `call_single_model` wraps this with all the pool bookkeeping;
+/// the live probe calls it directly so it always sees the real provider answer.
+async fn dispatch_provider_call(
+    client: &reqwest::Client,
+    gemini_key: &str,
+    info: &ModelInfo,
+    prompt: &str,
+) -> anyhow::Result<String> {
+    match info.provider {
+        Provider::Gemini => {
+            let body = serde_json::json!({
+                "contents": [{"parts": [{"text": prompt}]}]
+            });
+            call_gemini_model(client, gemini_key, info.id.as_str(), &body).await
+        }
+        Provider::Groq => call_groq_model(client, info.id.as_str(), prompt).await,
+        Provider::Mistral => call_mistral_model(client, info.id.as_str(), prompt).await,
+        Provider::Nvidia => call_nvidia_model(client, info.id.as_str(), prompt).await,
+        Provider::OpenRouter => call_openrouter_raw(client, info.id.as_str(), prompt).await,
+        Provider::Cohere => call_cohere_model(client, info.id.as_str(), prompt).await,
+        Provider::Cerebras => call_cerebras_model(client, info.id.as_str(), prompt).await,
+        Provider::HuggingFace => call_huggingface_model(client, info.id.as_str(), prompt).await,
+        Provider::Cloudflare => call_cloudflare_model(client, info.id.as_str(), prompt).await,
+        Provider::DeepSeek => call_deepseek_model(info.id.as_str(), prompt).await,
     }
 }
 
@@ -1022,6 +1034,125 @@ pub async fn call_any_model_with_search(
 
         return Ok(response);
     }
+}
+
+// ── Live probe ───────────────────────────────────────────────────────────────
+
+/// Outcome of one live provider probe. `status` is the HTTP status when a
+/// response was received, `0` when the request never reached the provider
+/// (missing key, timeout, local budget gate).
+pub struct ProbeResult {
+    pub provider: String,
+    pub model: String,
+    pub status: u16,
+    pub ok: bool,
+    pub latency_ms: i64,
+    pub detail: String,
+}
+
+/// Probe every configured model with a tiny prompt.
+///
+/// Deliberately bypasses `call_single_model`: a probe must report what the
+/// provider answers *right now*, not what the in-memory benches believe. That
+/// makes it usable both as a health check and as a way to revive a model that
+/// was benched by an unlucky 429 or a parse bug. Probe traffic is not written to
+/// `model_stats` (it would skew the production error rate) and never benches a
+/// model on failure; only successes clear stale bench state.
+pub async fn probe_all_models(
+    client: &reqwest::Client,
+    gemini_key: &str,
+    db: Option<std::sync::Arc<crate::db::sqlite::SqliteStore>>,
+) -> Vec<ProbeResult> {
+    use std::sync::Arc;
+    use tokio::sync::Semaphore;
+
+    // 6 concurrent: enough to finish a 17-model sweep in ~3 waves, low enough
+    // that per-minute rate limits are not tripped (which would fake a failure).
+    let sem = Arc::new(Semaphore::new(6));
+    let models = available_models();
+    let mut handles = Vec::with_capacity(models.len());
+
+    for info in models {
+        let permit = sem.clone();
+        let client = client.clone();
+        let key = gemini_key.to_string();
+        let db = db.clone();
+        handles.push(tokio::spawn(async move {
+            let _guard = permit.acquire().await;
+            probe_one(&client, &key, info, db).await
+        }));
+    }
+
+    // Join in submission order so the table keeps the pool's priority order.
+    let mut out = Vec::with_capacity(handles.len());
+    for h in handles {
+        if let Ok(r) = h.await {
+            out.push(r);
+        }
+    }
+    out
+}
+
+async fn probe_one(
+    client: &reqwest::Client,
+    gemini_key: &str,
+    info: ModelInfo,
+    db: Option<std::sync::Arc<crate::db::sqlite::SqliteStore>>,
+) -> ProbeResult {
+    let started = std::time::Instant::now();
+    let result =
+        dispatch_provider_call(client, gemini_key, &info, "Reply with the single word OK.").await;
+    let latency_ms = started.elapsed().as_millis() as i64;
+    let provider = format!("{:?}", info.provider);
+    let provider_id = format!("{}/{}", provider, info.id);
+
+    match result {
+        Ok(_) => {
+            // A real answer is proof the model works: drop a stale circuit
+            // breaker, a provider-wide quota bench and a COOLDOWN/DEAD row.
+            crate::crypto::ai::pools::clear_provider_model_ban(&info.provider, info.id.as_str());
+            if let Some(store) = &db {
+                store.update_model_health(&provider_id, "OK", None);
+            }
+            ProbeResult {
+                provider,
+                model: info.id,
+                status: 200,
+                ok: true,
+                latency_ms,
+                detail: String::new(),
+            }
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            ProbeResult {
+                provider,
+                model: info.id,
+                status: extract_http_status(&msg),
+                ok: false,
+                latency_ms,
+                detail: truncate_error_body(&msg),
+            }
+        }
+    }
+}
+
+/// Pull `HTTP <code>` out of a provider error string. Errors that never got a
+/// response (missing key, timeout, local budget gate) yield `0`.
+fn extract_http_status(err: &str) -> u16 {
+    if err.contains("timed out") || err.contains("timeout") {
+        return 408;
+    }
+    if let Some(pos) = err.find("HTTP ") {
+        let digits: String = err[pos + 5..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let Ok(code) = digits.parse::<u16>() {
+            return code;
+        }
+    }
+    0
 }
 
 #[cfg(test)]

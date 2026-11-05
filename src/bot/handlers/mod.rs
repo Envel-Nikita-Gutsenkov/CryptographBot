@@ -35,7 +35,7 @@ pub use dip::{build_dip_report, handle_dip_callback, handle_dip_cmd};
 pub use fng::handle_fng_cmd;
 pub use forecast::{build_forecast, handle_forecast_callback, handle_forecast_cmd};
 pub use memo_goal::{handle_goal_cmd, handle_memo_cmd, handle_plan_cmd};
-pub use model_select::{handle_aihealth_cmd, handle_model_cmd};
+pub use model_select::{handle_aihealth_callback, handle_aihealth_cmd, handle_model_cmd};
 pub use news::{handle_news_callback, handle_news_cmd};
 pub use portfolio::{
     handle_add, handle_adjust, handle_correct, handle_invested_cmd, handle_move, handle_pnl_chart,

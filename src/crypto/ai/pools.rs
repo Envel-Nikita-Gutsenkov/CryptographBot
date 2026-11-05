@@ -218,6 +218,19 @@ pub fn ban_provider_model(
         .insert(key, Instant::now() + Duration::from_secs(duration_secs));
 }
 
+/// Drop any bench for this provider/model after a live probe proved it answers.
+/// Needed because the in-memory breaker is the only thing that can keep a
+/// perfectly healthy model out of the pool, and it has no natural expiry hint
+/// beyond the coarse durations set at failure time.
+pub fn clear_provider_model_ban(provider: &crate::crypto::ai::providers::Provider, model_id: &str) {
+    if let Some(map) = CIRCUIT_BREAKER.get() {
+        map.remove(&format!("{:?}:{}", provider, model_id));
+    }
+    if let Some(map) = PROVIDER_EXHAUSTED.get() {
+        map.remove(&format!("{:?}", provider));
+    }
+}
+
 /// Seconds until the next UTC midnight (when free daily quotas reset).
 pub fn secs_until_utc_midnight() -> u64 {
     use chrono::{Timelike, Utc};

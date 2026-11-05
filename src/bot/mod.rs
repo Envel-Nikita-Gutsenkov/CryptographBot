@@ -182,6 +182,10 @@ fn build_handler() -> UpdateHandler<anyhow::Error> {
                 .endpoint(handle_sniper_cb),
         )
         .branch(
+            dptree::filter(|q: CallbackQuery| q.data.as_deref().unwrap_or("").starts_with("aih:"))
+                .endpoint(handlers::handle_aihealth_callback),
+        )
+        .branch(
             dptree::filter(|q: CallbackQuery| q.data.as_deref().unwrap_or("").starts_with("btm:"))
                 .endpoint(handle_bottom_cb),
         );
@@ -1687,6 +1691,60 @@ mod handler_smoke_tests {
                 "{text:?} was dropped by the handler tree"
             );
         }
+    }
+
+    /// The `/aihealth` "Recheck now" button must reach a real endpoint. Buttons
+    /// on rich messages used to be dropped before their handler ran, so a
+    /// callback that silently does nothing is a bug class worth a test.
+    #[tokio::test]
+    async fn aihealth_probe_callback_is_dispatched() {
+        std::env::set_var("TELOXIDE_TOKEN", "123456:AAHfake");
+        std::env::set_var("CMC_API_KEY", "dummy");
+        std::env::set_var("ALLOWED_ADMIN_IDS", "123456789");
+
+        let config = Arc::new(crate::config::Config::from_env().unwrap());
+        let sqlite = Arc::new(crate::db::SqliteStore::new(":memory:").unwrap());
+        let cmc = Arc::new(crate::crypto::CryptoClient::new(
+            "k",
+            "",
+            "",
+            "",
+            Some(sqlite.clone()),
+        ));
+        let blockchain = Arc::new(crate::crypto::BlockchainClient::new("", ""));
+        let acl = Arc::new(crate::access::AccessControl::new(vec![123456789]));
+        let store = Arc::new(crate::db::Store::new());
+        let storage = InMemStorage::<State>::new();
+        let patch_store = handlers::new_patch_store();
+        let bot = Bot::new("123456:AAHfake");
+        let me: teloxide::types::Me = serde_json::from_str(
+            r#"{"id":123456,"is_bot":true,"first_name":"Cryptograph","username":"CryptographAppBot","can_join_groups":true,"can_read_all_group_messages":false,"supports_inline_queries":false,"can_connect_to_business":false,"has_main_web_app":false}"#,
+        )
+        .unwrap();
+        let handler = build_handler();
+
+        let mut deps = dptree::deps![
+            bot.clone(),
+            me.clone(),
+            store.clone(),
+            cmc.clone(),
+            blockchain.clone(),
+            acl.clone(),
+            config.clone(),
+            storage.clone(),
+            patch_store.clone(),
+            sqlite.clone()
+        ];
+        let upd: Update = serde_json::from_str(
+            r#"{"update_id":2,"callback_query":{"id":"1","from":{"id":123456789,"is_bot":false,"first_name":"a"},"chat_instance":"x","data":"aih:probe"}}"#,
+        )
+        .unwrap();
+        deps.insert(upd);
+        let res = handler.dispatch(deps).await;
+        assert!(
+            !matches!(res, dptree::prelude::ControlFlow::Continue(_)),
+            "aih:probe callback was dropped by the handler tree"
+        );
     }
 
     /// A wizard state must not lock the user out of commands. Before the fix,

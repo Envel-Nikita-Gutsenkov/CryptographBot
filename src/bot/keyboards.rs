@@ -79,6 +79,14 @@ pub mod cb {
     }
 }
 
+/// Single action on the `/aihealth` message: re-probe every provider live.
+pub fn aihealth_actions() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::callback(
+        "🔄 Recheck now",
+        "aih:probe",
+    )]])
+}
+
 // ── Main menu ─────────────────────────────────────────────────────────────────
 
 pub fn main_menu() -> InlineKeyboardMarkup {
