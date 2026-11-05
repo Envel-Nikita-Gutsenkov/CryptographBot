@@ -226,6 +226,23 @@ pub fn secs_until_utc_midnight() -> u64 {
     86_400u64.saturating_sub(secs_today)
 }
 
+/// Seconds until 00:00 UTC on the 1st of next month (when monthly trial caps
+/// reset). Used for keys that report a month-wide allowance.
+pub fn secs_until_next_month_start() -> u64 {
+    use chrono::{Datelike, TimeZone, Utc};
+    let now = Utc::now();
+    let (year, month) = if now.month() == 12 {
+        (now.year() + 1, 1)
+    } else {
+        (now.year(), now.month() + 1)
+    };
+    let next = Utc
+        .with_ymd_and_hms(year, month, 1, 0, 0, 0)
+        .single()
+        .unwrap_or(now);
+    (next - now).num_seconds().max(60) as u64
+}
+
 /// Parse a retry hint out of an error body: `try again in 53m58.272s`,
 /// `retry in 30s`, `"retryDelay": "22s"`. Returns seconds.
 fn parse_retry_after(err_lower: &str) -> Option<u64> {
@@ -295,9 +312,19 @@ pub fn quota_cooldown_secs(err: &str) -> Option<u64> {
         || e.contains("perday")
         || e.contains("daily quota")
         || e.contains("daily limit");
+    // Monthly trial caps (Cohere: "Trial key, which is limited to 1000 API
+    // calls / month") do not come back before the 1st of the next month; a
+    // 5-minute bench made the pool re-probe a dead key all day.
+    let monthly = (e.contains("trial key") && e.contains("month"))
+        || e.contains("api calls / month")
+        || e.contains("calls per month")
+        || e.contains("monthly limit");
     if let Some(secs) = parse_retry_after(&e) {
         // Trust the provider's own reset hint, with a small safety margin.
         return Some(secs.saturating_add(30).clamp(60, 86_400));
+    }
+    if monthly {
+        return Some(secs_until_next_month_start());
     }
     if daily {
         return Some(secs_until_utc_midnight().max(120));
@@ -579,6 +606,17 @@ mod tests {
         mark_provider_exhausted("ExpiredProvider", Instant::now() - Duration::from_secs(1));
         assert!(!is_provider_exhausted("ExpiredProvider"));
         assert!(!quota_report().unwrap().contains("ExpiredProvider"));
+    }
+
+    #[test]
+    fn quota_cooldown_detects_monthly_trial_cap() {
+        let err = "Cohere command-a-plus HTTP 429: You are using a Trial key, \
+                   which is limited to 1000 API calls / month.";
+        let secs = quota_cooldown_secs(err).expect("a monthly cap must bench the provider");
+        assert!(
+            secs > 86_400,
+            "a month-wide cap must bench longer than any day bucket, got {secs}"
+        );
     }
 
     #[test]

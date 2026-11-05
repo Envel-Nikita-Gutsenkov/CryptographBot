@@ -111,6 +111,22 @@ pub async fn handle_aihealth_cmd(
     let benched = crate::crypto::ai::pools::quota_report();
     let dead = crate::crypto::ai::pools::dead_models_today();
 
+    let text = build_aihealth_text(&stats, &health, benched.as_deref(), &dead);
+
+    bot.send_message(msg.chat.id, text)
+        .parse_mode(ParseMode::Html)
+        .await?;
+    Ok(())
+}
+
+/// Render the `/aihealth` body. Split out from the handler so the layout and
+/// the 4096-char Telegram limit can be tested without a network call.
+pub(crate) fn build_aihealth_text(
+    stats: &[(String, String, i64, i64, i64, f64)],
+    health: &[(String, String, String)],
+    benched: Option<&str>,
+    dead: &[String],
+) -> String {
     let mut body = String::new();
     body.push_str("provider   model                      calls  err%    ms\n");
     for (provider, model, calls, errors, latency, _q) in stats.iter().take(28) {
@@ -141,7 +157,7 @@ pub async fn handle_aihealth_cmd(
     let mut tail = String::new();
     tail.push_str(&format!(
         "\nBenched providers: {}\n",
-        benched.unwrap_or_else(|| "none".to_string())
+        benched.unwrap_or("none")
     ));
     tail.push_str(&format!(
         "Benched models: {}\n",
@@ -162,21 +178,16 @@ pub async fn handle_aihealth_cmd(
 
     let text = format!(
         "🤖 <b>AI health · 7 days</b>\n<pre>{}</pre>{}",
-        crate::format::esc(&body),
-        crate::format::esc(&tail)
+        escape_html(&body),
+        escape_html(&tail)
     );
 
     // Telegram caps messages at 4096 chars; the table is bounded by take(28).
-    let text = if text.chars().count() > 4000 {
+    if text.chars().count() > 4000 {
         text.chars().take(4000).collect::<String>()
     } else {
         text
-    };
-
-    bot.send_message(msg.chat.id, text)
-        .parse_mode(ParseMode::Html)
-        .await?;
-    Ok(())
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -184,5 +195,72 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         s.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
+    }
+}
+
+/// HTML parse mode needs `<`, `>` and `&` escaped only; `crate::format::esc`
+/// produces MarkdownV2 backslashes, which would litter the table.
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(
+        provider: &str,
+        model: &str,
+        calls: i64,
+        errors: i64,
+    ) -> (String, String, i64, i64, i64, f64) {
+        (
+            provider.to_string(),
+            model.to_string(),
+            calls,
+            errors,
+            1_200,
+            0.0,
+        )
+    }
+
+    #[test]
+    fn aihealth_renders_rates_and_state() {
+        let stats = vec![row("Cohere", "command-a-plus", 10, 5)];
+        let health = vec![(
+            "Gemini/gemini-3.5-flash".to_string(),
+            "COOLDOWN".to_string(),
+            String::new(),
+        )];
+        let text = build_aihealth_text(
+            &stats,
+            &health,
+            Some("Cohere (до 00:00 UTC)"),
+            &["gpt-oss-20b".to_string()],
+        );
+        assert!(text.contains("command-a-plus"));
+        assert!(text.contains("50.0"), "error rate must be rendered");
+        assert!(text.contains("COOLDOWN Gemini/gemini-3.5-flash"));
+        assert!(text.contains("Benched providers: Cohere"));
+        assert!(text.contains("gpt-oss-20b"));
+    }
+
+    #[test]
+    fn aihealth_handles_empty_state() {
+        let text = build_aihealth_text(&[], &[], None, &[]);
+        assert!(text.contains("no traffic recorded yet"));
+        assert!(text.contains("Benched providers: none"));
+        assert!(text.contains("Skipped as dead today (0% success): none"));
+    }
+
+    #[test]
+    fn aihealth_stays_within_telegram_limit() {
+        let stats: Vec<_> = (0..100)
+            .map(|i| row(&format!("P{i}"), &format!("m{i}"), 10, i))
+            .collect();
+        let text = build_aihealth_text(&stats, &[], None, &[]);
+        assert!(text.chars().count() <= 4000);
     }
 }
