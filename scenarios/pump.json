@@ -1,0 +1,12 @@
+{
+  "fear_greed": "75 (Greed)",
+  "global": "Total Mcap: 3.1T USD | 24h Vol: 220B USD | BTC Dom: 50.1% | ETH Dom: 14.2%",
+  "quotes": {
+    "BTC": { "price": 80000.0, "chg_1h": 0.8, "chg_24h": 7.3, "chg_7d": 20.0, "chg_30d": 18.0, "chg_90d": 10.0, "ath": 126173.0 },
+    "ETH": { "price": 2500.0, "chg_1h": 0.9, "chg_24h": 12.0, "chg_7d": 27.0, "chg_30d": 25.0, "chg_90d": 15.0, "ath": 4800.0 },
+    "SOL": { "price": 105.0, "chg_1h": 1.2, "chg_24h": 11.0, "chg_7d": 22.0, "chg_30d": 20.0, "chg_90d": 12.0, "ath": 260.0 },
+    "LINK": { "price": 12.0, "chg_1h": 1.0, "chg_24h": 12.0, "chg_7d": 30.0, "chg_30d": 34.0, "chg_90d": 20.0, "ath": 53.0 }
+  },
+  "news": "Record ETF inflows — $2.07B in August. Institutional adoption: Citi custody launch, Neuberger Berman tokenized fund. CLARITY Act optimism. Short squeeze: $3.8B liquidated short positions.",
+  "intel": "Derivatives Sentiment: funding positive +0.01%, OI at highs, long/short ratio 2.3 — crowded longs, liquidation risk on reversal."
+}

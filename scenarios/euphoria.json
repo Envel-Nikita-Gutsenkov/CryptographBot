@@ -1,0 +1,12 @@
+{
+  "fear_greed": "90 (Extreme Greed)",
+  "global": "Total Mcap: 4.2T USD | 24h Vol: 300B USD | BTC Dom: 45.0% | ETH Dom: 16.0%",
+  "quotes": {
+    "BTC": { "price": 100000.0, "chg_1h": 2.0, "chg_24h": 15.0, "chg_7d": 40.0, "chg_30d": 55.0, "chg_90d": 60.0, "ath": 126173.0 },
+    "ETH": { "price": 3500.0, "chg_1h": 2.5, "chg_24h": 20.0, "chg_7d": 50.0, "chg_30d": 70.0, "chg_90d": 80.0, "ath": 4800.0 },
+    "SOL": { "price": 150.0, "chg_1h": 3.0, "chg_24h": 25.0, "chg_7d": 60.0, "chg_30d": 90.0, "chg_90d": 100.0, "ath": 260.0 },
+    "LINK": { "price": 18.0, "chg_1h": 2.0, "chg_24h": 22.0, "chg_7d": 55.0, "chg_30d": 80.0, "chg_90d": 90.0, "ath": 53.0 }
+  },
+  "news": "Parabolic rally — retail FOMO floods exchanges. Leverage at all-time highs, funding rates extreme. Media hype cycle at peak. Everyone expects 150k BTC.",
+  "intel": "Derivatives Sentiment: funding +0.15% extreme, OI record, long/short ratio 4.0 — maximum leverage, classic blow-off top setup."
+}

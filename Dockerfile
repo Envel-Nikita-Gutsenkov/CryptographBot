@@ -1,0 +1,47 @@
+# ── Builder ────────────────────────────────────────────────────────────────────
+FROM rust:slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+# Commit hash baked into `/ver`; empty means build.rs falls back to a
+# digest of the sources (a plain `docker compose build` still works).
+ARG GIT_HASH=""
+ENV GIT_HASH=${GIT_HASH}
+COPY Cargo.toml Cargo.lock ./
+COPY build.rs ./build.rs
+# Cache deps layer
+RUN mkdir src && echo 'fn main(){}' > src/main.rs \
+    && cargo build --release 2>/dev/null || true \
+    && rm -rf src
+
+COPY src ./src
+RUN rm -f src/models.rs && touch src/main.rs && cargo build --release --locked
+
+# ── Runtime ────────────────────────────────────────────────────────────────────
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates procps \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -r -s /bin/false cryptograph
+
+WORKDIR /app
+COPY --from=builder /build/target/release/cryptograph /app/cryptograph
+COPY models.json /app/models.json
+# Bundled trading seed: copied into the SQLite volume on first open so a
+# fresh install starts with trained profiles + regime winners.
+COPY data/trading_sim_seed.db /app/data/trading_sim_seed.db
+# Daily close cache for /forecast and backtests. Kept OUTSIDE /app/data because
+# the SQLite volume shadows that directory; the app reads it via
+# CRYPTOGRAPH_HISTORY_DIR (see docker-compose.yml).
+COPY data/history ./history
+
+RUN mkdir -p /app/data \
+    && chown -R cryptograph:cryptograph /app
+USER cryptograph
+
+ENV RUST_LOG=info
+ENTRYPOINT ["/app/cryptograph"]

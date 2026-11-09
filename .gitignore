@@ -1,0 +1,57 @@
+/target
+/target/
+!.env.example
+*.cgrp
+*.png
+*.log
+/dist/
+*.sqlite*
+*.db*
+
+# The bundled trading seed is a deliberate exception: it ships trained
+# profiles + lessons + stats so a fresh clone never starts from zero.
+!data/trading_sim_seed.db
+
+# Secrets — NEVER commit real .env
+.env
+# runtime artifacts
+model_memory.json
+models.openrouter.json
+judge_baseline.json
+
+# Dev junk / one-off scripts — never re-commit these
+/portfolio_backup.json
+/test_*.json
+/rss2json_test.json
+/errors.json
+/payload.json
+/report.json
+/api.html
+/cf_models.json
+/scratch/
+/script.py
+/fix_*.py
+/refactor.py
+/rewrite.py
+/parse*.js
+/modify.js
+/gen_models.rs
+/test_*.rs
+/test_commands.txt
+/short_report.txt
+
+# Chat export analysis artifacts (local only)
+/chat_export.txt
+/chat_convo.txt
+/chat_aug.txt
+/chat_msgs.txt
+/tools/extract_chat.py
+
+# uw gateway local state (never commit)
+.uw/
+
+# Local agent scratch state
+.commandcode/
+
+# Test artifact: a literal file created when a test passes "sqlite::memory:" as a path
+sqlite::memory:

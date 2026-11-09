@@ -1,0 +1,7 @@
+# Local build limits. The suite links ~40 test binaries; with the default
+# `jobs = nproc` on a 12-core / 14 GB box that peaks well above 10 GB of RAM.
+# Four jobs keeps it bounded; raise it only if you have the headroom.
+# Local-only: the deploy rsync excludes `.cargo/`, so production builds keep
+# using every core.
+[build]
+jobs = 4
