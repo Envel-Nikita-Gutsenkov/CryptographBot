@@ -1,0 +1,219 @@
+# Cryptograph AI Pipeline & Model Orchestration Guide
+
+This guide details the inner workings of Cryptograph's Artificial Intelligence features, explaining the request lifecycle, news aggregation decision structures, model pool selection, fallback routing mechanics, search tool integration, and database resilience.
+
+---
+
+## 🛠️ 1. AI Request Lifecycle & Routing
+
+When an AI operation is requested (e.g., news consolidation, portfolio analysis, or price alert commentary), the request goes through the following lifecycle:
+
+```mermaid
+flowchart TD
+    Request([AI Request Initiated]) --> Route[Call call_any_model_with_search in providers.rs]
+    Route --> Resolve[Inspect Model ID & Find Provider]
+    
+    Resolve --> P_Gemini[Provider: Gemini]
+    Resolve --> P_Groq[Provider: Groq]
+    Resolve --> P_Mistral[Provider: Mistral]
+    Resolve --> P_Nvidia[Provider: Nvidia]
+    Resolve --> P_OpenRouter[Provider: OpenRouter]
+
+    P_Gemini --> CallGemini[POST to Google AI API]
+    P_Groq --> CallGroq[POST to api.groq.com]
+    P_Mistral --> CallMistral[POST to api.mistral.ai]
+    P_Nvidia --> CallNvidia[POST to integrate.api.nvidia.com]
+    P_OpenRouter --> CallOR[POST to openrouter.ai]
+
+    CallGemini & CallGroq & CallMistral & CallNvidia & CallOR --> ResultOK{Request Success?}
+    
+    ResultOK -- Yes --> SearchCheck{Model requested Search?}
+    SearchCheck -- Yes --> RunSearch[Execute search_dispatch & feed results back to model]
+    RunSearch --> ResultOK
+    SearchCheck -- No --> Return[Return Response String]
+    ResultOK -- No --> Retry[Return Error & Trigger Fallback Loop]
+```
+
+### API Payload Mapping
+Each provider has a specific request schema mapped in `src/crypto/ai/providers.rs`.
+- **Gemini**: Standard `v1beta/models` endpoint using `generateContent`.
+- **Groq, Mistral, Nvidia, OpenRouter**: Compatible with OpenAI-style `v1/chat/completions` REST format.
+
+---
+
+## 🧠 2. Model Pool Selection & Success Promotion
+
+To optimize cost, throughput, and reliability, models are grouped by **role** in `src/crypto/ai/pools.rs` (`main`, `critic`, `news`, `watcher`). Roles are assigned by the lazy ranker from measured quality, so the pools are not tied to a fixed vendor list:
+1. **Cheap roles** (`news`, `watcher`): fast, cost-efficient models that draft or digest high-volume text.
+2. **Heavy roles** (`main`, `critic`): stronger reasoning models that fact-check, critique, and synthesize.
+
+### Success Promotion
+When a model answers successfully, it is pinned to the front of every pool so bursts and rate-limit cycles reuse the model that just worked instead of re-brute-forcing the list. The pin lasts **6 hours** (`SUCCESS_MEMORY`) and is persisted to `model_memory.json` next to the SQLite file, so it survives restarts.
+
+```mermaid
+flowchart TD
+    Start[Get ranked models for the role] --> FetchPool[Load ranked list of API-supported models]
+    CheckSuccess{Was a model successful in the last 6 hours?}
+    FetchPool --> CheckSuccess
+    CheckSuccess -- Yes --> Promote[Find that model in the list, extract it, and prepend to index 0]
+    CheckSuccess -- No --> Return[Return list in default rank order]
+    Promote --> Return
+```
+
+---
+
+## 📰 3. News Processing & Decision Pipeline
+
+The background News Worker (`src/crypto/ai/news_worker.rs`) executes periodically.
+
+### Adaptive Scheduling
+* **Default Interval:** Every **2 hours**.
+* **Volatility Override:** The worker checks hourly changes of watched assets. If any asset changes $\ge 2\%$ in 1 hour or $\ge 5\%$ in 24 hours, the interval is automatically shortened to **1 hour** to keep news fresh.
+
+### Parallel RSS Feed Aggregation (14 Sources)
+CryptoCompare is attempted first, but an empty response or a failure parks it for
+a cooldown window (it is almost always rate-limited). The merged RSS feed is
+then fetched once per 10 minutes and shared by every symbol:
+
+* CoinTelegraph
+* Decrypt
+* Blockworks
+* The Block
+* CryptoSlate
+* AMBCrypto
+* BeInCrypto
+* CryptoPotato
+* The Daily Hodl
+* Bitcoin.com
+* CoinJournal
+* NewsBTC
+* CryptoBriefing
+* CoinGape
+
+CoinDesk and Bitcoin Magazine were removed: both answer `403` to non-browser
+clients and only produced warnings. Articles are merged, URL-deduplicated, and
+filtered per symbol before being sent to the MoE pipeline.
+
+---
+
+## 👥 4. Mixture of Experts (MoE) Execution Flow
+
+For complex user queries (e.g., `/ai <SYMBOL>` or portfolio risk analysis), the bot runs a full **Generator-Critic** validation loop (`src/crypto/ai/pipeline.rs`):
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Bot as Bot Command / Watcher
+    participant Pipes as pipeline.rs
+    participant Pool as pools.rs
+    participant GenA as Generator A (e.g. Qwen)
+    participant GenB as Generator B (e.g. Llama)
+    participant Critic as Critic/Judge (e.g. Gemini Pro / Llama 70B)
+
+    Bot->>Pipes: call_with_critic(Prompt)
+    Pipes->>Pool: get_available_models(Some(role))
+    Pool-->>Pipes: Ranked models for the role
+    Note over Pipes: Spawns parallel tasks for the top 2 generators
+    par Task 1
+        Pipes->>GenA: call_any_model_with_search(Prompt)
+        GenA-->>Pipes: Draft A
+    and Task 2
+        Pipes->>GenB: call_any_model_with_search(Prompt)
+        GenB-->>Pipes: Draft B
+    end
+    Pipes->>Pipes: Build news_judge_prompt / moe_critic_prompt
+    Note over Pipes: Injects Draft A & Draft B into Critic Prompt
+    Pipes->>Pool: get_available_models(Some("critic"))
+    Pool-->>Pipes: Ranked critics
+    Pipes->>Critic: call_any_model_with_search(Critic Prompt)
+    Note over Critic: Compares drafts, reviews mathematical accuracy, resolves hallucinations
+    Critic-->>Pipes: Final synthesized response
+    Pipes-->>Bot: Clean, verified markdown text
+```
+
+---
+
+## 🔍 5. Web Search Tool Integration & Budgets
+
+When models process prompts, they can request real-time search queries to lookup recent events.
+
+### The Search Loop
+1. **Trigger:** The model outputs a line matching `SEARCH: <query>`.
+2. **Execution:** The execution loop intercepts the token and forwards the query to `search_dispatch` in `src/crypto/ai/search/dispatcher.rs`.
+3. **Consolidation:** The search results are parsed, formatted into `SEARCH_RESULT` blocks, appended to the prompt, and sent back to the model for final generation.
+
+### Search Providers & Failover
+1. **Tavily** (primary API)
+2. **Exa** (secondary API fallback)
+3. **Local Search** (Nongreedy web parser targeting DuckDuckGo HTML and Yahoo, requiring no API keys)
+
+### Search Budgets
+A `BudgetManager` limits calls per request to protect API balances:
+* **Tavily:** Max 3 calls per request.
+* **Exa:** Max 3 calls per request.
+* **Local:** Max 10 calls per request.
+
+### Dynamic Local Search Depth
+Local search uses context keywords to optimize token usage:
+* **Normal queries:** Returns **5** results to conserve prompt tokens.
+* **Detailed/Comparative queries** (containing words like *detail, compare, comparison, full, list, all, анализ, сравн, подробн, все*): Automatically fetches **10** results to provide the models with deep analytical context.
+
+---
+
+## 🏆 6b. Model Ranking & Lazy Benchmarking (`model_rank.rs`)
+
+Cryptograph continuously discovers and ranks the best **free** models across all
+providers, so the pools self-improve without burning rate limits.
+
+### Discovery
+* `models refresh` upserts hand-configured `models.json` entries plus all
+  **OpenRouter free-tier** models (pricing = 0). The OpenRouter models-list
+  endpoint does **not** consume the 300/day chat-completion budget.
+* New/changed models land in the `model_registry` table with a fingerprint
+  (OpenRouter `updated` field) so unchanged models are never re-tested.
+
+### Lazy benchmarking (rate-limit friendly)
+* At most **3 models per run** (`MAX_BENCH_PER_RUN`), one role each.
+* A **30-day cooldown** (`BENCH_COOLDOWN_DAYS`) skips recently tested models;
+  fingerprint changes and production underperformers (error rate > 30% with
+  ≥ 10 calls) force an early re-test.
+* Benchmarking stops when the OpenRouter budget drops below the reserve
+  (`MIN_OPENROUTER_RESERVE = 20`), so the bench can never exhaust the day's cap.
+* The **judge runs on non-OpenRouter providers** (`gpt-oss-120b` via
+  Groq/Cerebras), so benchmarking never consumes the 300/day OpenRouter budget.
+
+### Scoring & role assignment
+* The judge scores each candidate 0–10 for a role (`main`, `critic`, `news`,
+  `watcher`); `models calibrate` measures the judge's own baseline, which must
+  stay above `JUDGE_MIN_BASELINE = 4.0` before assignments are written.
+* Role thresholds: `main`/`critic` ≥ 6.0, `news` ≥ 5.0, `watcher` ≥ 4.0.
+* Assigned models are written to `models.openrouter.json`, which
+  `load_all_models()` merges into the pools — for the same (alias, provider)
+  the ranked entry wins over `models.json`.
+
+### Statistics
+* `model_stats` records per-model daily calls, errors, latency, and quality.
+* Quality averages over **benchmark calls only** (`bench_calls` column), so
+  production traffic (quality = 0) cannot dilute judge scores.
+* `models stats [days]` prints the per-provider health summary; `models rank`
+  shows the reason each model was picked (new/changed/cooldown/underperforming).
+
+### Budgets (hard caps)
+* **DeepSeek** (`deepseek_budget.rs`): monthly cap (default 3M tokens / 150
+  requests) enforced atomically, mirrored in `monthly_usage`/`paid_usage`.
+* **OpenRouter** (`openrouter_budget.rs`): daily cap (default 300 requests,
+  `OPENROUTER_DAILY_REQ_BUDGET`), enforced under a global call lock and
+  mirrored in `daily_usage`. Both budgets hold a `Weak<SqliteStore>` so CLI
+  processes exit cleanly (the long-running bot keeps the `Arc` alive).
+
+---
+
+## 💾 6. Database Schema & Resilience
+
+The database layer (`src/db/sqlite.rs`) uses SQLite in Write-Ahead Logging (WAL) mode for fast, concurrent access.
+
+### Database Integrity & Self-Healing
+On application startup, the SQLite connection manager validates database health:
+1. **Integrity Check:** Runs `PRAGMA integrity_check;`.
+2. **Automatic Recovery:** If corruption is detected, the manager closes the connection, renames the corrupt file to `crypto.db.corrupt.<timestamp>`, and boots a clean, fresh database to prevent server downtime.
+3. **Safe Auto-Migrations:** Schema updates are executed using `CREATE TABLE IF NOT EXISTS` and `ALTER TABLE ... ADD COLUMN ...` (ignoring existing column errors) to safely add new columns without affecting existing user portfolios or cached data.

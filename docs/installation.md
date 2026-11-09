@@ -1,0 +1,206 @@
+# Cryptograph Installation & Deployment Guide
+
+This guide describes how to build, run, and host the Cryptograph bot in both development and production environments.
+
+## System Prerequisites
+- **Operating System**: Linux (Fedora, Ubuntu, Debian), Windows (PowerShell), or macOS.
+- **Rust Toolchain**: Rust 1.75+ (stable channel).
+- **Docker** (Optional, recommended for production): Docker CE 20.10+ and docker-compose.
+
+---
+
+## 1. Local Configuration (`.env`)
+
+Create a `.env` file in the root directory. You can copy the template from `.env.example`:
+
+```ini
+# --- Telegram API Config ---
+TELOXIDE_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+
+# --- Allowed Admin User IDs (Comma-separated) ---
+ALLOWED_ADMIN_IDS=111111111,222222222
+
+# --- Data Sources Keys ---
+CMC_API_KEY=your-coinmarketcap-pro-api-key
+COINGECKO_API_KEY=your-coingecko-key          # optional
+COINCAP_API_KEY=your-coincap-key              # optional
+CRYPTOCOMPARE_API_KEY=your-cryptocompare-key  # optional
+HELIUS_API_KEY=your-solana-helius-rpc-key     # optional (on-chain wallets)
+ANKR_RPC_URL=your-ankr-rpc-url                # optional (EVM wallets)
+
+# --- AI Provider Keys (free tiers; the more, the more resilient) ---
+GEMINI_API_KEY=your-gemini-key                # strongly recommended
+GROQ_API_KEY=your-groq-key
+CEREBRAS_API_KEY=your-cerebras-key
+NVIDIA_API_KEY=your-nvidia-key
+MISTRAL_API_KEY=your-mistral-key
+COHERE_API_KEY=your-cohere-key
+CLOUDFLARE_ACCOUNT_ID=your-cf-account-id
+CLOUDFLARE_API_TOKEN=your-cf-api-token
+HF_API_KEY=your-huggingface-key
+OPENROUTER_API_KEY=your-openrouter-key        # free-tier discovery + 300 req/day
+DEEPSEEK_API_KEY=your-deepseek-key            # optional paid last resort
+
+# --- System Settings ---
+SQLITE_DB=crypto.db                            # default; /app/data/crypto.db in Docker
+ALERT_INTERVAL_SECS=60                         # alert tick; quotes come from the 180s cache
+WALLET_POLL_MINS=15
+OPENROUTER_DAILY_REQ_BUDGET=300               # hard daily cap for OpenRouter free tier
+MAX_RSS_MB=512                                # watchdog RSS cap
+HANG_TIMEOUT_SECS=300                         # watchdog hang detection
+
+# --- Optional overrides ---
+CRYPTOGRAPH_HISTORY_DIR=data/history          # daily-close CSV cache (Docker image uses /app/history)
+CRYPTOGRAPH_ENABLE_COINCAP=0                  # CoinCap host is dead since 2026; 1 re-enables it
+```
+
+**Required:** `TELOXIDE_TOKEN`, `ALLOWED_ADMIN_IDS`, `CMC_API_KEY`. Everything
+else adds reliability, data sources, or features. There is **no `MASTER_KEY`**
+anymore — the session key is a random ephemeral value generated per process.
+
+---
+
+## 2. Running Locally (Development)
+
+Build and run the project using cargo:
+
+```powershell
+# Copy config
+copy .env.example .env
+
+# Edit .env and supply tokens
+
+# Build and run
+cargo run
+```
+
+To run unit tests:
+```powershell
+cargo test
+```
+
+---
+
+## 3. Production Deployment
+
+### Option A: Using Docker (Recommended)
+Docker ensures runtime isolation and sandboxing with no local build dependencies.
+
+1. **Build the Docker Image**:
+   ```bash
+   docker build -t cryptograph:latest .
+   ```
+
+#### ARM64 / Remote Server Deployment (e.g., Ampere Altra)
+If you are deploying to a remote ARM64 server (e.g., Ubuntu server), you can build the image natively on the server using the helper script:
+
+1. **Package files on your local development machine**:
+   Run the PowerShell script to collect all required files into the `dist` folder:
+   ```powershell
+   .\build_dist.ps1
+   ```
+
+2. **Deploy on the server**:
+   - Copy the generated `dist` folder to your ARM64 server.
+   - Configure the `.env` file on the server.
+   - Execute the run script on the server:
+     ```bash
+     chmod +x run.sh
+     GIT_HASH=$(git rev-parse --short HEAD) ./run.sh
+     ```
+
+#### Manual Docker Compose
+
+```yaml
+services:
+  cryptograph:
+    image: cryptograph:latest
+    container_name: cryptograph
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./history:/app/history
+```
+
+```bash
+docker compose up -d --build
+```
+
+### Option B: Systemd Service File (Linux Bare-Metal)
+If you prefer running directly on a Linux host system:
+
+1. Build the production binary:
+   ```bash
+   cargo build --release
+   ```
+
+2. Create a systemd service file `/etc/systemd/system/cryptograph.service`:
+   ```ini
+   [Unit]
+   Description=Cryptograph Intelligence Telegram Bot
+   After=network.target
+
+   [Service]
+   Type=simple
+   User=cryptograph
+   WorkingDirectory=/var/lib/cryptograph
+   EnvironmentFile=/var/lib/cryptograph/.env
+   ExecStart=/usr/local/bin/cryptograph
+   Restart=always
+   RestartSec=5
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+3. Enable and start:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now cryptograph
+   ```
+
+---
+
+## 4. Updating the Application
+
+To update the running bot on your remote server without encountering container conflicts or manual cleanup steps, follow these simple steps:
+
+### Step 1: Package locally (Windows / Dev machine)
+Run the packaging script in PowerShell to prepare the new release with the latest source code and git version hash:
+```powershell
+.\build_dist.ps1
+```
+
+### Step 2: Copy to Server
+Copy the contents of the generated `dist` folder to the target directory on your remote Linux server (e.g., via SFTP, SCP, or Rsync).
+
+### Step 3: Run the Update Command
+On the server, run the helper script inside the target directory:
+```bash
+chmod +x run.sh
+./run.sh
+```
+
+Or, execute Docker Compose directly:
+```bash
+docker compose up -d --build
+```
+
+*Note: Docker Compose automatically stops the old container, builds the new binary using Docker's build cache, and recreates the container seamlessly.*
+
+### Verifying the deployment
+
+The git hash is baked into the image at build time, so the running container
+can prove exactly which commit it runs:
+
+```bash
+docker compose -f docker-compose.yml exec -T cryptograph /app/cryptograph version
+docker inspect cryptograph --format 'restarts={{.RestartCount}} status={{.State.Status}}'
+```
+
+Expected output: `v1.0.0 · build <short-hash> · built <UTC>`, with
+`restarts=0 status=running`. The same hash is what `/ver` reports in Telegram.
+Data lives in bind-mounted volumes (`data/`, `history/`), so a redeploy never
+touches the SQLite database or the candle cache.

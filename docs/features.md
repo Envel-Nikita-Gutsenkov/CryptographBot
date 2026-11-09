@@ -1,0 +1,248 @@
+# Cryptograph Features
+
+Cryptograph is packed with professional financial tracking features designed for absolute privacy and maximum usability.
+
+## 1. Conversational FSM Wizards
+
+To ensure an exceptionally smooth user experience, Cryptograph uses stateful step-by-step dialogue wizards instead of complex command syntaxes.
+
+### 🔔 Price Alert Wizard
+Accessed via the **Add Alert** button inside the Alerts menu:
+1. **Step 1**: The user is prompted to type a cryptocurrency symbol (e.g. `BTC`).
+2. **Step 2**: An inline keyboard is rendered, offering conditional options:
+   - `📉 Price Below`
+   - `📈 Price Above`
+   - `⬇️ Drop % over period`
+   - `⬆️ Rise % over period`
+3. **Step 3**:
+   - If a percentage condition is picked, the user selects a timeframe (`1h`, `4h`, `24h`, `7d`, `30d`, `90d`) and then enters the change percentage threshold (e.g. `5` for 5%).
+   - If a price condition is picked, the user enters the absolute USD price threshold (e.g. `150000`).
+
+### 👛 Wallet Registration Wizard
+Accessed via the **Add Wallet** button inside the Wallets menu:
+1. **Step 1**: An inline keyboard is displayed to pick the wallet's category:
+   - `🧊 Cold` (Hardware or paper wallet)
+   - `🔥 Hot` (Software or mobile app)
+   - `🏦 Exchange` (Centralized exchange)
+2. **Step 2**: The user enters the wallet specification.
+   - For simple non-monitored tracking: `[Wallet Name]` (e.g. `MyBinance`).
+   - For automatic blockchain tracking: `[Wallet Name] [SYM] [ADDRESS]` (e.g. `Trezor BTC bc1q...`).
+
+---
+
+## 2. Market Intelligence & Advice
+
+The `/advice` command generates sophisticated market intelligence reports using live metrics:
+- **Market Sentiment Index**: Evaluates aggregate market trends and calculates the **Fear & Greed Index** based on trading volumes, BTC dominance, volatility, and trend directions.
+- **DCA/Buy Recommendations**: Analyzes your average purchase price relative to current asset valuations and provides suggestions on whether to hold, realize profits, or accumulate (DCA) during corrections.
+- **Halving Timelines**: Displays estimates for the next Bitcoin halving event (target: 2028-2029) to assist in planning multi-year exits.
+
+---
+
+## 2b. Deterministic Forecast & Dip Zones (`/forecast`, `/dip`)
+
+Both commands are pure math over the local daily-close cache plus the intraday
+rows in SQLite: **no AI call, no provider call, no quota**, fully reproducible
+for the same inputs. The formulas, constants and calibration methodology live in
+[models.md](models.md).
+
+- **`/forecast SYMBOL`** — a horizon ladder (`1/3/5/7/14/30/90/180d` for BTC/ETH,
+  shortened for younger alts) built from log-drift with horizon damping, a
+  volatility-scaled ~68% cone, and probabilities of finishing above spot. The
+  cone uses a Student-t quantile (nu=4) instead of the Gaussian 1-sigma and adds the
+  drift's own estimation error in quadrature, so long horizons are not
+  artificially tight; volatility blends the 20-close stddev with a RiskMetrics
+  EWMA. In a `SIDEWAYS` regime the momentum term is zeroed — a flat market has
+  no trend to extrapolate. Seasonality is reported as median + win rate and may
+  move the drift by at most 0.02%/day (a month sample is ~8 points: ignore it
+  for decisions). Damping, drift shrink and cone width are **walk-forward
+  calibrated** against the symbol's own history; the message also reports the
+  model's real out-of-sample direction hit rate, MAPE and cone coverage per
+  horizon.
+  The bottom line is portfolio-aware: it compares spot to your average entry,
+  gives the probability of reaching the dip band / your break-even, and never
+  suggests adding above the average. **`/forecast verify`** prints the full
+  walk-forward backtest (shipped vs calibrated) on realized history, including a
+  per-regime breakdown of direction hit rate and cone coverage.
+- **`/dip SYMBOL`** — support levels below spot taken from SMA50/200, recent
+  lows and the forecast cone, each with a first-passage probability of being
+  touched within 1/3/7/14/30 days (closed-form Brownian running-minimum
+  result), plus the probability of still being below the level at that horizon.
+  The verdict is `BUY` (at/below your average entry and a further dip is
+  unlikely), `SPLIT` (buy part now, the rest at `zone_price`), `WAIT` (not in a
+  zone yet, ladder is reachable) or `NO-BUY` (above your average entry).
+- **`/sniper SYMBOL`** — the tail-risk accumulation ladder. A 14-day drawdown
+  Z-score anchored to a rolling high (so a slow bleed does not drag the buckets
+  down every day), three limit levels at the 12% / 4% / 1% Student-t quantiles,
+  Martingale cash weights from the configured pool (`/sniper cash N`), the
+  resulting average entry per bucket, first-passage touch probabilities, and a
+  0–100 capitulation score for "buy at market now". The average-entry guard
+  (`/sniper protect on|off`) flags any bucket that would raise your cost basis.
+- **`/bottom SYMBOL`** — the same inputs condensed into one explicit answer:
+  how deep this is, whether a deeper bucket is still likely to print, and the
+  concrete price at which buying makes statistical sense. Works for symbols you
+  do not hold.
+
+Every report carries inline actions: **AI Analysis** (a single-pass narration
+of the deterministic numbers), **Refresh** (rebuild from the freshest data in
+place) and cross-links between forecast, dip zones, sniper and bottom.
+
+Per-zone cooldowns apply to the proactive dip alert (`dip_alert_enabled`,
+`dip_cooldown_hours`, default 168 h), and the alert only fires at/below the
+average entry inside a zone — it is not a price-spam channel.
+
+---
+
+## 3. High-Fidelity Infographic Charts
+
+Cryptograph generates premium charts inside the chat interface using the native `Plotters` engine without using external charting servers:
+- **`/pnl` (Profit & Loss Timeline)**: A time-series chart mapping investment growth, current valuation, and cumulative profits/losses.
+- **`/distribution` (Asset Allocation)**: A pie chart mapping portfolio weight distribution by USD value.
+- **Top Movers**: Horizontal bar charts comparing 24-hour performance dynamics across the top market cap coins.
+
+---
+
+## 3b. Security Incident Detection
+
+A deterministic scanner (`run_security_scan`) walks the cached news summaries
+and articles every **15 minutes** — local SQLite reads only — and classifies
+incidents (hack/breach/exploit/theft/depeg/freeze/phishing, English and
+Russian wording) with brand-level topics (`binance`, `ledger`, `kraken`, …).
+
+Noise is controlled on three levels:
+
+1. **Significance gate** — custody and exchange topics always qualify; other
+   brand mentions only when the article reports a compromise; everything else
+   needs a material incident (≥$100M).
+2. **Per-topic dedup** (`ai_security_seen` map) — two incidents alternating in
+   the feed cannot re-send the same alert every scan.
+3. **Global gap** — at most one security digest per **6 hours**, and at most one
+   alert per scan.
+
+The first sighting is delivered immediately; repeats stay silent for the
+cooldown. The AI watcher's own security path is fed **only by articles fetched
+in the last 24 hours** and detects per article, instead of re-firing on "hack"
+anywhere in a week of cached text. Each scan produces one digest (AI-written
+when a provider is available, deterministic snippets otherwise).
+
+---
+
+## 3c. Conversation Continuity & Provider Failover
+
+- **Plain text is a question.** Any non-command text goes to `/ask`, with or
+  without a reply. Replying to *any* message — the bot's forecast/alert card or
+  your own earlier message — injects that message (tagged by author) as
+dialogue context. The last 6 exchanges per user are persisted in SQLite and
+  replayed into the prompt, so the bot remembers the thread across restarts.
+- **Quota-aware circuit breaker.** Daily free-tier exhaustion (Cloudflare
+  neurons, Groq TPD, Gemini quota) benches the whole provider until its reset
+  time instead of being retried every scan; `/ask` also reports which quotas are
+exhausted and when they reset.
+- **`/ask` never hard-fails on quotas.** If every provider is exhausted, the
+  answer is built deterministically from the portfolio, local history and the
+  forecast model, so a question always gets a real answer.
+- **Search only when it helps.** Portfolio/decision questions ("стоит ли
+  докупать", "should I buy more") skip the web-search planner entirely; event
+  questions still get a planner-composed keyword query, never the raw question.
+
+---
+
+## 4. Anti-Spam Alerts & Quiet Hours
+
+- **Anti-Spam Engine**: Alerts require the threshold condition to be met for at least **two consecutive ticks** (60 seconds apart by default) to prevent false alerts caused by quick price wicks.
+- **Quiet Hours**: Users can set time periods during which low-severity alerts are queued and silenced (e.g., `23:00 - 07:00 UTC`), protecting sleep. High-priority alerts can bypass this filter.
+
+---
+
+## 5. Trading Module — Win-Win Accumulator (`trade` CLI)
+
+A pluggable, dual-mode trading subsystem (simulation + live) that buys dips in
+tranches and never realizes a loss:
+
+- **`trade mode [--live|--sim]`** — switch between the paper engine
+  (`trading_sim.db`) and the live engine (`trading_live.db`).
+- **`trade allocate <SYMBOL> <USD>`** — create an isolated capital pool
+  (e.g. `trade allocate SOL 50`).
+- **`trade rule <SYMBOL> <TYPE> <VALUE>`** — operator limits: `ceiling`,
+  `floor`, `drawdown`, `pause-buy`, `pause-sell` (e.g. "don't buy BTC above
+  $65k" → `trade rule BTC ceiling 65000`).
+- **`trade tick / buy / sell`** — deterministic engine cycles with the
+  **no-loss invariant**: a sell below cost basis + margin is hard-rejected and
+  the lot becomes `COLD_HOLD` (long-term DCA) until price recovers.
+- **ATH guard** — the engine refuses to buy near the recent all-time high
+  (`ath_lookback_days`, `max_buy_from_high_pct`), parking cash instead of
+  chasing tops (verified: no buy at the Nov-2021 peak).
+- **`trade backtest`** — replay real history through the engine (multi-source
+  failover: Binance → CryptoCompare → CoinGecko); `--batch` sweeps rolling
+  windows over 2020–2026 for BTC/ETH/SOL/LINK. The no-loss invariant means the
+  simulation never books a loss on a closed lot — that is a property of the rule,
+  not evidence that the strategy cannot lose money. Windows with too few candles
+  (pre-listing noise) are skipped, and results are reported per window.
+- **`trade strategies` / `strategy apply|train|delete`** — builtin and trained
+  strategy profiles; `strategy train --grid-full --threads N` parallelizes the
+  sweep; **`trade seed`** bundles the best profiles + lessons + stats into
+  `data/trading_sim_seed.db`, auto-copied into place on first run (never start
+  from zero); **`trade tune`** lets a model propose config changes gated by a
+  deterministic validator.
+- **`trade recommend ...`** — commander mode: the bot plans a trade with full
+  guardrail checks and records it as PENDING advice; the operator executes on
+  their own exchange and reports back (`recommend execute` or free text via
+  `recommend parse` — "купил ETH за 1800"); the bot re-checks every guardrail
+  at the actual fill price and records the outcome.
+- **`trade task ...`** — standing trade tasks with a monthly budget, alerts/day
+  cap, and tranches (`task add|list|pause|resume|advise`); `task sim`/`task
+  grid` replay the config over real history.
+- **`trade fee --buy P --sell P`** — per-mode exchange fees, accounted for in
+  the no-loss invariant and advisor sizing.
+- **`trade export --format csv|json`**, **`trade backup <dest.db>`**,
+  **`trade lessons`**, **`trade backtests`**, **`trade status`** — full ledger,
+  audit trail, and learning memory.
+
+> Telegram `/trade` and `/tradetask` mirrors are implemented; DEX execution
+> (Jupiter/Uniswap) is implemented up to quote/sign/reconcile — live swap
+> submission needs wallet keys. See `docs/trading/`.
+
+---
+
+## 5b. News Layer — Pre-Digested Summaries + On-Demand Details
+
+- Raw articles are stored per symbol (`news_articles`, dedup by URL, 3-day
+  retention) and AI-verified summaries are appended to `news_summary_history`
+  (14-day retention) — the AI prompt only ever sees compact fresh summaries
+  (24h staleness guard), never raw feeds.
+- `news summary|history|articles|cleanup` CLI exposes the full store for
+  on-demand "extended results" without burning tokens on re-processing raw
+  articles.
+
+---
+
+## 6. Lazy AI Model Ranking (`models` CLI)
+
+Cryptograph continuously discovers and ranks free models across all providers
+without burning rate limits:
+
+- **`models refresh`** — upsert `models.json` + OpenRouter free models into the
+  registry (fingerprint-aware).
+- **`models rank`** — benchmark **at most 3 models per run** (30-day cooldown,
+  fingerprint-change detection, underperformer re-tests) with a non-OpenRouter
+  judge; assigns roles (`main`/`critic`/`news`/`watcher`) and writes
+  `models.openrouter.json`.
+- **`models stats [days]`** — per-provider calls, error %, latency, quality
+  (quality averaged over benchmark calls only).
+- **`models calibrate`** — measure the judge's baseline (must stay ≥ 4.0).
+- Hard budgets: DeepSeek monthly cap (3M tokens / 150 req) and OpenRouter daily
+  cap (300 req/day), enforced atomically and mirrored in SQLite.
+
+---
+
+## 7. CLI Diagnostics & Scenarios
+
+- **`ask <user_id|demo> "question"`** — replay the full `/ask` pipeline with
+  prompts, web searches, drafts, and critic.
+- **`goal <demo|user_id> [-v]`** — replay a proactive goal scan, stage by stage.
+- **`scenario <file.json> [--fast]`** — deterministic what-if: a scenario file
+  replaces market/news/macro data and the **real** `/ask` + goal-scan pipeline
+  runs against it (anti-FOMO verified: no buy at peak in `euphoria.json`).
+- **`analyze <SYM>`**, **`search "query"`**, **`wipe-knowledge`** — deep
+  analysis, search-flow inspection, and knowledge-base reset (keeps users,
+  goals, memos, budgets).

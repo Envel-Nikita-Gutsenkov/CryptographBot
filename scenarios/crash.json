@@ -1,0 +1,12 @@
+{
+  "fear_greed": "15 (Extreme Fear)",
+  "global": "Total Mcap: 2.1T USD | 24h Vol: 180B USD | BTC Dom: 55.2% | ETH Dom: 12.1%",
+  "quotes": {
+    "BTC": { "price": 60120.0, "chg_1h": -3.2, "chg_24h": -18.5, "chg_7d": -25.0, "chg_30d": -12.0, "chg_90d": -20.0, "ath": 126173.0 },
+    "ETH": { "price": 1650.0, "chg_1h": -4.1, "chg_24h": -22.0, "chg_7d": -28.0, "chg_30d": -15.0, "chg_90d": -25.0, "ath": 4800.0 },
+    "SOL": { "price": 67.0, "chg_1h": -5.0, "chg_24h": -24.0, "chg_7d": -30.0, "chg_30d": -18.0, "chg_90d": -22.0, "ath": 260.0 },
+    "LINK": { "price": 7.7, "chg_1h": -4.5, "chg_24h": -20.0, "chg_7d": -26.0, "chg_30d": -14.0, "chg_90d": -18.0, "ath": 53.0 }
+  },
+  "news": "Liquidations cascade as leveraged longs unwind — $3.8B wiped in 48h. ETF outflows accelerate. Macro risk-off: Fed hawkish surprise, bond yields spike. Exchange inflows spike as holders capitulate.",
+  "intel": "Derivatives Sentiment: funding deeply negative, OI collapsing 40%. Long/short ratio 0.4 — panic selling. Fear & Greed at yearly low."
+}

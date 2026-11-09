@@ -1,0 +1,203 @@
+{
+    "models": [
+        {
+            "alias": "command-a-plus",
+            "provider": "Cohere",
+            "roles": [
+                "main",
+                "critic"
+            ],
+            "id": "command-a-plus-05-2026",
+            "display": "Command A+ (05-2026)",
+            "priority": 0
+        },
+        {
+            "alias": "command-a-reasoning",
+            "provider": "Cohere",
+            "roles": [
+                "main",
+                "critic"
+            ],
+            "id": "command-a-reasoning-08-2025",
+            "display": "Command A Reasoning",
+            "priority": 1
+        },
+        {
+            "alias": "deepseek-v4-flash",
+            "provider": "DeepSeek",
+            "roles": [
+                "main",
+                "critic"
+            ],
+            "id": "deepseek-v4-flash",
+            "display": "DeepSeek V4 Flash",
+            "priority": 2
+        },
+        {
+            "alias": "mistral-large-4",
+            "provider": "Mistral",
+            "roles": [
+                "main",
+                "critic",
+                "news"
+            ],
+            "id": "mistral-large-4",
+            "display": "Mistral Large 4",
+            "priority": 3
+        },
+        {
+            "alias": "llama-4-scout-cf",
+            "provider": "Cloudflare",
+            "roles": [
+                "news",
+                "watcher",
+                "macro"
+            ],
+            "id": "@cf/meta/llama-4-scout-17b-16e-instruct",
+            "display": "Cloudflare Llama 4 Scout",
+            "priority": 4
+        },
+        {
+            "alias": "gpt-oss-120b-cf",
+            "provider": "Cloudflare",
+            "roles": [
+                "critic",
+                "news"
+            ],
+            "id": "@cf/openai/gpt-oss-120b",
+            "display": "Cloudflare GPT-OSS 120B",
+            "priority": 5
+        },
+        {
+            "alias": "qwen3-30b-cf",
+            "provider": "Cloudflare",
+            "roles": [
+                "news",
+                "watcher"
+            ],
+            "id": "@cf/qwen/qwen3-30b-a3b-fp8",
+            "display": "Cloudflare Qwen3 30B",
+            "priority": 6
+        },
+        {
+            "alias": "ministral-14b",
+            "provider": "Mistral",
+            "roles": [
+                "main",
+                "critic",
+                "news",
+                "watcher"
+            ],
+            "id": "ministral-14b-latest",
+            "display": "Mistral Ministral 14B",
+            "priority": 7
+        },
+        {
+            "alias": "gpt-oss-120b",
+            "provider": "Groq",
+            "roles": [
+                "main",
+                "critic",
+                "news"
+            ],
+            "id": "openai/gpt-oss-120b",
+            "display": "Groq GPT-OSS 120B",
+            "priority": 8
+        },
+        {
+            "alias": "gemini-2.5-flash",
+            "provider": "Gemini",
+            "roles": [
+                "main",
+                "news",
+                "watcher",
+                "macro"
+            ],
+            "id": "gemini-2.5-flash",
+            "display": "Gemini 2.5 Flash",
+            "priority": 9
+        },
+        {
+            "alias": "ministral-8b",
+            "provider": "Mistral",
+            "roles": [
+                "news",
+                "watcher",
+                "macro"
+            ],
+            "id": "ministral-8b-latest",
+            "display": "Mistral Ministral 8B",
+            "priority": 10
+        },
+        {
+            "alias": "gemini-3.5-flash",
+            "provider": "Gemini",
+            "roles": [
+                "main",
+                "news",
+                "watcher",
+                "macro"
+            ],
+            "id": "gemini-3.5-flash",
+            "display": "Gemini 3.5 Flash",
+            "priority": 11
+        },
+        {
+            "alias": "gemini-2.5-flash-lite",
+            "provider": "Gemini",
+            "roles": [
+                "news",
+                "watcher",
+                "macro"
+            ],
+            "id": "gemini-2.5-flash-lite",
+            "display": "Gemini 2.5 Flash Lite",
+            "priority": 12
+        },
+        {
+            "alias": "gemini-3.5-flash-lite",
+            "provider": "Gemini",
+            "roles": [
+                "news",
+                "watcher",
+                "macro"
+            ],
+            "id": "gemini-3.5-flash-lite",
+            "display": "Gemini 3.5 Flash Lite",
+            "priority": 13
+        },
+        {
+            "alias": "open-mistral-nemo",
+            "provider": "Mistral",
+            "roles": [
+                "news",
+                "watcher"
+            ],
+            "id": "open-mistral-nemo",
+            "display": "Mistral Nemo",
+            "priority": 14
+        },
+        {
+            "alias": "gpt-oss-20b",
+            "provider": "Groq",
+            "roles": [
+                "main",
+                "critic"
+            ],
+            "id": "openai/gpt-oss-20b",
+            "display": "Groq GPT-OSS 20B",
+            "priority": 21
+        },
+        {
+            "alias": "qwen3.8-27b",
+            "provider": "Groq",
+            "roles": [
+                "main",
+                "critic"
+            ],
+            "id": "qwen/qwen3.8-27b",
+            "display": "Groq Qwen3.8 27B",
+            "priority": 22
+        }
+    ]
+}
