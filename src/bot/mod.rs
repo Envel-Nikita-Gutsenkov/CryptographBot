@@ -333,10 +333,15 @@ async fn handle_history_cmd(
     handlers::handle_purchase_history_cmd(bot, msg, store, config, args).await
 }
 
-async fn handle_help(bot: Bot, msg: Message) -> anyhow::Result<()> {
-    // HTML parse mode: far more forgiving than MarkdownV2 (no need to escape
-    // (), [], |, +, ., #, ! …). Only <, > and & must be entity-escaped.
-    let help_text = "🤖 <b>Cryptograph Bot Command Reference</b>\n\n\
+// Telegram caps a single message at 4096 characters. The reference outgrew
+// that, so one big string made `/help` fail with "message is too long" and
+// nothing was delivered. It is split into logical parts (each < 4096) that
+// `handle_help` sends in order; `help_parts_fit_in_one_telegram_message` guards
+// the limit so a future addition cannot silently break `/help` again.
+//
+// HTML parse mode: far more forgiving than MarkdownV2 (no need to escape
+// (), [], |, +, ., #, ! …). Only <, > and & must be entity-escaped.
+const HELP_PART1: &str = "🤖 <b>Cryptograph Bot Command Reference</b>\n\n\
                      📈 <b>Market Intelligence</b>\n\
                      • <code>/price</code> [SYMS] — Get current quotes (e.g. <code>/price BTC ETH SOL</code>)\n\
                      • <code>/long</code> [SYMS] — Long-range view: 90/180/360-day change, window low/high and where the price sits in that range (e.g. <code>/long BTC ETH SOL LINK</code>)\n\
@@ -364,8 +369,9 @@ async fn handle_help(bot: Bot, msg: Message) -> anyhow::Result<()> {
                      👛 <b>Wallets</b>\n\
                      • <code>/wallet list</code> — List all wallets and balances\n\
                      • <code>/wallet add</code> <code>kind:NAME</code> [SYM] [ADDR] — Add wallet (e.g. <code>/wallet add cold:ledger BTC bc1q...</code>)\n\
-                     • <code>/wallet refresh</code> — Force balance update from blockchain\n\n\
-                     🧠 <b>AI Assistant</b>\n\
+                     • <code>/wallet refresh</code> — Force balance update from blockchain";
+
+const HELP_PART2: &str = "🧠 <b>AI Assistant</b>\n\
                      • <code>/ai</code> [SYM] — Deep market analysis (e.g. <code>/ai BTC</code>)\n\
                      • <code>/ai set</code> [SYMS] — Set multi-asset watchlist (e.g. <code>/ai set BTC ETH SOL</code>)\n\
                      • <code>/patch</code> [text] — AI portfolio corrector (e.g. <code>/patch I have 0.1 BTC not 0.5</code>)\n\
@@ -381,8 +387,9 @@ async fn handle_help(bot: Bot, msg: Message) -> anyhow::Result<()> {
                      • <code>/advice</code> — Long-term investment intelligence &amp; market sentiment\n\
                      📰 <b>News</b>\n\
                      • <code>/news</code> [SYM] — Recent crypto news (e.g. <code>/news BTC</code>)\n\
-                     • <code>/fng</code> — Fear &amp; Greed Index\n\
-                     📊 <b>Trading (commander mode)</b>\n\
+                     • <code>/fng</code> — Fear &amp; Greed Index";
+
+const HELP_PART3: &str = "📊 <b>Trading (commander mode)</b>\n\
                      • <code>/trade list</code> — Allocations, constraints, rules, PnL\n\
                      • <code>/trade pnl</code> — Realized + mark-to-market PnL\n\
                      • <code>/trade allocate</code> [SYM] [AMT] — Set monthly budget\n\
@@ -399,10 +406,33 @@ async fn handle_help(bot: Bot, msg: Message) -> anyhow::Result<()> {
                      • <code>/reset</code> — Admin: reset stats and caches (news, milestones, health); portfolio is kept\n\
                      • <code>/cancel</code> — Cancel current dialog state";
 
-    bot.send_message(msg.chat.id, help_text)
-        .parse_mode(ParseMode::Html)
-        .await?;
+async fn handle_help(bot: Bot, msg: Message) -> anyhow::Result<()> {
+    for part in [HELP_PART1, HELP_PART2, HELP_PART3] {
+        bot.send_message(msg.chat.id, part)
+            .parse_mode(ParseMode::Html)
+            .await?;
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod help_limit_tests {
+    use super::*;
+
+    #[test]
+    fn help_parts_fit_in_one_telegram_message() {
+        // Telegram measures the limit in UTF-16 code units (what `.len()` in JS
+        // would count); anything over 4096 makes send_message reject the whole
+        // message. Emoji (e.g. 🤖, ⚙️) are surrogate pairs, so count UTF-16.
+        for (i, part) in [HELP_PART1, HELP_PART2, HELP_PART3].iter().enumerate() {
+            let units = part.encode_utf16().count();
+            assert!(
+                units <= 4096,
+                "help part {} is {units} UTF-16 units (> 4096) — split it further",
+                i + 1
+            );
+        }
+    }
 }
 
 async fn handle_price_cmd(
