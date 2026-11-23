@@ -522,7 +522,7 @@ fn coin_line(d: &Decision, ru: bool) -> String {
     // coin flip" instead of a far-tail single target.
     if let Some(o) = &d.outlook {
         if let Some(range) = range_text(o, ru) {
-            line.push_str(&format!("\n   диапазон ~68%: {range}"));
+            line.push_str(&format!("\n   ожидаемый диапазон: {range}"));
         }
         let h = horizon_label(o.horizon_days, ru);
         let down = (o.p_down * 100.0).round();
@@ -613,9 +613,9 @@ pub fn render_html(decisions: &[Decision], skipped: &[(String, String)], ru: boo
 
     out.push('\n');
     out.push_str(if ru {
-        "<i>диапазон ~68% — коридор из конуса /forecast; на истории внутри ~73% (1д), ~69% (1нед), ~62–68% (1мес) исходов; ↓/↑ — почти монетка, тренд не доказан; дно — текущее состояние, не прогноз</i>"
+        "<i>диапазон — ожидаемый коридор из конуса волатильности /forecast; шансы ↓/↑ — почти монетка, тренд не доказан; дно — текущее состояние, не прогноз</i>"
     } else {
-        "<i>~68% range — corridor from the /forecast cone; historically ~73% (1d), ~69% (1w), ~62–68% (1m) of outcomes fall inside; ↓/↑ — near coin-flip, no proven trend; bottom — current state, not a forecast</i>"
+        "<i>range — expected volatility corridor from /forecast; ↓/↑ odds — near coin-flip, no proven trend; bottom — current state, not a forecast</i>"
     });
     out
 }
@@ -1220,7 +1220,8 @@ mod tests {
         rank(&mut ds);
         let html = render_html(&ds, &[], true);
         println!("\n===== BOARD (plain) =====\n{}\n===== END =====", strip_tags(&html));
-        assert!(html.contains("диапазон ~68%"), "{html}");
+        assert!(html.contains("ожидаемый диапазон"), "{html}");
+        assert!(!html.contains("68%"), "no jargon 68% should leak into the board: {html}");
         assert!(html.contains("капитуляция"), "{html}");
     }
 
@@ -1377,16 +1378,16 @@ mod tests {
         println!("===== REAL BOARD =====\n{}", strip_tags(&render_html(&ds, &[], true)));
     }
 
-    /// Verify the exact claim `/decide` prints in its footer — the corridor's
-    /// actual hit rate — out-of-sample on full history. Walk forward:
-    /// refit the calibration only on the past every 30 days, build the forecast
-    /// (same `low/high` the board renders), then check whether the *future*
-    /// close at 1/7/30 days landed inside the band. Prints real coverage per coin
-    /// per horizon (ideal ≈ 68%) plus the mean band width as a % of spot.
-    /// Run with `--ignored --nocapture`.
+    /// Empirically validate the corridor `/decide` shows, out-of-sample on full
+    /// history. Walk forward: refit the calibration only on the past every 30
+    /// days, build the forecast (same `low/high` the board renders), then check
+    /// whether the *future* close at 1/7/30 days landed inside the band. Prints
+    /// real coverage per coin per horizon (nominal ≈ 68%) plus the mean band
+    /// width as a % of spot. This is the proof behind the ranges — the board
+    /// itself no longer prints a confidence label. Run with `--ignored --nocapture`.
     #[test]
     #[ignore]
-    fn decide_band_covers_about_68_percent_out_of_sample() {
+    fn decide_band_coverage_out_of_sample() {
         use crate::trading::forecast::{calibrate, forecast_with};
         use crate::trading::history_file::load_history;
 
