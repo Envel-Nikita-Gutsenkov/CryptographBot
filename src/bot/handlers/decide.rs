@@ -82,6 +82,19 @@ pub async fn handle_decide_cmd(
         )
     });
 
+    // Anchor every coin on the same live quote `/dip` and `/forecast` use, so
+    // the board's price, ranges and levels can never disagree with them (it
+    // used to fall back to the last cached close, up to 36h stale).
+    let refs: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
+    let quotes = cmc.get_quotes(&refs).await.unwrap_or_default();
+    let price_for = |sym: &str| {
+        quotes
+            .iter()
+            .find(|q| q.symbol.eq_ignore_ascii_case(sym))
+            .map(|q| q.price_usd)
+            .filter(|p| *p > 0.0)
+    };
+
     for sym in &symbols {
         let avg = store.read(user_id, |p| p.avg_buy_price(sym));
         let position = store.read(user_id, |p| {
@@ -97,7 +110,7 @@ pub async fn handle_decide_cmd(
                 .min()
         });
 
-        match build_dip_report_closes_forecast(sym, &cmc, &sqlite, None, avg).await {
+        match build_dip_report_closes_forecast(sym, &cmc, &sqlite, price_for(sym), avg).await {
             Ok((report, closes, forecast)) => {
                 let policy = entry_policy(&closes);
                 let mut d = Decision::from_report_with_forecast(&report, policy, &forecast);
@@ -106,7 +119,7 @@ pub async fn handle_decide_cmd(
                 // never disagrees with it. The score is shown as a current
                 // state gauge, not a price target.
                 if let Ok(b) = build_bottom_signal(
-                    sym, &cmc, &sqlite, None, avg, position, cash, protect,
+                    sym, &cmc, &sqlite, price_for(sym), avg, position, cash, protect,
                 )
                 .await
                 {

@@ -101,6 +101,11 @@ pub struct Decision {
     /// prints a trend lecture.
     #[allow(dead_code)]
     pub downtrend: bool,
+    /// True when the raw verdict said buy/scale but the trend gate demoted it to
+    /// wait (buying under the 200-day average has a negative historical edge on
+    /// this coin). Lets the board explain *why* it says wait, so it never looks
+    /// like it silently contradicts `/dip`'s raw BUY.
+    pub trend_gated: bool,
     /// Days since the user's most recent recorded purchase of this symbol, if
     /// any. Lets the board say "you topped up N days ago" instead of repeating a
     /// generic prompt — the bot is only as aware of your buys as `/add` makes it.
@@ -296,9 +301,11 @@ impl Decision {
             DipVerdict::ScaleIn { now_pct, .. } => Some(*now_pct),
             _ => None,
         };
+        let mut trend_gated = false;
         if matches!(action, Action::Buy | Action::Scale) && !policy.allows(downtrend) {
             action = Action::Wait;
             now_pct = None;
+            trend_gated = true;
         }
         Decision {
             symbol: report.symbol.clone(),
@@ -309,6 +316,7 @@ impl Decision {
             level,
             now_pct,
             downtrend,
+            trend_gated,
             last_topup_days: None,
             outlook: None,
             bottom: None,
@@ -477,6 +485,13 @@ fn coin_line(d: &Decision, ru: bool) -> String {
             format!("bought {days}d ago")
         });
     }
+    if d.trend_gated {
+        details.push(if ru {
+            "ниже SMA200 — вход отложен".to_string()
+        } else {
+            "below SMA200 — entry postponed".to_string()
+        });
+    }
     let mut line = format!(
         "{} · <b>{}</b> <code>{}</code>",
         action_tag(d.action, ru),
@@ -507,7 +522,7 @@ fn coin_line(d: &Decision, ru: bool) -> String {
     // coin flip" instead of a far-tail single target.
     if let Some(o) = &d.outlook {
         if let Some(range) = range_text(o, ru) {
-            line.push_str(&format!("\n   диапазон 68%: {range}"));
+            line.push_str(&format!("\n   диапазон ~68%: {range}"));
         }
         let h = horizon_label(o.horizon_days, ru);
         let down = (o.p_down * 100.0).round();
@@ -598,9 +613,9 @@ pub fn render_html(decisions: &[Decision], skipped: &[(String, String)], ru: boo
 
     out.push('\n');
     out.push_str(if ru {
-        "<i>диапазон 68% — реальный коридор из конуса /forecast (проверено на истории: ~68% исходов внутри); ↓/↑ — почти монетка, тренд не доказан; дно — текущее состояние, не прогноз</i>"
+        "<i>диапазон ~68% — коридор из конуса /forecast; на истории внутри ~73% (1д), ~69% (1нед), ~62–68% (1мес) исходов; ↓/↑ — почти монетка, тренд не доказан; дно — текущее состояние, не прогноз</i>"
     } else {
-        "<i>68% range — the actual corridor from the /forecast cone (validated on history: ~68% of outcomes inside); ↓/↑ — near coin-flip, no proven trend; bottom — current state, not a forecast</i>"
+        "<i>~68% range — corridor from the /forecast cone; historically ~73% (1d), ~69% (1w), ~62–68% (1m) of outcomes fall inside; ↓/↑ — near coin-flip, no proven trend; bottom — current state, not a forecast</i>"
     });
     out
 }
@@ -799,22 +814,35 @@ pub async fn run_cli_decide(
 ) -> anyhow::Result<()> {
     let mut decisions = Vec::new();
     let mut skipped = Vec::new();
+    // Same live-quote anchor as the Telegram handler, so CLI output matches the
+    // bot exactly. If quotes are unavailable (offline), it falls back to the
+    // last cached close inside `build_dip_report_closes_forecast`.
+    let refs: Vec<&str> = symbols.iter().map(|s| s.trim()).collect();
+    let quotes = cmc.get_quotes(&refs).await.unwrap_or_default();
+    let price_for = |sym: &str| {
+        quotes
+            .iter()
+            .find(|q| q.symbol.eq_ignore_ascii_case(sym))
+            .map(|q| q.price_usd)
+            .filter(|p| *p > 0.0)
+    };
     for sym in &symbols {
         let sym = sym.trim().to_uppercase();
         if sym.is_empty() {
             continue;
         }
         match crate::bot::handlers::build_dip_report_closes_forecast(
-            &sym, &cmc, &sqlite, None, None,
+            &sym, &cmc, &sqlite, price_for(&sym), None,
         )
         .await
         {
             Ok((report, closes, forecast)) => {
                 let policy = entry_policy(&closes);
                 let mut d = Decision::from_report_with_forecast(&report, policy, &forecast);
-                if let Ok(b) =
-                    crate::bot::handlers::build_bottom_signal(&sym, &cmc, &sqlite, None, None, 0.0, 0.0, false)
-                        .await
+                if let Ok(b) = crate::bot::handlers::build_bottom_signal(
+                    &sym, &cmc, &sqlite, price_for(&sym), None, 0.0, 0.0, false,
+                )
+                .await
                 {
                     d.attach_bottom(b.bottom_score);
                 }
@@ -1035,7 +1063,12 @@ mod tests {
         let d = Decision::from_report_with_policy(&r, BLOCK_KNIFE);
         assert_eq!(d.action, Action::Wait);
         assert!(d.downtrend);
+        assert!(d.trend_gated);
         assert!(d.now_pct.is_none());
+        // The board must say *why* it waits, so `/decide` cannot silently
+        // contradict `/dip`'s raw "buy" with an unexplained "wait".
+        let html = render_html(&[d], &[], true);
+        assert!(html.contains("SMA200"), "{html}");
     }
 
     #[test]
@@ -1187,7 +1220,7 @@ mod tests {
         rank(&mut ds);
         let html = render_html(&ds, &[], true);
         println!("\n===== BOARD (plain) =====\n{}\n===== END =====", strip_tags(&html));
-        assert!(html.contains("диапазон 68%"), "{html}");
+        assert!(html.contains("диапазон ~68%"), "{html}");
         assert!(html.contains("капитуляция"), "{html}");
     }
 
@@ -1342,5 +1375,75 @@ mod tests {
             ds.push(d);
         }
         println!("===== REAL BOARD =====\n{}", strip_tags(&render_html(&ds, &[], true)));
+    }
+
+    /// Verify the exact claim `/decide` prints in its footer — the corridor's
+    /// actual hit rate — out-of-sample on full history. Walk forward:
+    /// refit the calibration only on the past every 30 days, build the forecast
+    /// (same `low/high` the board renders), then check whether the *future*
+    /// close at 1/7/30 days landed inside the band. Prints real coverage per coin
+    /// per horizon (ideal ≈ 68%) plus the mean band width as a % of spot.
+    /// Run with `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn decide_band_covers_about_68_percent_out_of_sample() {
+        use crate::trading::forecast::{calibrate, forecast_with};
+        use crate::trading::history_file::load_history;
+
+        for coin in ["BTC", "ETH", "SOL", "LINK"] {
+            let Some(hist) = load_history(coin) else {
+                println!("{coin}: no cached history");
+                continue;
+            };
+            let closes: Vec<f64> = hist.iter().map(|&(_, c)| c).collect();
+            let n = closes.len();
+            if n < 600 {
+                println!("{coin}: too short ({n})");
+                continue;
+            }
+            let start = 400usize;
+            let mut cal = calibrate(coin, &hist[..start]);
+            let mut last_fit = start;
+            // per horizon: (inside, total, width_sum)
+            let mut acc = [(0usize, 0usize, 0.0f64); 3];
+            let horizons = [1usize, 7, 30];
+            for origin in start..n - 1 {
+                if origin - last_fit >= 30 {
+                    cal = calibrate(coin, &hist[..=origin]);
+                    last_fit = origin;
+                }
+                let price = closes[origin];
+                let f = forecast_with(coin, price, &hist[..=origin], &cal);
+                for (k, &h) in horizons.iter().enumerate() {
+                    let j = origin + h;
+                    if j >= n {
+                        continue;
+                    }
+                    let Some(hz) = f.horizons.iter().find(|x| x.days == h as i64) else {
+                        continue;
+                    };
+                    let actual = closes[j];
+                    if actual >= hz.low && actual <= hz.high {
+                        acc[k].0 += 1;
+                    }
+                    acc[k].1 += 1;
+                    acc[k].2 += (hz.high - hz.low) / price;
+                }
+            }
+            println!("\n=== {coin} ===");
+            for (k, &h) in horizons.iter().enumerate() {
+                let (inside, total, wsum) = acc[k];
+                if total == 0 {
+                    println!("  {h:>2}d: no samples");
+                    continue;
+                }
+                let cov = inside as f64 / total as f64 * 100.0;
+                let width = wsum / total as f64 * 100.0;
+                println!(
+                    "  {h:>2}d: coverage={:.1}% (ideal 68%) n={} avg-width={:.1}% of spot",
+                    cov, total, width
+                );
+            }
+        }
     }
 }
