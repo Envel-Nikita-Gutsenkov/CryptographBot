@@ -9,8 +9,9 @@
 //! reason about and to verify.
 
 use crate::format::{format_thousands, price_decimals};
-use crate::trading::dipzones::{prob_below_moments, DipReport, DipVerdict};
-use crate::trading::forecast::{student_t_quantile, Forecast, STUDENT_DF};
+use crate::trading::bottom::band_label;
+use crate::trading::dipzones::{DipReport, DipVerdict};
+use crate::trading::forecast::Forecast;
 
 /// What the board suggests doing with a coin, ordered from most to least
 /// actionable. `Ord` is the ranking order used by [`rank`].
@@ -47,42 +48,40 @@ pub struct Level {
     pub horizon_days: i64,
 }
 
-/// One bid leg in the staged-entry plan derived from the forecast cone.
+/// A realistic 68% price band at one horizon, taken straight from the
+/// calibrated cone `/forecast` draws (`HorizonForecast::low .. high`). This is
+/// what the board leads with: "where can the price plausibly be in a week/month",
+/// not a far-tail single target like "BTC will drop to $47k".
 #[derive(Clone, Debug)]
-pub struct Tranche {
-    /// Bid price (strictly below spot).
-    pub price: f64,
-    /// P(the horizon close is below this price), 0..1.
-    pub p_below: f64,
-    /// Share of the planned buy to place here, percent.
-    pub share_pct: u32,
+pub struct RangeView {
+    pub days: i64,
+    pub low: f64,
+    pub high: f64,
 }
 
-/// A forecast read for the board: not just "up or down", but *with what odds*
-/// the price spends time at each cheaper level, plus a tranche plan. Built from
-/// the same calibrated cone `/forecast` draws, via
-/// [`crate::trading::dipzones::prob_below_moments`], so the numbers agree.
+/// The forecast read for one coin, expressed the way a person actually plans:
+/// a plausible range now (next week, next month) and the honest odds of being
+/// lower at the month horizon. Deep tail levels and a staged ladder used to sit
+/// here and read like price *predictions* ("target $47k"); they are gone.
 #[derive(Clone, Debug)]
 pub struct ForecastOutlook {
+    /// The horizon whose `p_down` is reported (the month, when available).
     pub horizon_days: i64,
-    /// P(the horizon close is below spot) — the model's read on "lower".
+    /// P(the horizon close is below spot), 0..1. Honest ~coin-flip on this data.
     pub p_down: f64,
-    /// Staged buy levels, nearest to spot first.
-    pub tranches: Vec<Tranche>,
+    pub day: Option<RangeView>,
+    pub week: Option<RangeView>,
+    pub month: Option<RangeView>,
 }
 
-/// A clear "where is the bottom" read for one coin: the 0..100 bottom score,
-/// the concrete level to bid for, and the *first-passage* odds of reaching it
-/// at 1d / 1w / 1m / 3m. The score comes from
-/// [`crate::trading::bottom::bottom_signal`] (so `/decide` and `/bottom` agree),
-/// the timeline from the same calibrated cone `/forecast` draws.
+/// A descriptive read of the *current* market stress for one coin: the 0..100
+/// bottom score from [`crate::trading::bottom::bottom_signal`] (so `/decide`
+/// and `/bottom` agree). This is a state gauge, not a forecast — the score has
+/// no reliable forward edge across coins, so the board never presents it as
+/// "the bottom is in".
 #[derive(Clone, Debug)]
 pub struct BottomView {
     pub score: u8,
-    /// Shallowest bucket to bid for — the "bottom buy" level.
-    pub target: f64,
-    /// `(days, P(price touches `target` within `days`))`, ascending by days.
-    pub touch: Vec<(i64, f64)>,
 }
 
 /// One coin's decision.
@@ -177,73 +176,60 @@ pub fn entry_policy(closes: &[f64]) -> EntryPolicy {
     policy
 }
 
-/// Turn the calibrated cone into a probability + tranche read for one coin.
-/// The ladder is built from the cone's own quantiles: the printed percent at
-/// each level is the chance the horizon close lands below it (50% / 25% / 10%),
-/// so `/decide` never contradicts `/forecast` or invents a level the model does
-/// not already imply.
+/// Turn the calibrated cone into an honest, realistic read for one coin: the
+/// 68% price band (the corridor the price can plausibly be in) at the week and
+/// month horizons, plus the calibrated odds of being lower at the month.
+///
+/// The band is taken straight from `/forecast`'s `HorizonForecast::low/high`, so
+/// the board never contradicts the cone and never invents a far-tail target
+/// ("BTC 47k" from 61k) that reads like a prediction but is really a 10th
+/// percentile nobody expects.
 fn build_outlook(report: &DipReport, forecast: &Forecast) -> Option<ForecastOutlook> {
     let price = report.price;
     if !(price > 0.0) {
         return None;
     }
-    let horizon_days = report
-        .horizons
-        .iter()
-        .copied()
-        .filter(|d| *d >= 30)
-        .min()
-        .or_else(|| report.horizons.last().copied())?;
-    let m = forecast.moments(horizon_days);
-    if !(m.sigma_h > 0.0) {
+    // The widest horizon at or below the requested one, so a shorter cone is not
+    // mislabelled as a longer one.
+    let range_at = |days: i64| -> Option<RangeView> {
+        forecast
+            .horizons
+            .iter()
+            .filter(|h| h.days >= 1 && h.days <= days)
+            .max_by_key(|h| h.days)
+            .map(|h| RangeView {
+                days: h.days,
+                low: h.low,
+                high: h.high,
+            })
+    };
+    let day = range_at(1);
+    let week = range_at(7);
+    let month = range_at(30);
+    if day.is_none() && week.is_none() && month.is_none() {
         return None;
     }
-    // Direction: use the calibrated `prob_up` the `/forecast` ladder reports
-    // (a logistic fit to walk-forward outcomes), not the raw drift. On this data
-    // the drift has ~no edge, so `prob_up` sits near 50% — an honest "≈coin flip"
-    // rather than a confident trend that does not exist.
+    let horizon_days = month
+        .as_ref()
+        .map(|r| r.days)
+        .or_else(|| week.as_ref().map(|r| r.days))
+        .unwrap_or(30);
+    // Direction: use the calibrated `prob_up` the `/forecast` ladder reports (a
+    // logistic fit to walk-forward outcomes), not the raw drift. On this data
+    // the drift has ~no edge, so `prob_up` sits near 50% — an honest "≈coin
+    // flip" rather than a confident trend that does not exist.
     let p_down = forecast
         .horizons
         .iter()
         .find(|h| h.days == horizon_days)
         .map(|h| (1.0 - h.prob_up).clamp(0.0, 1.0))
-        .unwrap_or_else(|| prob_below_moments(price, price, m));
-
-    // Quantile ladder: q is the probability the horizon close is below the level.
-    let mut tranches: Vec<Tranche> = Vec::new();
-    for q in [0.50_f64, 0.25, 0.10] {
-        let t = student_t_quantile(q, STUDENT_DF);
-        let level = price * (m.log_drift + t * m.sigma_h).exp();
-        if level <= 0.0
-            || level >= price * 0.999
-            || tranches
-                .iter()
-                .any(|tr| ((tr.price - level) / level).abs() < 0.01)
-        {
-            continue;
-        }
-        tranches.push(Tranche {
-            price: level,
-            p_below: q,
-            share_pct: 0,
-        });
-    }
-    if tranches.is_empty() {
-        return None;
-    }
-
-    // Split the budget evenly across however many rungs survived (sums to 100).
-    let n = tranches.len() as u32;
-    let base = 100 / n;
-    let rem = 100 % n;
-    for (i, tr) in tranches.iter_mut().enumerate() {
-        tr.share_pct = base + if i == 0 { rem } else { 0 };
-    }
-
+        .unwrap_or(0.5);
     Some(ForecastOutlook {
         horizon_days,
         p_down,
-        tranches,
+        day,
+        week,
+        month,
     })
 }
 
@@ -330,10 +316,11 @@ impl Decision {
     }
 
     /// Like [`Self::from_report_with_policy`], but also attaches the forecast
-    /// read: P(price lower over the horizon) and a probability-weighted tranche
-    /// plan, computed from the same cone `/forecast` shows. This is what makes
-    /// the board a *forecast* ("49% chance of $58k, larger chance of a flush to
-    /// $50k") instead of a bare buy/wait switch.
+    /// read: the realistic 68% price band for the week and month (from the same
+    /// calibrated cone `/forecast` draws) and the odds of being lower at the
+    /// month. This is what makes the board a *forecast* ("likely 55–65k next
+    /// month, down-vs-up ≈ 50/50") instead of a bare buy/wait switch or a
+    /// far-tail single target.
     pub fn from_report_with_forecast(
         report: &DipReport,
         policy: EntryPolicy,
@@ -344,15 +331,11 @@ impl Decision {
         d
     }
 
-    /// Attach the bottom verdict (score + buy target + touch timeline) for this
-    /// coin. The timeline is `(days, P(touch within days))`, computed by the
-    /// caller from the same calibrated cone `/forecast` draws.
-    pub fn attach_bottom(&mut self, score: u8, target: f64, touch: Vec<(i64, f64)>) {
-        self.bottom = Some(BottomView {
-            score,
-            target,
-            touch,
-        });
+    /// Attach the current-state bottom gauge (0..100) for this coin. Kept
+    /// descriptive on purpose: it is shown as "capitulation: high/moderate/…",
+    /// never as a price target, because the score has no forward edge.
+    pub fn attach_bottom(&mut self, score: u8) {
+        self.bottom = Some(BottomView { score });
     }
 
     /// Signed percent vs the user's average entry, if one is recorded.
@@ -450,51 +433,31 @@ fn level_text(d: &Decision, ru: bool) -> String {
     s
 }
 
-/// The collapsible plan block under a coin: a one-row-per-level table of
-/// `level · odds the horizon close lands below it · tranche share`, kept inside
-/// `<blockquote expandable>` so the board stays scannable on a phone. Only
-/// rendered where the board says to wait/hold — action lines carry their level.
-fn outlook_text(d: &Decision, ru: bool) -> Option<String> {
-    let o = d.outlook.as_ref()?;
-    if o.tranches.is_empty() {
-        return None;
-    }
-    let h = o.horizon_days;
-    let mut s = String::from("<blockquote expandable>");
-    s.push_str(&if ru {
-        format!("<b>Уровни {h}</b> · цена · шанс закрыться ниже · доля\n")
-    } else {
-        format!("<b>Levels {h}</b> · price · odds below · share\n")
-    });
-    for t in &o.tranches {
-        s.push_str(&format!(
-            "<code>{}</code> · {:.0}% · {}\n",
-            Decision::money(t.price),
-            t.p_below * 100.0,
-            share_fraction(t.share_pct)
+/// The realistic 68% band at each available horizon, e.g.
+/// `1нед $57,000–$64,000 · 1мес $53,000–$69,000`. This is the corridor the
+/// user actually cares about ("will it be 55–65k?"); it replaces the old
+/// far-tail ladder of single targets.
+fn range_text(o: &ForecastOutlook, ru: bool) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut seen: Vec<i64> = Vec::new();
+    for band in [&o.day, &o.week, &o.month].into_iter().flatten() {
+        if seen.contains(&band.days) {
+            continue;
+        }
+        seen.push(band.days);
+        parts.push(format!(
+            "{} {}–{}",
+            horizon_label(band.days, ru),
+            Decision::money(band.low),
+            Decision::money(band.high)
         ));
     }
-    while s.ends_with('\n') {
-        s.pop();
-    }
-    s.push_str("</blockquote>");
-    Some(s)
-}
-
-/// A tranche's slice of the budget as a common fraction, so it never gets
-/// confused with the probability column (which is also a percent).
-fn share_fraction(pct: u32) -> String {
-    match pct {
-        100 => "всё".to_string(),
-        50 => "½".to_string(),
-        34 | 33 => "⅓".to_string(),
-        25 => "¼".to_string(),
-        20 => "⅕".to_string(),
-        _ => format!("{pct}%"),
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
     }
 }
-
-
 
 fn coin_line(d: &Decision, ru: bool) -> String {
     let mut details = Vec::new();
@@ -527,50 +490,38 @@ fn coin_line(d: &Decision, ru: bool) -> String {
 
     // The headline the user asked for: a clear bottom read and a buy target.
     if let Some(b) = &d.bottom {
-        // Describe the *current* state (how stretched/oversold the market is
-        // right now), not a forecast: the 0..100 score has no reliable forward
-        // edge across coins (SOL looked good, ETH worse, on ~50-event samples),
-        // so we must not dress it up as "the bottom is in, price will rise".
-        let state = stress_label(b.score, ru);
+        // Clear bottom verdict first (what the user asked for), then the state
+        // gauge it is derived from. The 0..100 score measures how stretched /
+        // oversold the market is *right now* — it is not a price target and has
+        // no reliable forward edge (ETH negative, SOL positive on ~50 events),
+        // so we call it a state and never dress it up as "price will rise".
         line.push_str(&format!(
-            "\n   капитуляция <b>{}</b> · {}/100 · цель <code>{}</code>",
-            state,
-            b.score,
-            Decision::money(b.target)
+            "\n   <b>{}</b> · капитуляция {}/100",
+            band_label(b.score, ru),
+            b.score
         ));
-        // "When": first-passage odds of reaching the target by 1d/1w/1m/3m.
-        // THIS is the part validated on history (Brier skill +26..32%).
-        if !b.touch.is_empty() {
-            let cols: Vec<String> = b
-                .touch
-                .iter()
-                .map(|(days, p)| format!("{} {:.0}%", horizon_label(*days, ru), p * 100.0))
-                .collect();
-            line.push_str(&format!("\n   шанс дойти: {}", cols.join(" · ")));
-        }
     }
 
-    // Direction read over the outlook horizon, if we have one.
+    // The realistic corridor and the direction odds over the horizon. This is
+    // the honest forecast the user wants: "likely 55–65k next month, ↓/↑ ≈
+    // coin flip" instead of a far-tail single target.
     if let Some(o) = &d.outlook {
+        if let Some(range) = range_text(o, ru) {
+            line.push_str(&format!("\n   диапазон 68%: {range}"));
+        }
         let h = horizon_label(o.horizon_days, ru);
         let down = (o.p_down * 100.0).round();
         line.push_str(&format!("\n   {h}: ↓{down:.0}% / ↑{:.0}%", 100.0 - down));
     }
 
-    // Supplementary levels stay folded away so the line never becomes a wall.
-    if let Some(ot) = outlook_text(d, ru) {
-        line.push('\n');
-        line.push_str(&ot);
-    } else {
-        let lv = level_text(d, ru);
-        if !lv.is_empty() {
-            line.push_str(&format!("\n   {lv}"));
-        }
+    // Nearest actionable level (only ~an hour away in odds), if known.
+    let lv = level_text(d, ru);
+    if !lv.is_empty() {
+        line.push_str(&format!("\n   {lv}"));
     }
     line
 }
 
-/// Short, human horizon label: `1d / 1w / 1m / 3m` (or Russian equivalents).
 /// Short verdict tag shown at the start of each coin line.
 fn action_tag(action: Action, ru: bool) -> &'static str {
     match (action, ru) {
@@ -584,21 +535,6 @@ fn action_tag(action: Action, ru: bool) -> &'static str {
         (Action::Hold, false) => "🔴 hold",
         (Action::NoData, true) => "⚪ нет данных",
         (Action::NoData, false) => "⚪ no data",
-    }
-}
-
-/// Descriptive label for the *current* capitulation stress, not a forecast.
-/// Kept neutral on purpose: the 0..100 score is a state gauge.
-fn stress_label(score: u8, ru: bool) -> &'static str {
-    match (score, ru) {
-        (60..=100, true) => "сильная",
-        (60..=100, false) => "high",
-        (35..=59, true) => "умеренная",
-        (35..=59, false) => "moderate",
-        (20..=34, true) => "слабая",
-        (20..=34, false) => "mild",
-        (_, true) => "спокойно",
-        (_, false) => "calm",
     }
 }
 
@@ -636,9 +572,9 @@ pub fn render_html(decisions: &[Decision], skipped: &[(String, String)], ru: boo
     let total = decisions.len();
     let names: Vec<&str> = decisions.iter().map(|d| d.symbol.as_str()).collect();
     out.push_str(if ru {
-        "🎯 <b>Состояние и шансы</b>"
+        "🎯 <b>Диапазон и шансы</b>"
     } else {
-        "🎯 <b>State & odds</b>"
+        "🎯 <b>Range & odds</b>"
     });
     out.push_str(&format!(" · {total} · {}\n", names.join(" ")));
 
@@ -662,9 +598,9 @@ pub fn render_html(decisions: &[Decision], skipped: &[(String, String)], ru: boo
 
     out.push('\n');
     out.push_str(if ru {
-        "<i>капитуляция — текущее состояние (не прогноз); шанс — вероятность дойти до цели к сроку, проверено на истории (Brier skill +26…32%)</i>"
+        "<i>диапазон 68% — реальный коридор из конуса /forecast (проверено на истории: ~68% исходов внутри); ↓/↑ — почти монетка, тренд не доказан; дно — текущее состояние, не прогноз</i>"
     } else {
-        "<i>capitulation — current state (not a forecast); odds — chance to reach the target by then, validated on history (Brier skill +26..32%)</i>"
+        "<i>68% range — the actual corridor from the /forecast cone (validated on history: ~68% of outcomes inside); ↓/↑ — near coin-flip, no proven trend; bottom — current state, not a forecast</i>"
     });
     out
 }
@@ -880,12 +816,7 @@ pub async fn run_cli_decide(
                     crate::bot::handlers::build_bottom_signal(&sym, &cmc, &sqlite, None, None, 0.0, 0.0, false)
                         .await
                 {
-                    let target = b.buy_price;
-                    let touch: Vec<(i64, f64)> = [1_i64, 7, 30, 90]
-                        .iter()
-                        .map(|&days| (days, crate::trading::dipzones::touch_probability_forecast(&forecast, target, days)))
-                        .collect();
-                    d.attach_bottom(b.bottom_score, target, touch);
+                    d.attach_bottom(b.bottom_score);
                 }
                 decisions.push(d);
             }
@@ -1175,7 +1106,7 @@ mod tests {
     }
 
     #[test]
-    fn outlook_builds_a_descending_ladder_with_expected_odds() {
+    fn outlook_gives_realistic_ranges_and_odds() {
         let hist = declining_history(400, 100.0, 55.0);
         let price = hist.last().unwrap().1;
         let f = crate::trading::forecast::forecast("BTC", price, &hist);
@@ -1185,39 +1116,40 @@ mod tests {
         let o = d.outlook.expect("outlook should exist with a valid cone");
 
         assert_eq!(o.horizon_days, 30);
-        assert!(o.tranches.len() >= 2, "tranches={:?}", o.tranches);
-        // Nearest rung first, each strictly below spot, each deeper than the last.
-        let mut prev = price;
-        for (i, t) in o.tranches.iter().enumerate() {
-            assert!(t.price < prev, "rung {i} not below previous: {t:?}");
-            assert!(t.price > 0.0);
-            prev = t.price;
-            if i == 0 {
-                assert!((t.p_below - 0.50).abs() < 1e-6, "first rung ~50%: {t:?}");
-            }
+        assert!((0.0..=1.0).contains(&o.p_down), "p_down={}", o.p_down);
+        let week = o.week.expect("week band");
+        let month = o.month.expect("month band");
+        // Bands are real corridors: low below high, and around spot (not a
+        // far-tail single level like the old "BTC 47k from 61k").
+        assert!(week.low < week.high, "week={week:?}");
+        assert!(month.low < month.high, "month={month:?}");
+        assert!(month.low <= week.low, "month should reach further down");
+        // The corridor is a *near* range around spot, not a far-tail single
+        // level (the old "BTC 47k from 61k" complaint). Both bands stay within
+        // a realistic ±50% of spot.
+        for band in [week, month] {
+            assert!(
+                band.low > price * 0.5 && band.high < price * 1.5,
+                "band={band:?} too far from spot={price}"
+            );
+            assert!(band.low > 0.0 && band.high > 0.0);
         }
-        // Budget is fully allocated.
-        let total: u32 = o.tranches.iter().map(|t| t.share_pct).sum();
-        assert_eq!(total, 100, "shares={:?}", o.tranches);
     }
 
     #[test]
-    fn outlook_text_has_no_raw_angle_brackets() {
+    fn range_text_has_no_raw_angle_brackets() {
         let hist = declining_history(400, 100.0, 55.0);
         let price = hist.last().unwrap().1;
         let f = crate::trading::forecast::forecast("BTC", price, &hist);
         let mut r = report(DipVerdict::Wait { zone_price: None }, price, None);
         r.sma200 = Some(price * 1.15);
         let d = Decision::from_report_with_forecast(&r, EntryPolicy::permissive(), &f);
-        let txt = outlook_text(&d, true).expect("outlook text");
-        // Telegram HTML parse mode: the block must be a single well-formed
-        // expandable quote, with no stray '<' (e.g. a bare "<$" would swallow
-        // the rest of the message).
-        assert!(txt.starts_with("<blockquote expandable>"), "{txt}");
-        assert!(txt.ends_with("</blockquote>"), "{txt}");
-        assert_eq!(txt.matches("<blockquote").count(), 1, "{txt}");
-        assert!(!txt.contains("<$"), "raw '<' before money: {txt}");
-        assert!(txt.contains("шанс закрыться ниже") && txt.contains("⅓"), "{txt}");
+        let o = d.outlook.expect("outlook");
+        let txt = range_text(&o, true).expect("range text");
+        // Telegram HTML parse mode: a stray '<' (e.g. a bare "<$5k") would
+        // swallow the rest of the message.
+        assert!(!txt.contains('<'), "raw '<' in range text: {txt}");
+        assert!(txt.contains('–'), "expected an en-dash range: {txt}");
     }
 
     #[test]
@@ -1225,7 +1157,6 @@ mod tests {
         let r = report(DipVerdict::Wait { zone_price: Some(0.9) }, 1.0, None);
         let d = Decision::from_report_with_policy(&r, EntryPolicy::permissive());
         assert!(d.outlook.is_none());
-        assert!(outlook_text(&d, true).is_none());
     }
 
     /// Smoke test that prints the rendered board (run with `--nocapture`) so the
@@ -1241,7 +1172,7 @@ mod tests {
         wait.sma200 = Some(price * 1.15);
         let d1 = Decision::from_report_with_forecast(&wait, EntryPolicy::permissive(), &f);
         let mut d1 = d1;
-        d1.attach_bottom(72, price * 0.93, vec![(1, 0.04), (7, 0.13), (30, 0.33), (90, 0.53)]);
+        d1.attach_bottom(72);
 
         let mut hold = report(
             DipVerdict::AboveAverage { zone_price: None },
@@ -1256,8 +1187,8 @@ mod tests {
         rank(&mut ds);
         let html = render_html(&ds, &[], true);
         println!("\n===== BOARD (plain) =====\n{}\n===== END =====", strip_tags(&html));
-        assert!(html.contains("<blockquote expandable>"));
-        assert!(html.contains("</blockquote>"));
+        assert!(html.contains("диапазон 68%"), "{html}");
+        assert!(html.contains("капитуляция"), "{html}");
     }
 
     /// Out-of-sample calibration check over the *full* cached history, walked
@@ -1383,5 +1314,33 @@ mod tests {
                 println!("      q={:.2} n={} emp={:.3}", q, s.len(), em);
             }
         }
+    }
+
+    /// Render the real `/decide` board for the cached coins (run with
+    /// `--ignored --nocapture`) so the layout and the numbers can be eyeballed
+    /// against actual market data, not a synthetic series.
+    #[test]
+    #[ignore]
+    fn board_renders_on_cached_history() {
+        use crate::trading::history_file::load_history;
+        let mut ds = Vec::new();
+        for coin in ["BTC", "ETH", "SOL", "LINK"] {
+            let Some(hist) = load_history(coin) else { continue };
+            let price = hist.last().unwrap().1;
+            let f = crate::trading::forecast::forecast(coin, price, &hist);
+            let closes: Vec<f64> = hist.iter().map(|&(_, c)| c).collect();
+            let policy = entry_policy(&closes);
+            let mut r = report(DipVerdict::Wait { zone_price: None }, price, None);
+            r.symbol = coin.into();
+            r.sma200 = if closes.len() >= 200 {
+                Some(closes[closes.len() - 200..].iter().sum::<f64>() / 200.0)
+            } else {
+                None
+            };
+            let mut d = Decision::from_report_with_forecast(&r, policy, &f);
+            d.attach_bottom(50);
+            ds.push(d);
+        }
+        println!("===== REAL BOARD =====\n{}", strip_tags(&render_html(&ds, &[], true)));
     }
 }

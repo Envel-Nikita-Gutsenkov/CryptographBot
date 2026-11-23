@@ -19,7 +19,6 @@ use crate::{
     db::{SqliteStore, Store},
     trading::{
         decision::{entry_policy, rank, render_html, Decision},
-        dipzones::touch_probability_forecast,
     },
 };
 
@@ -103,20 +102,15 @@ pub async fn handle_decide_cmd(
                 let policy = entry_policy(&closes);
                 let mut d = Decision::from_report_with_forecast(&report, policy, &forecast);
                 d.last_topup_days = last_topup_days;
-                // Bottom read + "when": reuse the exact `/bottom` engine so the
-                // board never disagrees with it, then attach first-passage odds
-                // of reaching that target at 1d / 1w / 1m / 3m.
+                // Bottom read: reuse the exact `/bottom` engine so the board
+                // never disagrees with it. The score is shown as a current
+                // state gauge, not a price target.
                 if let Ok(b) = build_bottom_signal(
                     sym, &cmc, &sqlite, None, avg, position, cash, protect,
                 )
                 .await
                 {
-                    let target = b.buy_price;
-                    let touch: Vec<(i64, f64)> = [1_i64, 7, 30, 90]
-                        .iter()
-                        .map(|&days| (days, touch_probability_forecast(&forecast, target, days)))
-                        .collect();
-                    d.attach_bottom(b.bottom_score, target, touch);
+                    d.attach_bottom(b.bottom_score);
                 }
                 decisions.push(d);
             }
