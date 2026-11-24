@@ -170,10 +170,22 @@ async fn process_user(
         let mut price_context = String::from("(no live prices available)");
         if !price_refs.is_empty() {
             if let Ok(live) = cmc.get_quotes(&price_refs).await {
-                let priced: Vec<String> = live
+                let present: std::collections::HashSet<String> = live
+                    .iter()
+                    .map(|q| q.symbol.to_uppercase())
+                    .collect();
+                let mut priced: Vec<String> = live
                     .iter()
                     .map(|q| format!("• {}: ${}", q.symbol, fmt_price(q.price_usd)))
                     .collect();
+                // Flag symbols we asked for but did not get, so the model
+                // knows the price was genuinely not retrieved and does not
+                // fall back to a remembered (wrong) number.
+                for sym in &price_symbols {
+                    if !present.contains(&sym.to_uppercase()) {
+                        priced.push(format!("• {}: price unavailable", sym));
+                    }
+                }
                 if !priced.is_empty() {
                     price_context = priced.join("\n");
                 }

@@ -41,30 +41,37 @@ pub(crate) async fn build_market_data(
     let mut market_data = if let Some(md) = scenario_market_data {
         md
     } else {
-        // F&G + global metrics are independent; run them together but bound the
-        // whole join — the global-metrics fallback chain (CMC -> CoinGecko ->
-        // Coinpaprika -> DefiLlama) alone can take ~34s worst case, and a dead
-        // provider must not stall the ask.
-        let (fg, global_metrics) =
-            match tokio::time::timeout(std::time::Duration::from_secs(20), async {
-                tokio::join!(
+        // F&G + global metrics are independent; run them together but give each
+        // its OWN timeout. They used to share one 20s timeout over a single
+        // `join!`, so a slow global-metrics fallback chain (CMC -> CoinGecko ->
+        // Coinpaprika -> DefiLlama can take ~34s worst case) would also discard
+        // the Fear&Greed reading that had already arrived.
+        let timeout = std::time::Duration::from_secs(20);
+        let (fg, global_metrics) = tokio::join!(
+            async {
+                match tokio::time::timeout(
+                    timeout,
                     crate::bot::handlers::ai::fetch_fear_and_greed_index(),
-                    cmc.get_global_metrics(),
                 )
-            })
-            .await
-            {
-                Ok(v) => v,
-                Err(_) => {
-                    tracing::warn!(
-                        "fear&greed + global metrics timed out after 20s — using empty data"
-                    );
-                    (
-                        "Unavailable.".to_string(),
-                        Err(crate::error::BotError::CmcApi("timeout".into())),
-                    )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(_) => {
+                        tracing::warn!("fear&greed fetch timed out after 20s — using Unavailable");
+                        "Unavailable.".to_string()
+                    }
                 }
-            };
+            },
+            async {
+                match tokio::time::timeout(timeout, cmc.get_global_metrics()).await {
+                    Ok(v) => v,
+                    Err(_) => {
+                        tracing::warn!("global metrics fetch timed out after 20s — using empty data");
+                        Err(crate::error::BotError::CmcApi("timeout".into()))
+                    }
+                }
+            },
+        );
         fear_greed = fg;
 
         let global_info = global_metrics
@@ -105,26 +112,43 @@ pub(crate) async fn build_market_data(
             }
             let tradfi_refs: Vec<&str> = tradfi_syms.iter().map(|s| s.as_str()).collect();
 
-            let (quotes_res, onchain_res, tradfi_res) =
-                match tokio::time::timeout(std::time::Duration::from_secs(30), async {
-                    tokio::join!(
-                        cmc.get_quotes(&syms_ref),
-                        cmc.get_onchain_metrics(&syms_ref),
-                        cmc.get_tradfi_prices(&tradfi_refs)
-                    )
-                })
-                .await
-                {
-                    Ok((q, o, t)) => (q, o, t),
-                    Err(_) => {
-                        tracing::warn!("market-data fetch timed out after 30s — using empty data");
-                        (
-                            Err(crate::error::BotError::CmcApi("timeout".into())),
-                            Vec::new(),
-                            Vec::new(),
-                        )
+            // Each fetch gets its OWN timeout and runs concurrently. They used
+            // to share a single 30s timeout over one `join!`, so a slow on-chain
+            // or TradFi leg discarded the quotes that had already arrived — the
+            // prompt then showed "Quotes unavailable" for every coin (the AI
+            // complained it could not get, e.g., LINK's price even though the
+            // live quote was fine). Isolating the legs means a straggler can
+            // only lose its own block, never the prices.
+            let timeout = std::time::Duration::from_secs(20);
+            let (quotes_res, onchain_res, tradfi_res) = tokio::join!(
+                async {
+                    match tokio::time::timeout(timeout, cmc.get_quotes(&syms_ref)).await {
+                        Ok(r) => r,
+                        Err(_) => {
+                            tracing::warn!("quotes fetch timed out after 20s — using empty quotes");
+                            Err(crate::error::BotError::CmcApi("timeout".into()))
+                        }
                     }
-                };
+                },
+                async {
+                    match tokio::time::timeout(timeout, cmc.get_onchain_metrics(&syms_ref)).await {
+                        Ok(v) => v,
+                        Err(_) => {
+                            tracing::warn!("on-chain fetch timed out after 20s — using empty data");
+                            Vec::new()
+                        }
+                    }
+                },
+                async {
+                    match tokio::time::timeout(timeout, cmc.get_tradfi_prices(&tradfi_refs)).await {
+                        Ok(v) => v,
+                        Err(_) => {
+                            tracing::warn!("TradFi fetch timed out after 20s — using empty data");
+                            Vec::new()
+                        }
+                    }
+                },
+            );
 
             let quotes_str = match &quotes_res {
                 Ok(quotes) => {
@@ -170,6 +194,23 @@ pub(crate) async fn build_market_data(
                             ));
                         }
                         parts.push(yaml);
+                    }
+                    // Explicitly flag requested symbols that did not resolve.
+                    // Silently omitting them left the model to infer that the
+                    // coin had no price (and complain about it); an explicit
+                    // "unavailable" marker keeps the data honest and, together
+                    // with the PRICE QUOTING RULE, stops it inventing a number.
+                    let present: std::collections::HashSet<String> = quotes
+                        .iter()
+                        .map(|q| q.symbol.to_uppercase())
+                        .collect();
+                    for s in &syms_ref {
+                        let up = s.to_uppercase();
+                        if !present.contains(&up) {
+                            parts.push(format!(
+                                "- Symbol: {up}\n  Price_USD: unavailable (live fetch failed)"
+                            ));
+                        }
                     }
                     parts.join("\n")
                 }
