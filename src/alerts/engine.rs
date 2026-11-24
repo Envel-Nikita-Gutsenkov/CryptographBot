@@ -150,10 +150,41 @@ async fn process_user(
     if ai.is_configured() {
         let req_client = reqwest::Client::new();
         let (portfolio_context, memory_context) = build_user_context(store, user_id);
+
+        // `portfolio_context` lists the user's holdings and average entry
+        // prices, but NOT their current market prices. The model used to
+        // fill that gap by inventing prices for every coin except the one
+        // that triggered the alert (e.g. reporting LINK at $9.5 while it
+        // actually trades at ~$8.93). Feed it real, live quotes for all of
+        // the user's holdings plus the triggered symbols so it reasons over
+        // actual prices instead of hallucinating them.
+        let mut price_symbols: Vec<String> = store.read(user_id, |p| {
+            p.holdings.iter().map(|h| h.symbol.clone()).collect()
+        });
+        for (rule, _) in &triggered {
+            price_symbols.push(rule.symbol.clone());
+        }
+        price_symbols.sort();
+        price_symbols.dedup();
+        let price_refs: Vec<&str> = price_symbols.iter().map(|s| s.as_str()).collect();
+        let mut price_context = String::from("(no live prices available)");
+        if !price_refs.is_empty() {
+            if let Ok(live) = cmc.get_quotes(&price_refs).await {
+                let priced: Vec<String> = live
+                    .iter()
+                    .map(|q| format!("• {}: ${}", q.symbol, fmt_price(q.price_usd)))
+                    .collect();
+                if !priced.is_empty() {
+                    price_context = priced.join("\n");
+                }
+            }
+        }
+
         let prompt = format!(
             "Current UTC date: {}\nDo not describe past events as upcoming.\n\n\
              The following crypto price alerts just triggered for the user:\n\n{}\n\n\
              The user's current portfolio:\n{}\n\n\
+             Current live market prices (use ONLY these numbers; never invent or recall prices from memory):\n{}\n\n\
              The user's standing instructions and active goals:\n{}\n\n\
              Give VERY short, ACTIONABLE advice (max 3-4 sentences, plain text, no markdown, no asterisks):\n\
              1. What does this mean for the user's positions right now?\n\
@@ -163,7 +194,7 @@ async fn process_user(
              4. If no action is needed, say \"No action needed\" explicitly and explain why.\n\
              Never answer with only a market description — always end with a concrete recommendation.",
             chrono::Utc::now().format("%Y-%m-%d %H:%M UTC"),
-            prompt_context, portfolio_context, memory_context
+            prompt_context, portfolio_context, price_context, memory_context
         );
         // `sqlite` is optional in some deployments; never panic on a missing
         // store — just skip the AI narration layer.
