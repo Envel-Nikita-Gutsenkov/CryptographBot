@@ -75,6 +75,10 @@ pub enum Command {
     )]
     Analyze(String),
     #[command(
+        description = "Buy ladder: limit traps below spot: /ladder [SYMS] [BUDGET]"
+    )]
+    Ladder(String),
+    #[command(
         description = "Decision board for all coins: /decide | buy/scale/wait/hold + best entry now"
     )]
     Decide(String),

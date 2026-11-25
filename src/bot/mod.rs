@@ -137,6 +137,7 @@ fn build_handler() -> UpdateHandler<anyhow::Error> {
         .branch(case![Command::Sniper(a)].endpoint(handle_sniper_cmd))
         .branch(case![Command::Bottom(a)].endpoint(handle_bottom_cmd))
         .branch(case![Command::Analyze(a)].endpoint(handle_analyze_cmd))
+        .branch(case![Command::Ladder(a)].endpoint(handle_ladder_cmd))
         .branch(case![Command::Decide(a)].endpoint(handle_decide_cmd))
         .branch(case![Command::Memo(a)].endpoint(handle_memo_cmd))
         .branch(case![Command::Goal(a)].endpoint(handle_goal_cmd))
@@ -209,6 +210,10 @@ fn build_handler() -> UpdateHandler<anyhow::Error> {
         .branch(
             dptree::filter(|q: CallbackQuery| q.data.as_deref().unwrap_or("").starts_with("ana:"))
                 .endpoint(handle_analyze_cb),
+        )
+        .branch(
+            dptree::filter(|q: CallbackQuery| q.data.as_deref().unwrap_or("").starts_with("lad:"))
+                .endpoint(handle_ladder_cb),
         );
     // The generic callback handler needs `MyDialogue` (alert/wallet/AI wizard
     // flows), so it stays inside a dialogue context. Those buttons always sit on
@@ -381,6 +386,7 @@ const HELP_PART2: &str = "🧠 <b>AI Assistant</b>\n\
                      • <code>/sniper</code> [SYMS] — Hardcore Dip Sniper: cash pool, three left-tail limit buckets, P(touch) and the resulting average entry; <code>/sniper cash 1000</code> | <code>/sniper protect on|off</code> | <code>/sniper alerts on|off</code>\n\
                      • <code>/bottom</code> [SYMS] — Bottom radar: an explicit is-this-the-bottom, should-I-buy verdict with a concrete buy level and a 0–100 bottom score (works for coins you do not hold yet)\n\
                      • <code>/analyze</code> [SYMS] — One-screen plan that merges forecast + dip + sniper + bottom: spot vs your average, realistic top-up levels, and a single verdict with an <b>Action:</b> line (e.g. <code>/analyze BTC ETH</code>)\n\
+                     • <code>/ladder</code> [SYMS] [BUDGET] — Interactive limit-trap planner: the coins you hold (or pick any), a budget, and a table of staged buy limits below spot with P(touch) and the resulting blended average (e.g. <code>/ladder BTC ETH 500</code>)\n\
                      • <code>/memo [text]</code> — AI memory note (e.g. <code>/memo invest 100 USD at a time</code>); <code>/memo list</code> | <code>/memo del N</code>\n\
                      • <code>/goal [text]</code> — Proactive goal; AI alerts you when market conditions fit (e.g. <code>/goal want to spend 400 USD on crypto this month</code>); <code>/goal list</code> | <code>/goal progress N text</code> | <code>/goal done N</code> | <code>/goal del N</code>\n\
                      • <code>/plan</code> — Plan dashboard menu; <code>/plan status</code> | <code>/plan check</code> (ask the AI about your plan now) | <code>/plan ask question</code>\n\
@@ -634,6 +640,18 @@ async fn handle_analyze_cmd(
     args: String,
 ) -> anyhow::Result<()> {
     handlers::handle_analyze_cmd(bot, msg, store, cmc, sqlite, config, args).await
+}
+
+async fn handle_ladder_cmd(
+    bot: Bot,
+    msg: Message,
+    store: Arc<Store>,
+    cmc: Arc<CryptoClient>,
+    sqlite: Arc<crate::db::SqliteStore>,
+    config: Arc<Config>,
+    args: String,
+) -> anyhow::Result<()> {
+    handlers::handle_ladder_cmd(bot, msg, store, cmc, sqlite, config, args).await
 }
 
 async fn handle_decide_cmd(
@@ -1223,6 +1241,18 @@ async fn handle_analyze_cb(
     sqlite: Arc<crate::db::SqliteStore>,
 ) -> anyhow::Result<()> {
     handlers::handle_analyze_callback(bot, q, store, cmc, sqlite, config).await
+}
+
+/// `/ladder` callbacks (`lad:<op>:...`).
+async fn handle_ladder_cb(
+    bot: Bot,
+    q: CallbackQuery,
+    store: Arc<Store>,
+    cmc: Arc<CryptoClient>,
+    config: Arc<Config>,
+    sqlite: Arc<crate::db::SqliteStore>,
+) -> anyhow::Result<()> {
+    handlers::handle_ladder_callback(bot, q, store, cmc, sqlite, config).await
 }
 
 async fn handle_callback(
