@@ -161,13 +161,15 @@ impl RssProvider {
                 .map(str::to_string)
                 .unwrap_or_else(|| item.description().unwrap_or_default().to_string());
 
+            let date = item.pub_date().and_then(parse_feed_date);
             articles.push((
-                item.pub_date().and_then(parse_feed_date),
+                date,
                 NewsArticle {
                     title: clean_text(item.title().unwrap_or_default()),
                     source: source_name.to_string(),
                     body: clean_body(&body_text),
                     url: item.link().unwrap_or_default().to_string(),
+                    published_at: date,
                 },
             ));
         }
@@ -195,13 +197,15 @@ fn parse_atom(xml: &[u8], source_name: &'static str) -> Result<Vec<NewsArticle>>
             .map(|l| l.href().to_string())
             .unwrap_or_default();
 
+        let date = Some(entry.updated().with_timezone(&Utc));
         articles.push((
-            Some(entry.updated().with_timezone(&Utc)),
+            date,
             NewsArticle {
                 title,
                 source: source_name.to_string(),
                 body: clean_body(&body_text),
                 url,
+                published_at: date,
             },
         ));
     }
@@ -398,6 +402,7 @@ mod tests {
             source: "test".to_string(),
             body: String::new(),
             url: String::new(),
+            published_at: None,
         };
         let d = |s: &str| parse_feed_date(s);
         let items = vec![

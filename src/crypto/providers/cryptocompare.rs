@@ -12,13 +12,18 @@ pub struct CryptoCompareProvider {
     api_key: String,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Default)]
 #[allow(dead_code)]
 pub struct NewsArticle {
     pub title: String,
     pub source: String,
     pub body: String,
     pub url: String,
+    /// Publish time when the upstream feed exposes it. Used to sort the digest
+    /// newest-first and to show a relative age ("2h ago"). `skip` so the
+    /// derived deserializer never needs to parse it from the wire shape.
+    #[serde(skip)]
+    pub published_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl CryptoCompareProvider {
@@ -143,7 +148,10 @@ impl CryptoCompareProvider {
                     title,
                     source,
                     body,
-                    url: String::new(),
+                    url: item["url"].as_str().unwrap_or("").to_string(),
+                    published_at: item["published_on"]
+                        .as_i64()
+                        .and_then(|secs| chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)),
                 });
             }
         }

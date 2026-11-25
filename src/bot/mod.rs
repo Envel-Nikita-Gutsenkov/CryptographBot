@@ -722,12 +722,12 @@ async fn handle_plan_cmd(
 async fn handle_news_cmd(
     bot: Bot,
     msg: Message,
-    _store: Arc<Store>,
-    _cmc: Arc<CryptoClient>,
+    store: Arc<Store>,
+    cmc: Arc<CryptoClient>,
     config: Arc<Config>,
     args: String,
 ) -> anyhow::Result<()> {
-    handlers::handle_news_cmd(bot, msg, config, args).await
+    handlers::handle_news_cmd(bot, msg, store, cmc, config, args).await
 }
 async fn handle_trade_cmd(
     bot: Bot,
@@ -1515,7 +1515,15 @@ async fn handle_callback(
             }
             d if d.starts_with("news_select:") => {
                 let symbol = d.strip_prefix("news_select:").unwrap().to_string();
-                handlers::handle_news_callback(bot.clone(), msg.chat.id, symbol, config.clone()).await?;
+                handlers::handle_news_callback(
+                    bot.clone(),
+                    msg.chat.id,
+                    symbol,
+                    store.clone(),
+                    cmc.clone(),
+                    config.clone(),
+                )
+                .await?;
             }
             d if d.starts_with("patch:confirm:") => {
                 let token = d.strip_prefix("patch:confirm:").unwrap_or("");

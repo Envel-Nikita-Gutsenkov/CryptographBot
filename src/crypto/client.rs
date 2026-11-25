@@ -596,6 +596,34 @@ impl CryptoClient {
         Ok(select_for_symbol(all, symbol))
     }
 
+    /// Strict per-symbol news for the `/news` digest.
+    ///
+    /// Unlike [`get_news`], this never falls back to the general market feed: a
+    /// known coin with no matching headlines yields an empty list instead of an
+    /// unrelated story presented as "that coin's news". Articles are returned
+    /// newest-first so the handler can build a watcher.guru-style digest.
+    pub async fn get_news_for_display(&self, symbol: &str) -> Result<Vec<NewsArticle>> {
+        let all = match self.inner.cache_news.get(&()).await {
+            Some(cached) => cached,
+            None => {
+                let fresh = self.inner.rss.get_all_news().await?;
+                tracing::info!("RSS news refreshed: {} articles", fresh.len());
+                self.inner.cache_news.insert((), fresh.clone()).await;
+                fresh
+            }
+        };
+
+        let mut out = select_for_symbol_strict(all, symbol);
+        // Newest first; undated entries sink to the bottom.
+        out.sort_by(|a, b| match (b.published_at, a.published_at) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+        Ok(out)
+    }
+
     pub async fn get_fng(&self) -> Result<FearAndGreed> {
         self.inner.alternative_me.get_fng().await
     }
@@ -1677,6 +1705,41 @@ fn select_for_symbol(articles: Vec<NewsArticle>, symbol: &str) -> Vec<NewsArticl
     selected
 }
 
+/// Strict variant of [`select_for_symbol`] for the `/news` digest.
+///
+/// A known coin with no matching coverage yields an empty list — never an
+/// unrelated market story relabelled as that coin's news. `GENERAL`/`ALL`/empty
+/// return the whole feed; an unknown ticker is matched on its own word only.
+fn select_for_symbol_strict(articles: Vec<NewsArticle>, symbol: &str) -> Vec<NewsArticle> {
+    let symbol = symbol.trim().to_uppercase();
+    if symbol.is_empty() || symbol == "GENERAL" || symbol == "ALL" {
+        return articles;
+    }
+
+    let mut needles: Vec<String> = match aliases_for(&symbol) {
+        Some(aliases) => aliases.iter().map(|a| a.to_string()).collect(),
+        None => Vec::new(),
+    };
+    // The raw ticker is always a valid needle (covers coins without aliases).
+    if symbol.len() > 1 {
+        needles.push(symbol.to_lowercase());
+    }
+    if needles.is_empty() {
+        return Vec::new();
+    }
+
+    articles
+        .into_iter()
+        .filter(|a| {
+            let title = a.title.to_lowercase();
+            let body = a.body.to_lowercase();
+            needles
+                .iter()
+                .any(|n| contains_word_lower(&title, n) || contains_word_lower(&body, n))
+        })
+        .collect()
+}
+
 /// Case-insensitive whole-word containment. `haystack` must already be
 /// lowercased. Boundary checks stop "sol" from matching "solution" and "link"
 /// from matching "linking".
@@ -1726,6 +1789,7 @@ mod debug_tests {
             source: "test".to_string(),
             body: body.to_string(),
             url: format!("https://example.com/{}", title.len()),
+            published_at: None,
         };
         let feed = vec![
             art("Bitcoin ETF inflows hit record", "BTC keeps climbing"),
@@ -1764,6 +1828,7 @@ mod debug_tests {
                 source: "test".to_string(),
                 body: String::new(),
                 url: format!("https://example.com/{i}"),
+                published_at: None,
             })
             .collect();
         assert_eq!(select_for_symbol(feed, "LINK").len(), 20);

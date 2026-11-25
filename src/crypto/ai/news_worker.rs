@@ -319,6 +319,7 @@ mod tests {
             source: "s".to_string(),
             body: String::new(),
             url: url.to_string(),
+            published_at: None,
         };
         let a = batch_fingerprint(&[art("https://a"), art("https://b")]);
         let b = batch_fingerprint(&[art("https://b"), art("https://a")]);
