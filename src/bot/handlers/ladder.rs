@@ -35,7 +35,10 @@ use crate::{
     crypto::CryptoClient,
     db::{SqliteStore, Store},
     format::{fmt_price, format_thousands},
-    trading::sniper::DipSniperReport,
+    trading::{
+        dipzones::touch_probability,
+        sniper::{DipSniperReport, TRAP_HORIZON_DAYS},
+    },
 };
 
 /// Hard cap on how many coins one ladder spans (keeps the callback payload under
@@ -837,6 +840,108 @@ fn allocate_ladder(per_coin: f64, max_levels: usize) -> Vec<f64> {
     spends
 }
 
+/// Standard market-drop levels (percent below spot) shown as scenarios.
+const LADDER_SCENARIOS_PCT: [f64; 3] = [10.0, 20.0, 30.0];
+
+/// Human label for a market regime (`EUPHORIA` → `эйфория` …).
+fn regime_label(regime: &str, russian: bool) -> String {
+    if !russian {
+        return regime.to_string();
+    }
+    let label = match regime.to_ascii_uppercase().as_str() {
+        "EUPHORIA" => "эйфория",
+        "DIP" => "просадка",
+        "BEAR" => "медвежий",
+        "BULL" => "бычий",
+        "SIDEWAYS" => "боковик",
+        _ => return regime.to_string(),
+    };
+    label.to_string()
+}
+
+/// One market-drop scenario: what the ladder does if price falls `drop_pct`
+/// percent within the trap horizon.
+struct Scenario {
+    drop_pct: f64,
+    level: f64,
+    prob: f64,
+    deployed: f64,
+    blended: Option<f64>,
+}
+
+/// Build the −10/−20/−30% scenarios from the same diffusion the ladder uses, so
+/// the odds line up with the P14 column instead of being invented.
+///
+/// `levels` are the planned limit prices (shallow → deep) aligned with `spends`.
+fn ladder_scenarios(
+    spot: f64,
+    mu: f64,
+    sigma: f64,
+    levels: &[f64],
+    spends: &[f64],
+    avg: Option<f64>,
+    position: f64,
+) -> Vec<Scenario> {
+    let base_cost = position * avg.unwrap_or(spot);
+    LADDER_SCENARIOS_PCT
+        .iter()
+        .map(|&d| {
+            let level = spot * (1.0 - d / 100.0);
+            let prob = touch_probability(spot, level, mu, sigma.max(0.003), TRAP_HORIZON_DAYS);
+            let mut deployed = 0.0;
+            let mut qty = 0.0;
+            for (&lvl, &s) in levels.iter().zip(spends.iter()) {
+                if lvl > 0.0 && lvl + 1e-9 >= level {
+                    deployed += s;
+                    qty += s / lvl;
+                }
+            }
+            let blended = if position + qty > 0.0 {
+                Some((base_cost + deployed) / (position + qty))
+            } else {
+                None
+            };
+            Scenario {
+                drop_pct: d,
+                level,
+                prob,
+                deployed,
+                blended,
+            }
+        })
+        .collect()
+}
+
+/// Format one scenario as a single compact line.
+fn scenario_line(sc: &Scenario, russian: bool) -> String {
+    let prob = format!("{:.0}%", (sc.prob * 100.0).round());
+    let odds = if russian {
+        format!("шанс {prob}")
+    } else {
+        format!("{prob} odds")
+    };
+    let head = format!("📉 −{:.0}% ({}) · {odds}", sc.drop_pct, fmt_price(sc.level));
+    if sc.deployed <= 0.0 {
+        return format!(
+            "{head} · {}",
+            if russian {
+                "ордера глубже"
+            } else {
+                "orders deeper"
+            }
+        );
+    }
+    let avg_part = sc
+        .blended
+        .map(|b| format!(" → {} {}", if russian { "ср" } else { "avg" }, fmt_price(b)))
+        .unwrap_or_default();
+    format!(
+        "{head} · {} ${}{avg_part}",
+        if russian { "вложишь" } else { "deploy" },
+        format_thousands(sc.deployed, 0),
+    )
+}
+
 /// Render the final ladder table.
 fn render_ladder(
     reports: &[(String, Option<f64>, f64, Option<DipSniperReport>)],
@@ -899,6 +1004,12 @@ fn render_ladder(
         if let Some(rsi) = report.rsi14 {
             head.push_str(&format!(" · RSI {rsi:.0}"));
         }
+        // Market read: current regime + how much this coin actually moves per day.
+        head.push_str(&format!(
+            " · {} · σ {:.1}%/d",
+            regime_label(&report.regime, russian),
+            report.vol_daily_pct
+        ));
         out.push_str(&format!("\n{head}\n"));
 
         // Sort shallow → deep so fills accumulate top-down.
@@ -912,6 +1023,12 @@ fn render_ladder(
         // Right-size the tranches to this coin's budget: small budgets get one
         // clean order, larger ones the full three-level pyramid.
         let spends = allocate_ladder(per_coin, buckets.len());
+        // Limit prices aligned with `spends` (only the tranches actually planned).
+        let levels: Vec<f64> = buckets
+            .iter()
+            .zip(spends.iter())
+            .map(|(b, _)| b.limit_price)
+            .collect();
 
         // Running position/cost so the "new avg" column is cumulative.
         let mut run_pos = *position;
@@ -987,6 +1104,24 @@ fn render_ladder(
                 String::new()
             }
         ));
+
+        // Scenario band: what this ladder does on a −10/−20/−30% market move,
+        // scored with the same diffusion as the P14 column.
+        let scenarios = ladder_scenarios(
+            spot,
+            report.drift_daily_pct / 100.0,
+            report.vol_daily_pct / 100.0,
+            &levels,
+            &spends,
+            avg,
+            *position,
+        );
+        let sc: Vec<String> = scenarios
+            .iter()
+            .map(|s| scenario_line(s, russian))
+            .collect();
+        out.push_str(&sc.join("\n"));
+        out.push('\n');
     }
 
     if !any_rendered {
@@ -1044,6 +1179,14 @@ fn render_ladder(
             }
         ));
     }
+    out.push_str(&format!(
+        "\n<i>{}</i>",
+        if russian {
+            "Сценарии −10/−20/−30% — та же диффузия: шанс такого падения за 14 дней и что из ладдера исполнится (сумма и средняя после закупа)."
+        } else {
+            "−10/−20/−30% scenarios use the same diffusion: the odds of such a drop within 14 days and what of the ladder would fill (spend and post-buy avg)."
+        }
+    ));
     out
 }
 
@@ -1127,5 +1270,39 @@ mod tests {
     #[test]
     fn allocate_respects_one_level_max() {
         assert_eq!(allocate_ladder(500.0, 1), vec![500.0]);
+    }
+
+    #[test]
+    fn regime_label_localizes_when_russian() {
+        assert_eq!(regime_label("SIDEWAYS", true), "боковик");
+        assert_eq!(regime_label("SIDEWAYS", false), "SIDEWAYS");
+        // Unknown regimes pass through untouched.
+        assert_eq!(regime_label("WEIRD", true), "WEIRD");
+    }
+
+    #[test]
+    fn scenarios_deploy_more_and_are_less_likely_on_deeper_drops() {
+        // Spot 100, flat drift, ~3%/day vol; tranches planned at −5/−10/−20%.
+        let levels = [95.0, 90.0, 80.0];
+        let spends = [10.0, 20.0, 30.0];
+        let sc = ladder_scenarios(100.0, 0.0, 0.03, &levels, &spends, None, 0.0);
+
+        let d10 = sc.iter().find(|s| (s.drop_pct - 10.0).abs() < 1e-9).unwrap();
+        // −10% (level 90) reaches the first two tranches (95, 90).
+        assert!((d10.deployed - 30.0).abs() < 1e-6, "got {}", d10.deployed);
+        assert!(d10.blended.unwrap() < 100.0);
+
+        let d30 = sc.iter().find(|s| (s.drop_pct - 30.0).abs() < 1e-9).unwrap();
+        // −30% (level 70) reaches all three planned tranches.
+        assert!((d30.deployed - 60.0).abs() < 1e-6, "got {}", d30.deployed);
+        // A deeper drop is never more likely than a shallower one.
+        assert!(d10.prob >= d30.prob);
+    }
+
+    #[test]
+    fn scenarios_with_no_planned_orders_deploy_nothing() {
+        let sc = ladder_scenarios(100.0, 0.0, 0.03, &[], &[], None, 0.0);
+        assert!(sc.iter().all(|s| s.deployed == 0.0));
+        assert!(sc.iter().all(|s| s.blended.is_none()));
     }
 }
