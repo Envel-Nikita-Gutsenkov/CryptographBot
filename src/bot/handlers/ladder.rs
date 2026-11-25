@@ -772,6 +772,71 @@ async fn build_ladder_text(
     render_ladder(&reports, budget, per_coin, russian)
 }
 
+/// Smallest per-order size we try not to go below when splitting a budget.
+const LADDER_MIN_ORDER_USD: f64 = 20.0;
+
+/// Rounding granularity for order sizes, scaled to the budget.
+fn nice_step(v: f64) -> f64 {
+    if v >= 1000.0 {
+        50.0
+    } else if v >= 300.0 {
+        25.0
+    } else if v >= 100.0 {
+        10.0
+    } else if v >= 30.0 {
+        5.0
+    } else {
+        1.0
+    }
+}
+
+fn round_to(v: f64, step: f64) -> f64 {
+    if step <= 0.0 {
+        v.max(0.0)
+    } else {
+        (v / step).round() * step
+    }
+}
+
+/// Pyramid of tranche weights for `k` levels (shallow → deep).
+fn ladder_weights(k: usize) -> Vec<f64> {
+    match k {
+        0 => vec![],
+        1 => vec![1.0],
+        2 => vec![0.4, 0.6],
+        _ => vec![0.20, 0.35, 0.45],
+    }
+}
+
+/// Split one coin's budget into a sensible number of round-sized tranches.
+/// Small budgets collapse to a single order instead of three tiny ones, and
+/// amounts are rounded to human-friendly steps so the plan reads cleanly.
+fn allocate_ladder(per_coin: f64, max_levels: usize) -> Vec<f64> {
+    let max_levels = max_levels.clamp(1, 3);
+    if !(per_coin > 0.0) || !per_coin.is_finite() {
+        return vec![per_coin.max(0.0)];
+    }
+    let affordable = (per_coin / LADDER_MIN_ORDER_USD).floor() as usize;
+    let k = affordable.clamp(1, max_levels);
+    let step = nice_step(per_coin);
+    let mut spends: Vec<f64> = ladder_weights(k)
+        .iter()
+        .map(|w| round_to(per_coin * w, step))
+        .collect();
+    // Make the tranches add up to the exact budget; absorb the remainder in
+    // the deepest (largest) tranche so rounding never loses or invents money.
+    let target = round_to(per_coin, step);
+    let sum: f64 = spends.iter().sum();
+    if let Some(last) = spends.last_mut() {
+        *last = (*last + (target - sum)).max(step);
+    }
+    spends.retain(|s| *s > 0.0);
+    if spends.is_empty() {
+        spends.push(per_coin);
+    }
+    spends
+}
+
 /// Render the final ladder table.
 fn render_ladder(
     reports: &[(String, Option<f64>, f64, Option<DipSniperReport>)],
@@ -844,6 +909,10 @@ fn render_ladder(
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
+        // Right-size the tranches to this coin's budget: small budgets get one
+        // clean order, larger ones the full three-level pyramid.
+        let spends = allocate_ladder(per_coin, buckets.len());
+
         // Running position/cost so the "new avg" column is cumulative.
         let mut run_pos = *position;
         let mut run_cost = position * avg.unwrap_or(spot);
@@ -863,16 +932,16 @@ fn render_ladder(
         )];
         lines.push("-".repeat(54));
 
-        for (i, b) in buckets.iter().enumerate() {
+        for (i, (b, &spend)) in buckets.iter().zip(spends.iter()).enumerate() {
             let qty = if b.limit_price > 0.0 {
-                b.spend_usd / b.limit_price
+                spend / b.limit_price
             } else {
                 0.0
             };
             run_pos += qty;
-            run_cost += b.spend_usd;
+            run_cost += spend;
             let new_avg = if run_pos > 0.0 { run_cost / run_pos } else { 0.0 };
-            total_planned += b.spend_usd;
+            total_planned += spend;
             traps += 1;
 
             let marker = if b.triggered { "⚡" } else { " " };
@@ -883,7 +952,7 @@ fn render_ladder(
                 right(&price_str(b.limit_price), 9),
                 right(&format!("{:+.1}%", b.discount_pct), 7),
                 right(&format!("{:.0}%", b.prob_touch * 100.0), 4),
-                right(&format!("${}", format_thousands(b.spend_usd, 0)), 7),
+                right(&format!("${}", format_thousands(spend, 0)), 7),
                 right(&qty_str(qty), 11),
                 right(&price_str(new_avg), 9),
             ));
@@ -894,10 +963,11 @@ fn render_ladder(
         out.push_str("</pre>");
 
         // Coin summary: final blended average if every tranche fills.
-        let total_spend: f64 = buckets.iter().map(|b| b.spend_usd).sum();
+        let total_spend: f64 = spends.iter().sum();
         let total_qty: f64 = buckets
             .iter()
-            .map(|b| if b.limit_price > 0.0 { b.spend_usd / b.limit_price } else { 0.0 })
+            .zip(spends.iter())
+            .map(|(b, &s)| if b.limit_price > 0.0 { s / b.limit_price } else { 0.0 })
             .sum();
         let blended = if (position + total_qty) > 0.0 {
             (position * avg.unwrap_or(spot) + total_spend) / (position + total_qty)
@@ -964,6 +1034,16 @@ fn render_ladder(
             "Levels are solved for a real 14-day touch probability (the /dip diffusion): P14 = chance the limit fills within that window."
         }
     ));
+    if per_coin < LADDER_MIN_ORDER_USD * 3.0 {
+        out.push_str(&format!(
+            "\n<i>{}</i>",
+            if russian {
+                "Малый бюджет на монету → меньше, но более крупных ордеров вместо горстки мелких."
+            } else {
+                "Small per-coin budget → fewer, larger tranches instead of a handful of tiny ones."
+            }
+        ));
+    }
     out
 }
 
@@ -1011,5 +1091,41 @@ mod tests {
         // Too small to be a budget, and no number at all → none.
         assert_eq!(first_budget("2 coils"), None);
         assert_eq!(first_budget("докупить"), None);
+    }
+
+    fn approx(a: f64, b: f64) -> bool {
+        (a - b).abs() < 0.5
+    }
+
+    #[test]
+    fn allocate_small_budget_is_a_single_order() {
+        assert_eq!(allocate_ladder(25.0, 3), vec![25.0]);
+        // Below the min order size it still makes exactly one order.
+        assert_eq!(allocate_ladder(10.0, 3), vec![10.0]);
+    }
+
+    #[test]
+    fn allocate_two_tranches_for_modest_budget() {
+        let s = allocate_ladder(45.0, 3);
+        assert_eq!(s.len(), 2, "got {s:?}");
+        assert!(approx(s.iter().sum::<f64>(), 45.0), "sum {s:?}");
+    }
+
+    #[test]
+    fn allocate_full_pyramid_for_large_budget() {
+        for budget in [60.0, 250.0, 1000.0] {
+            let s = allocate_ladder(budget, 3);
+            assert_eq!(s.len(), 3, "budget {budget} -> {s:?}");
+            assert!(approx(s.iter().sum::<f64>(), budget), "sum {s:?}");
+            // Deepest tranche is the largest (pyramid shape preserved).
+            assert!(s[2] >= s[0], "not a pyramid: {s:?}");
+            // No tiny crumbs.
+            assert!(s.iter().all(|v| *v >= 5.0), "tiny tranche in {s:?}");
+        }
+    }
+
+    #[test]
+    fn allocate_respects_one_level_max() {
+        assert_eq!(allocate_ladder(500.0, 1), vec![500.0]);
     }
 }
