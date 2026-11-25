@@ -7,6 +7,11 @@
 //! question the user used to ask an external model, answered from the local
 //! math.
 //!
+//! Defaults are smart: the coin set seeds from the user's holdings, and an
+//! active buy goal ("докупить ETH и SOL на 600$") pre-selects the named coins
+//! and supplies its budget, so `/ladder` with no arguments usually already
+//! describes the trade the user meant to plan.
+//!
 //! Everything numeric comes from [`build_sniper_report`] (cone / first-passage
 //! probabilities / average-entry maths). This module only allocates the budget,
 //! orders the tranches and renders the table; it never invents a level.
@@ -138,10 +143,109 @@ fn candidates(store: &Store, user_id: u64) -> (Vec<String>, Vec<String>) {
     })
 }
 
-/// Look through the user's active goals for a spend budget and a note.
-/// Returns `(budget, goal_id, goal_text)` for the first goal that names a
-/// plausible budget ($50+) alongside a buying keyword.
-fn goal_budget_hint(store: &Store, user_id: u64) -> Option<(f64, u64, String)> {
+/// A hint derived from the user's active goals: an optional spend budget, the
+/// source goal, and any coin symbols the goal names (e.g. "докупить ETH и SOL
+/// на 500$" ⇒ budget 500, assets [ETH, SOL]).
+struct GoalHint {
+    budget: Option<f64>,
+    id: u64,
+    text: String,
+    assets: Vec<String>,
+}
+
+/// Coins we recognise in free-text goals. Kept broad on purpose: a goal like
+/// "докупить ETH и SOL" should pre-select those rows without the user retyping.
+const TRACKED_SYMBOLS: &[&str] = &[
+    "BTC", "ETH", "SOL", "LINK", "BNB", "XRP", "ADA", "DOGE", "AVAX", "DOT", "MATIC",
+    "POL", "TON", "TRX", "LTC", "ATOM", "NEAR", "ARB", "OP", "SUI", "APT", "INJ", "TIA",
+    "SEI", "PEPE", "SHIB", "UNI", "AAVE", "MKR", "CRV", "FIL", "ICP", "ETC", "XLM", "ALGO",
+    "VET", "HBAR", "RNDR", "FET", "TAO", "WIF", "BONK", "JUP", "PYTH", "STX", "GRT", "LDO",
+];
+
+/// Symbols named in a goal's free-text, in the order [`TRACKED_SYMBOLS`] lists
+/// them. Whole-word matching keeps "sol" out of "solution" and "link" out of
+/// "linking".
+/// Russian/transliterated coin names, so a goal written as "докупить эфир
+/// и соланы" pre-selects ETH and SOL. Kept local to goal parsing: the shared
+/// [`aliases_for`](crate::crypto::client::aliases_for) table stays English, as
+/// it also drives news matching where the feeds are English.
+fn russian_aliases(sym: &str) -> &'static [&'static str] {
+    match sym {
+        "BTC" => &["биткоин", "биткойн", "битк"],
+        "ETH" => &["эфир", "эфириум", "эфира"],
+        "SOL" => &["солана", "соланы", "солане", "солян"],
+        "LINK" => &["чейнлинк", "линк"],
+        "BNB" => &["бинанс", "бинанса"],
+        "XRP" => &["рипл", "риппл"],
+        "ADA" => &["кардано"],
+        "DOGE" => &["догикоин", "доги"],
+        "AVAX" => &["аваланч", "авалакс"],
+        "DOT" => &["полкадот", "полкадоты"],
+        "MATIC" | "POL" => &["полигон", "матик"],
+        "TON" => &["тоникойн"],
+        "TRX" => &["трон"],
+        "LTC" => &["лайткоин", "лайткойн"],
+        "SHIB" => &["шиба", "шибаину"],
+        "UNI" => &["юнисвоп"],
+        "ATOM" => &["космос"],
+        "ARB" => &["арбитрум"],
+        "INJ" => &["инжектив"],
+        "APT" => &["аптос"],
+        "TIA" => &["селестия"],
+        "OP" => &["оптимизм"],
+        "PEPE" => &["пепе"],
+        _ => &[],
+    }
+}
+
+fn goal_assets_from_text(text: &str) -> Vec<String> {
+    let lower = text.to_lowercase();
+    let mut out: Vec<String> = Vec::new();
+    for &sym in TRACKED_SYMBOLS {
+        let mut needles: Vec<String> = crate::crypto::client::aliases_for(sym)
+            .map(|a| a.iter().map(|s| s.to_string()).collect())
+            .unwrap_or_default();
+        needles.extend(russian_aliases(sym).iter().map(|s| s.to_string()));
+        needles.push(sym.to_lowercase());
+        let hit = needles
+            .iter()
+            .any(|n| crate::crypto::client::contains_word_lower(&lower, n));
+        if hit && !out.iter().any(|s| s == sym) {
+            out.push(sym.to_string());
+        }
+    }
+    out
+}
+
+/// First integer in `50..=100_000` found in the text, used as a spend budget.
+fn first_budget(text: &str) -> Option<f64> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b',') {
+                i += 1;
+            }
+            let raw: String = text[start..i].chars().filter(|c| c.is_ascii_digit()).collect();
+            if let Ok(v) = raw.parse::<f64>() {
+                if (50.0..=100_000.0).contains(&v) {
+                    return Some(v);
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// Look through the user's active goals for a budget and/or coins to buy.
+/// A goal that names both a budget and coins wins over a weaker one; otherwise
+/// the first goal with either signal is returned. Budgets are only trusted when
+/// a buying keyword is present, so an "alert at 70000" goal is not mistaken for
+/// a spend budget.
+fn goal_hint(store: &Store, user_id: u64) -> Option<GoalHint> {
     let goals = store.read(user_id, |p| {
         p.goals
             .iter()
@@ -152,32 +256,23 @@ fn goal_budget_hint(store: &Store, user_id: u64) -> Option<(f64, u64, String)> {
     const KEYS: [&str; 8] = [
         "докуп", "потрат", "купить", "бюджет", "buy", "spend", "budget", "invest",
     ];
+    let mut fallback: Option<GoalHint> = None;
     for (id, text) in goals {
         let lower = text.to_lowercase();
-        if !KEYS.iter().any(|k| lower.contains(k)) {
+        let has_buy_word = KEYS.iter().any(|k| lower.contains(k));
+        let assets = goal_assets_from_text(&text);
+        if !has_buy_word && assets.is_empty() {
             continue;
         }
-        // Extract the first integer >= 50 as a candidate budget.
-        let bytes = text.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i].is_ascii_digit() {
-                let start = i;
-                while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b',' || bytes[i] == b' ') {
-                    i += 1;
-                }
-                let raw: String = text[start..i].chars().filter(|c| c.is_ascii_digit()).collect();
-                if let Ok(v) = raw.parse::<f64>() {
-                    if (50.0..=100_000.0).contains(&v) {
-                        return Some((v, id, text));
-                    }
-                }
-            } else {
-                i += 1;
-            }
+        let budget = if has_buy_word { first_budget(&text) } else { None };
+        if budget.is_some() && !assets.is_empty() {
+            return Some(GoalHint { budget, id, text, assets });
+        }
+        if fallback.is_none() {
+            fallback = Some(GoalHint { budget, id, text, assets });
         }
     }
-    None
+    fallback
 }
 
 /// Right-pad / left-pad helpers for the monospace table.
@@ -303,28 +398,47 @@ fn render_menu(
     russian: bool,
 ) -> (String, InlineKeyboardMarkup) {
     let (holdings, watchlist) = candidates(store, user_id);
-    // Default selection is the holdings; explicit list stays as given.
+
+    // Goal hint drives both the budget and the default coin selection.
+    let goal = goal_hint(store, user_id);
+    let goal_assets = goal.as_ref().map(|g| g.assets.clone()).unwrap_or_default();
+
+    // Default selection: coins named in the goal, else the holdings; an explicit
+    // list stays as given.
     let sel: Vec<String> = if selection.is_empty() {
-        holdings.clone()
+        if goal_assets.is_empty() {
+            holdings.clone()
+        } else {
+            goal_assets.clone()
+        }
     } else {
         selection.to_vec()
     };
 
-    // Budget: explicit → keep; otherwise a goal hint; otherwise the default.
+    // Budget: explicit → keep; otherwise the goal budget; otherwise the default.
     let (eff_budget, goal_line) = if budget > 0.0 {
         (budget, None)
-    } else if let Some((b, id, text)) = goal_budget_hint(store, user_id) {
-        let snippet: String = text.chars().take(48).collect();
-        (b, Some((id, snippet)))
+    } else if let Some(g) = &goal {
+        let snippet: String = g.text.chars().take(48).collect();
+        (
+            g.budget.unwrap_or(DEFAULT_BUDGET),
+            Some((g.id, snippet, g.assets.clone())),
+        )
     } else {
         (DEFAULT_BUDGET, None)
     };
 
-    // Candidate coins: holdings then any watchlist coin not already held.
+    // Candidate coins: holdings, then watchlist, then any goal coin not yet
+    // listed — so a "buy ETH" goal surfaces ETH even if it is not held.
     let mut coins: Vec<String> = holdings.clone();
     for w in &watchlist {
         if !coins.contains(w) && coins.len() < MAX_SYMBOLS {
             coins.push(w.clone());
+        }
+    }
+    for a in &goal_assets {
+        if !coins.contains(a) && coins.len() < MAX_SYMBOLS {
+            coins.push(a.clone());
         }
     }
 
@@ -341,12 +455,25 @@ fn render_menu(
         if russian { "Монет:" } else { "Coins:" },
         sel.len()
     ));
-    if let Some((id, snippet)) = goal_line {
+    if let Some((id, snippet, assets)) = goal_line {
+        let asset_note = if assets.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " → <b>{}</b>",
+                assets
+                    .iter()
+                    .map(|a| html_escape::encode_text(a))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
         text.push_str(&format!(
-            "💡 {} #{}: <i>{}</i>\n",
+            "💡 {} #{}: <i>{}</i>{}\n",
             if russian { "из цели" } else { "from goal" },
             id,
-            html_escape::encode_text(&snippet)
+            html_escape::encode_text(&snippet),
+            asset_note
         ));
     }
     text.push_str(&format!(
@@ -851,4 +978,38 @@ fn best_pick(picks: &[(String, f64, Option<f64>)]) -> Option<(String, f64, Optio
             sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
         })
         .cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn goal_assets_picks_named_coins() {
+        let a = goal_assets_from_text("докупить ETH и SOL на 500$");
+        assert!(a.contains(&"ETH".to_string()));
+        assert!(a.contains(&"SOL".to_string()));
+    }
+
+    #[test]
+    fn goal_assets_uses_names_not_just_tickers() {
+        let a = goal_assets_from_text("подкупать биткоин на просадках");
+        assert_eq!(a, vec!["BTC".to_string()]);
+    }
+
+    #[test]
+    fn goal_assets_ignores_whole_word_false_positives() {
+        // "solution" must not read as SOL, "linkedin" must not read as LINK.
+        let a = goal_assets_from_text("find a solution and post it on linkedin");
+        assert!(a.is_empty(), "unexpected matches: {a:?}");
+    }
+
+    #[test]
+    fn first_budget_reads_a_plausible_number() {
+        assert_eq!(first_budget("купить на 500$"), Some(500.0));
+        assert_eq!(first_budget("spend 1,000 usd"), Some(1000.0));
+        // Too small to be a budget, and no number at all → none.
+        assert_eq!(first_budget("2 coils"), None);
+        assert_eq!(first_budget("докупить"), None);
+    }
 }

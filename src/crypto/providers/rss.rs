@@ -62,6 +62,14 @@ impl RssProvider {
             ("https://www.newsbtc.com/feed/", "NewsBTC"),
             ("https://cryptobriefing.com/feed/", "CryptoBriefing"),
             ("https://coingape.com/feed/", "CoinGape"),
+            // High-volume, fast-turning feeds added for the watcher.guru-style
+            // digest: they publish many short headlines per day, so a per-coin
+            // query is far more likely to find several fresh items. All four
+            // were verified to answer with real RSS XML (not a 403/redirect).
+            ("https://u.today/rss", "U.Today"),
+            ("https://cryptonews.com/news/feed/", "CryptoNews"),
+            ("https://bitcoinist.com/feed/", "Bitcoinist"),
+            ("https://protos.com/feed/", "Protos"),
         ]
     }
 
