@@ -22,6 +22,17 @@ fn get_analysis_cache() -> Cache<String, String> {
         .clone()
 }
 
+/// Stable, cheap content hash for cache keys. Two prompts/news digests that
+/// differ in content (e.g. a moved price) get distinct keys even when their
+/// byte lengths coincide — the previous length-based key could serve a stale
+/// answer after the market moved.
+fn short_hash(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
 pub struct GeminiClient {
     api_key: String,
 }
@@ -55,11 +66,12 @@ impl GeminiClient {
     ) -> anyhow::Result<String> {
         let cache = get_analysis_cache();
         let cache_key = format!(
-            "single_{}_{}_{}_{}",
+            "single_{}_{}_{}_{}_{}",
             symbol,
             preferred_model.unwrap_or(""),
             portfolio_context.is_some(),
-            news_summary.len()
+            short_hash(market_data),
+            short_hash(news_summary)
         );
 
         if let Some(text) = cache.get(&cache_key).await {
@@ -119,7 +131,12 @@ impl GeminiClient {
         let prompt = build_multi_prompt(assets_data, &port_section, &current_date);
 
         let cache = get_analysis_cache();
-        let cache_key = format!("multi_{}_{}", Utc::now().format("%Y%m%d_%H"), prompt.len());
+        let cache_key = format!(
+            "multi_{}_{}_{}",
+            Utc::now().format("%Y%m%d_%H"),
+            short_hash(assets_data),
+            short_hash(&port_section)
+        );
 
         if let Some(text) = cache.get(&cache_key).await {
             return Ok(text);

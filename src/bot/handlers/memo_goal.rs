@@ -19,7 +19,7 @@ use crate::{
     config::Config,
     crypto::CryptoClient,
     db::{SqliteStore, Store},
-    models::{Goal, Memo, ProgressNote},
+    models::{Goal, Memo},
 };
 
 pub async fn handle_memo_cmd(
@@ -167,7 +167,12 @@ pub async fn handle_goal_cmd(
                 if let Some(g) = p.goals.iter_mut().find(|g| g.id == id) {
                     g.done = false;
                     g.active = true;
-                    g.last_alert_at = None;
+                    // Keep the previous alert cooldown: resuming a paused goal
+                    // must not immediately fire a fresh alert (that was a spam
+                    // bypass). The stale AI recap is cleared so a re-activated
+                    // goal can't resurface an outdated verdict.
+                    g.ai_summary = None;
+                    g.ai_summary_at = None;
                     true
                 } else {
                     false
@@ -206,10 +211,7 @@ pub async fn handle_goal_cmd(
             }
             let ok = store.write(user_id, |p| {
                 if let Some(g) = p.goals.iter_mut().find(|g| g.id == id) {
-                    g.progress_notes.push(ProgressNote {
-                        at: Utc::now(),
-                        text,
-                    });
+                    g.push_progress_note(Utc::now(), text);
                     true
                 } else {
                     false

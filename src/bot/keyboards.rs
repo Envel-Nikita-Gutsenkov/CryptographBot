@@ -98,7 +98,7 @@ pub fn main_menu() -> InlineKeyboardMarkup {
         row2("👛 Wallets", cb::WALLETS, "💱 Convert", cb::CONVERT),
         row2("⚙️ Settings", cb::SETTINGS, "🧠 AI Analysis", "menu:ai"),
         row2("🎯 Plan", cb::PLAN, "📰 News", "menu:news"),
-        row2("📊 Stats", "setting:stats", "💾 Backup Now", cb::BACKUP),
+        row2("📊 Stats", "setting:stats", "📈 Trading", "menu:trading"),
     ])
 }
 
@@ -549,6 +549,57 @@ pub fn news_coin_picker() -> InlineKeyboardMarkup {
             "news_select:general",
         ),
         row1("🏠 Main Menu", "menu"),
+    ])
+}
+
+/// Coin picker for the 📈 Trading submenu (opens the full trading toolkit for
+/// a symbol). Kept out of the main menu so the top-level grid stays compact.
+pub fn trading_coin_picker() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new([
+        row3(
+            "BTC",
+            "trade:coin:BTC",
+            "ETH",
+            "trade:coin:ETH",
+            "SOL",
+            "trade:coin:SOL",
+        ),
+        row3(
+            "BNB",
+            "trade:coin:BNB",
+            "XRP",
+            "trade:coin:XRP",
+            "LINK",
+            "trade:coin:LINK",
+        ),
+        row2("📊 Decide all", "trade:decide", "🪜 Ladder", "trade:ladder"),
+        row1("🏠 Main Menu", "menu"),
+    ])
+}
+
+/// Action grid shown after picking a coin in the 📈 Trading submenu. Every
+/// button jumps straight into the matching deterministic report.
+pub fn trading_actions(symbol: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new([
+        row2(
+            "📈 Forecast",
+            &format!("fc:fx:{symbol}"),
+            "🪙 Dip zones",
+            &format!("dip:fx:{symbol}"),
+        ),
+        row2(
+            "🩸 Sniper",
+            &format!("snp:cmd:{symbol}"),
+            "🔎 Bottom",
+            &format!("btm:fx:{symbol}"),
+        ),
+        row2(
+            "🧠 AI Analysis",
+            &format!("ai_analysis:{symbol}:7d"),
+            "📰 News",
+            &format!("news_select:{symbol}"),
+        ),
+        row2("⬅️ Coins", "menu:trading", "🏠 Main Menu", "menu"),
     ])
 }
 

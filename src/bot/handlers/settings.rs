@@ -41,7 +41,7 @@ pub async fn handle_settings(
         return Ok(());
     }
     let user_id = msg.chat.id.0 as u64;
-    let (watchlist, backup_on, display, quiet_str, lang) = store.read(user_id, |p| {
+    let (watchlist, backup_on, display, quiet_str, tz_str, lang) = store.read(user_id, |p| {
         let q = match (
             p.settings.alert_quiet_hours_start,
             p.settings.alert_quiet_hours_end,
@@ -54,6 +54,7 @@ pub async fn handle_settings(
             p.settings.backup_on_change,
             format!("{:?}", p.settings.currency_display),
             q,
+            tz_label(p.settings.utc_offset_hours),
             lang_label(&p.settings.preferred_language).to_string(),
         )
     });
@@ -63,17 +64,19 @@ pub async fn handle_settings(
          Auto\\-backup on change: *{}*\n\
          Currency display: *{}*\n\
          Quiet Hours: *{}*\n\
+         Timezone: *{}*\n\
          AI Language: *{}*\n",
         crate::format::esc(&watchlist),
         if backup_on { "ON" } else { "OFF" },
         crate::format::esc(&display),
         crate::format::esc(&quiet_str),
+        crate::format::esc(&tz_str),
         crate::format::esc(&lang),
     );
 
     bot.send_message(msg.chat.id, text)
         .parse_mode(ParseMode::MarkdownV2)
-        .reply_markup(settings_menu(backup_on, &display, &quiet_str, &lang))
+        .reply_markup(settings_menu(backup_on, &display, &quiet_str, &lang, &tz_str))
         .await?;
     Ok(())
 }
@@ -119,6 +122,30 @@ pub async fn handle_setting_toggle(
                 };
                 p.settings.alert_quiet_hours_start = next.0;
                 p.settings.alert_quiet_hours_end = next.1;
+            }
+            "setting:toggle_tz" => {
+                // Cycle through common UTC offsets so quiet hours are evaluated in
+                // the user's local time, not the server's. None = server/UTC.
+                const CYCLE: [Option<i8>; 12] = [
+                    None,
+                    Some(3),
+                    Some(2),
+                    Some(1),
+                    Some(4),
+                    Some(5),
+                    Some(7),
+                    Some(8),
+                    Some(-3),
+                    Some(-5),
+                    Some(-8),
+                    Some(-10),
+                ];
+                let idx = CYCLE
+                    .iter()
+                    .position(|o| *o == p.settings.utc_offset_hours)
+                    .map(|i| (i + 1) % CYCLE.len())
+                    .unwrap_or(0);
+                p.settings.utc_offset_hours = CYCLE[idx];
             }
             "setting:stats" => {
                 // Handled separately below, but keep here to prevent unknown callback error
@@ -167,7 +194,7 @@ pub async fn handle_setting_toggle(
         // Just let it fall through and re-render the settings menu
     }
 
-    let (watchlist, backup_on, display, quiet_str, lang) = store.read(user_id, |p| {
+    let (watchlist, backup_on, display, quiet_str, tz_str, lang) = store.read(user_id, |p| {
         let q = match (
             p.settings.alert_quiet_hours_start,
             p.settings.alert_quiet_hours_end,
@@ -180,6 +207,7 @@ pub async fn handle_setting_toggle(
             p.settings.backup_on_change,
             format!("{:?}", p.settings.currency_display),
             q,
+            tz_label(p.settings.utc_offset_hours),
             lang_label(&p.settings.preferred_language).to_string(),
         )
     });
@@ -189,18 +217,20 @@ pub async fn handle_setting_toggle(
          Auto\\-backup on change: *{}*\n\
          Currency display: *{}*\n\
          Quiet Hours: *{}*\n\
+         Timezone: *{}*\n\
          AI Language: *{}*\n",
         crate::format::esc(&watchlist),
         if backup_on { "ON" } else { "OFF" },
         crate::format::esc(&display),
         crate::format::esc(&quiet_str),
+        crate::format::esc(&tz_str),
         crate::format::esc(&lang),
     );
 
     let _ = bot
         .edit_message_text(msg.chat.id, msg.id, text)
         .parse_mode(ParseMode::MarkdownV2)
-        .reply_markup(settings_menu(backup_on, &display, &quiet_str, &lang))
+        .reply_markup(settings_menu(backup_on, &display, &quiet_str, &lang, &tz_str))
         .await;
 
     Ok(())
@@ -315,6 +345,7 @@ fn settings_menu(
     display: &str,
     quiet_hours: &str,
     lang: &str,
+    tz_label: &str,
 ) -> teloxide::types::InlineKeyboardMarkup {
     use teloxide::types::InlineKeyboardButton as btn;
     let backup_label = if backup_on {
@@ -325,14 +356,20 @@ fn settings_menu(
     let currency_label = format!("💵 Currency: {}", display);
     let quiet_label = format!("⏰ Quiet Hours: {}", quiet_hours);
     let lang_label = format!("🌐 AI Language: {}", lang);
+    let tz_btn = format!("🕓 Timezone: {}", tz_label);
     teloxide::types::InlineKeyboardMarkup::new([
         vec![btn::callback(backup_label, "setting:toggle_backup")],
         vec![btn::callback(currency_label, "setting:toggle_currency")],
         vec![btn::callback(quiet_label, "setting:toggle_quiet")],
+        vec![btn::callback(tz_btn, "setting:toggle_tz")],
         vec![btn::callback(lang_label, "setting:toggle_language")],
         vec![
             btn::callback("📋 Watchlist", "settings:watchlist"),
             btn::callback("📊 Stats", "setting:stats"),
+        ],
+        vec![
+            btn::callback("💾 Backup Now", crate::bot::keyboards::cb::BACKUP),
+            btn::callback("🎓 Tutorial", "learn:step:0"),
         ],
         vec![btn::callback("🏠 Main Menu", "menu")],
     ])
@@ -344,6 +381,16 @@ fn lang_label(code: &str) -> &str {
         "en" => "English",
         "ru" => "Русский",
         _ => "Auto",
+    }
+}
+
+/// Human label for the user's UTC offset (quiet-hours clock).
+fn tz_label(offset: Option<i8>) -> String {
+    match offset {
+        None => "UTC (server)".to_string(),
+        Some(h) if h == 0 => "UTC".to_string(),
+        Some(h) if h > 0 => format!("UTC+{h}"),
+        Some(h) => format!("UTC{h}"),
     }
 }
 

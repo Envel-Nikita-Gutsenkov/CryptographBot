@@ -6,8 +6,11 @@
 //! regardless of whether the coin is already in the portfolio.
 //!
 //! Everything is derived from [`crate::trading::sniper::DipSniperReport`], so
-//! `/bottom`, the proactive alert and `/sniper` can never disagree. Pure and
-//! deterministic: no network, no clock.
+//! `/bottom` and `/sniper` share the same bucket ladder and levels. The two
+//! commands answer different questions ("should I buy now?" vs. "where do I
+//! place limit orders?"), so their *verdicts* can differ by design — but they
+//! never price the same level off two different series. Pure and deterministic:
+//! no network, no clock.
 
 use crate::{
     models::onchain::DerivativesRead,
@@ -116,8 +119,8 @@ pub struct BottomSignal {
     /// 0..100 composite bottom confidence (capitulation + oversold + drawdown,
     /// minus the chance a deeper level still prints).
     pub bottom_score: u8,
-    /// Probability of touching the first (shallowest) bucket inside 30 days.
-    pub deeper_prob_30d: f64,
+    /// Probability of touching the first (shallowest) bucket inside 14 days.
+    pub deeper_prob_14d: f64,
     /// Concrete level to bid for — the shallowest bucket.
     pub buy_price: f64,
     pub avg_entry: Option<f64>,
@@ -262,11 +265,11 @@ impl BottomSignal {
             html_escape::encode_text(&format!(
                 "{} {:.0}%",
                 if russian {
-                    "шанс дойти за 30д ≈"
+                    "шанс дойти за 14д ≈"
                 } else {
-                    "chance to touch in 30d ≈"
+                    "chance to touch in 14d ≈"
                 },
-                self.deeper_prob_30d * 100.0
+                self.deeper_prob_14d * 100.0
             )),
         ));
 
@@ -370,14 +373,14 @@ impl BottomSignal {
                 }
             }
             BottomVerdict::AboveAverage { .. } => {
-                let p = (self.deeper_prob_30d * 100.0).clamp(0.0, 99.0);
+                let p = (self.deeper_prob_14d * 100.0).clamp(0.0, 99.0);
                 if russian {
                     format!(
-                        "Цена выше твоей средней — докупка здесь её только поднимет. Но средняя не магнит: шанс дойти до уровня {level} за 30д ≈ {p:.0}%, и он может не сработать. Держи лимитку на {level}; если хочешь войти сейчас — бери небольшую долю."
+                        "Цена выше твоей средней — докупка здесь её только поднимет. Но средняя не магнит: шанс дойти до уровня {level} за 14д ≈ {p:.0}%, и он может не сработать. Держи лимитку на {level}; если хочешь войти сейчас — бери небольшую долю."
                     )
                 } else {
                     format!(
-                        "Price is above your average — an add here raises it. Your average is not a magnet: the chance of reaching {level} in 30d is ~{p:.0}%, and it may never come. Keep a bid at {level}; if you want in now, size the add small."
+                        "Price is above your average — an add here raises it. Your average is not a magnet: the chance of reaching {level} in 14d is ~{p:.0}%, and it may never come. Keep a bid at {level}; if you want in now, size the add small."
                     )
                 }
             }
@@ -411,7 +414,7 @@ impl BottomSignal {
             self.score_band(russian),
             fmt_money(self.buy_price, dec),
             (self.buy_price / self.price - 1.0) * 100.0,
-            self.deeper_prob_30d * 100.0,
+            self.deeper_prob_14d * 100.0,
         );
         if let Some(avg) = self.avg_entry {
             s.push_str(&format!(
@@ -526,14 +529,16 @@ pub fn bottom_signal(report: &DipSniperReport) -> BottomSignal {
         .first()
         .map(|b| b.limit_price)
         .filter(|p| p.is_finite() && *p > 0.0)
-        .unwrap_or(price * 0.85);
+        // No fabricated −15% "level": if there is no bucket we simply have no
+        // concrete bid, and the verdict below falls back to NoData.
+        .unwrap_or(f64::NAN);
 
     let avg = report.avg_entry.filter(|a| a.is_finite() && *a > 0.0);
     let too_high = avg
         .map(|a| price > a * (1.0 + GUARD_PROFIT))
         .unwrap_or(false);
 
-    let verdict = if !price.is_finite() || price <= 0.0 {
+    let verdict = if !price.is_finite() || price <= 0.0 || !buy_price.is_finite() {
         BottomVerdict::NoData
     } else if too_high {
         // Above your average is an objection, not a veto. With real bottom
@@ -562,7 +567,7 @@ pub fn bottom_signal(report: &DipSniperReport) -> BottomSignal {
         cap_max: cap.max_score,
         cap_band: cap.band,
         bottom_score,
-        deeper_prob_30d: deeper_prob,
+        deeper_prob_14d: deeper_prob,
         buy_price,
         avg_entry: avg,
         cash: report.cash,
@@ -671,7 +676,7 @@ mod tests {
         let s = bottom_signal(&calm_report());
         assert!(s.buy_price < s.price);
         assert!(s.buy_price > 0.0);
-        assert!((0.0..=1.0).contains(&s.deeper_prob_30d));
+        assert!((0.0..=1.0).contains(&s.deeper_prob_14d));
     }
 
     #[test]

@@ -61,3 +61,22 @@ pub struct Goal {
     #[serde(default)]
     pub sent_alerts: Vec<SentAlert>,
 }
+
+/// Hard cap on stored progress notes per goal so the vector can't grow without
+/// bound over the lifetime of a long-running goal.
+pub const MAX_PROGRESS_NOTES: usize = 20;
+
+impl Goal {
+    /// Append a dated progress note, keeping only the most recent
+    /// [`MAX_PROGRESS_NOTES`]. Old notes are dropped from the front.
+    pub fn push_progress_note(&mut self, at: DateTime<Utc>, text: impl Into<String>) {
+        self.progress_notes.push(ProgressNote {
+            at,
+            text: text.into(),
+        });
+        if self.progress_notes.len() > MAX_PROGRESS_NOTES {
+            let excess = self.progress_notes.len() - MAX_PROGRESS_NOTES;
+            self.progress_notes.drain(..excess);
+        }
+    }
+}

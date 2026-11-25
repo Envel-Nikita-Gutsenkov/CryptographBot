@@ -284,6 +284,14 @@ impl CryptoClient {
         self.inner.sqlite.clone()
     }
 
+    /// Remove a symbol's cached quote. Used when the prefetch loop detects a
+    /// provider glitch (a >50% jump vs the last logged sample): the bad tick
+    /// must not linger in the shared cache where the alert engine, sniper and
+    /// dip workers would read it and fire on garbage.
+    pub async fn evict_quote(&self, symbol: &str) {
+        self.inner.cache.remove(&symbol.to_uppercase()).await;
+    }
+
     pub async fn get_quotes(&self, symbols: &[&str]) -> Result<Vec<CmcQuote>> {
         let mut out = Vec::new();
         let mut missing = Vec::new();

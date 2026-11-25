@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use chrono::{Timelike, Utc};
+use chrono::Utc;
 use teloxide::{prelude::*, types::ChatId};
 use tokio::time::{interval, Duration};
 use tracing::{debug, error, warn};
@@ -100,13 +100,23 @@ async fn process_user(
         }
 
         if !rules::evaluate(rule, quote) {
+            // Reset the streak so "two consecutive confirming ticks" really means
+            // consecutive: a condition that flickers true → false → true must not
+            // count as back-to-back.
+            store.write(user_id, |p| {
+                if let Some(r) = p.alerts.iter_mut().find(|r| r.id == rule.id) {
+                    r.consecutive_triggers = 0;
+                }
+            });
             continue;
         }
 
         let (triggers, can_fire) = store.write(user_id, |p| {
             if let Some(r) = p.alerts.iter_mut().find(|r| r.id == rule.id) {
                 r.consecutive_triggers = r.consecutive_triggers.saturating_add(1);
-                let ok = r.consecutive_triggers >= 1 && rules::cooldown_ok(r);
+                // Require two consecutive confirming ticks before firing so a
+                // single-tick wick / glitched quote cannot trigger an alert.
+                let ok = r.consecutive_triggers >= 2 && rules::cooldown_ok(r);
                 (r.consecutive_triggers, ok)
             } else {
                 (0, false)
@@ -270,25 +280,7 @@ async fn process_user(
 }
 
 fn is_quiet_hour(store: &Store, user_id: u64) -> bool {
-    store.read(user_id, |p| {
-        let (start, end) = match (
-            p.settings.alert_quiet_hours_start,
-            p.settings.alert_quiet_hours_end,
-        ) {
-            (Some(s), Some(e)) => (s, e),
-            _ => return false,
-        };
-        // Quiet hours are set in the user's LOCAL time (the settings UI shows
-        // plain hours like 22-8). The proactive worker already uses Local; the
-        // alert engine must agree with it, otherwise quiet hours apply at
-        // different times depending on which worker fires.
-        let hour = chrono::Local::now().hour() as u8;
-        if start <= end {
-            hour >= start && hour < end
-        } else {
-            hour >= start || hour < end
-        }
-    })
+    store.read(user_id, |p| p.settings.in_quiet_hours(p.settings.local_hour()))
 }
 
 fn build_alert_message(rule: &crate::models::AlertRule, quote: &crate::models::CmcQuote) -> String {

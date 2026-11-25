@@ -172,7 +172,7 @@ pub fn render_analyze(report: &DipReport, bottom: Option<&BottomSignal>, russian
 
     out.push_str(
         "<i>Deterministic: /analyze merges forecast, dip, sniper and bottom. \
-         Touch probabilities are not predictions.</i>",
+         Touch probabilities are model-implied chances of each level being reached.</i>",
     );
     crate::format::guard_slash_units(&out)
 }

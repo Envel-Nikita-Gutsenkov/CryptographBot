@@ -9,6 +9,8 @@ pub enum Command {
     B,
     #[command(description = "Command reference")]
     Help,
+    #[command(description = "Interactive tutorial: /learn — guided tour of every feature")]
+    Learn,
     #[command(description = "Get prices: /price or /price BTC ETH")]
     Price(String),
     #[command(description = "Long-range prices: /long BTC | 90/180/360-day change, low/high")]

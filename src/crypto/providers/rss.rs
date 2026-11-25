@@ -70,6 +70,9 @@ impl RssProvider {
             ("https://cryptonews.com/news/feed/", "CryptoNews"),
             ("https://bitcoinist.com/feed/", "Bitcoinist"),
             ("https://protos.com/feed/", "Protos"),
+            // Two more verified-real feeds (checked: real XML, many items/day).
+            ("https://thedefiant.io/api/feed", "TheDefiant"),
+            ("https://cryptodaily.co.uk/feed", "CryptoDaily"),
         ]
     }
 

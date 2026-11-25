@@ -1381,7 +1381,10 @@ async fn main_inner() -> anyhow::Result<()> {
             let cmc3 = Arc::clone(&cmc2);
             let sq = Arc::clone(&sqlite_prefetch);
             async move {
-                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(600));
+                // 150s < the 180s quote L1 TTL, so the cache stays warm between
+                // refreshes and the alert engine reads cached prices instead of
+                // fanning out to 13 providers on every expired lookup.
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(150));
                 // Daily OHLC accumulator: open = first sample of the UTC day,
                 // high/low = running extremes, close = latest sample. Feeds the
                 // local OHLCV table so chart indicators see real candles.
@@ -1410,6 +1413,9 @@ async fn main_inner() -> anyhow::Result<()> {
                                                 let dev = (quote.price_usd - *prev).abs() / *prev;
                                                 if dev > 0.5 {
                                                     ok = false;
+                                                    // Evict the glitch from the shared
+                                                    // cache so alerts/sniper don't fire on it.
+                                                    cmc3.evict_quote(&quote.symbol).await;
                                                     tracing::warn!(
                                                         "Skipping suspicious price for {}: {:.2} vs prev {:.2} ({}% jump)",
                                                         quote.symbol, quote.price_usd, prev, dev * 100.0

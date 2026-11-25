@@ -109,6 +109,7 @@ fn build_handler() -> UpdateHandler<anyhow::Error> {
         .branch(case![Command::Start].endpoint(handle_start))
         .branch(case![Command::B].endpoint(handle_start))
         .branch(case![Command::Help].endpoint(handle_help))
+        .branch(case![Command::Learn].endpoint(handlers::handle_learn_cmd))
         .branch(case![Command::Price(a)].endpoint(handle_price_cmd))
         .branch(case![Command::Long(a)].endpoint(handle_long_cmd))
         .branch(case![Command::Top(a)].endpoint(handle_top_cmd))
@@ -194,6 +195,10 @@ fn build_handler() -> UpdateHandler<anyhow::Error> {
         .branch(
             dptree::filter(|q: CallbackQuery| q.data.as_deref().unwrap_or("").starts_with("snp:"))
                 .endpoint(handle_sniper_cb),
+        )
+        .branch(
+            dptree::filter(|q: CallbackQuery| q.data.as_deref().unwrap_or("").starts_with("learn:"))
+                .endpoint(handlers::learn::handle_learn_callback),
         )
         .branch(
             dptree::filter(|q: CallbackQuery| q.data.as_deref().unwrap_or("").starts_with("long:"))
@@ -406,19 +411,39 @@ const HELP_PART3: &str = "📊 <b>Trading (commander mode)</b>\n\
                      ⚙️ <b>System &amp; Security</b>\n\
                      • <code>/settings</code> — Interactive settings menu (includes /stats)\n\
                      • <code>/model</code> — Select AI model: <code>list</code> | <code>set N</code>\n\
-                     • <code>/ver</code> — Show bot build version/hash\n\
+                     • <code>/ver</code> — Show bot build version/hash
+                     • <code>/learn</code> — 🎓 Interactive guided tour of every feature (buttons only)
                      • <code>/backup</code> — Export JSON backup file\n\
                      • <code>/restore</code> — Restore from JSON backup file (send file after command)\n\
                      • <code>/reset</code> — Admin: reset stats and caches (news, milestones, health); portfolio is kept\n\
                      • <code>/cancel</code> — Cancel current dialog state";
 
 async fn handle_help(bot: Bot, msg: Message) -> anyhow::Result<()> {
-    for part in [HELP_PART1, HELP_PART2, HELP_PART3] {
-        bot.send_message(msg.chat.id, part)
-            .parse_mode(ParseMode::Html)
-            .await?;
+    let last = [HELP_PART1, HELP_PART2, HELP_PART3].len() - 1;
+    for (i, part) in [HELP_PART1, HELP_PART2, HELP_PART3].iter().enumerate() {
+        let mut req = bot.send_message(msg.chat.id, *part).parse_mode(ParseMode::Html);
+        if i == last {
+            req = req.reply_markup(help_keyboard());
+        }
+        req.await?;
     }
     Ok(())
+}
+
+fn help_keyboard() -> teloxide::types::InlineKeyboardMarkup {
+    use teloxide::types::InlineKeyboardButton;
+    teloxide::types::InlineKeyboardMarkup::new(vec![
+        vec![InlineKeyboardButton::callback(
+            "🎓 Interactive tutorial",
+            "learn:step:0",
+        )],
+        vec![
+            InlineKeyboardButton::callback("🧠 AI", "menu:ai"),
+            InlineKeyboardButton::callback("📰 News", "menu:news"),
+            InlineKeyboardButton::callback("📈 Trading", "menu:trading"),
+        ],
+        vec![InlineKeyboardButton::callback("🏠 Main menu", "menu")],
+    ])
 }
 
 #[cfg(test)]
@@ -1123,10 +1148,14 @@ async fn handle_plan_cb(
             let found = store.write(user_id, |p| {
                 if let Some(g) = p.goals.iter_mut().find(|g| g.id == goal_id) {
                     g.active = false;
-                    g.progress_notes.push(crate::models::ProgressNote {
-                        at: chrono::Utc::now(),
-                        text: "user confirmed deactivation (AI proposal)".into(),
-                    });
+                    // Clear the stale temporal summary so a deactivated goal can
+                    // never resurface an outdated "market is bullish" verdict.
+                    g.ai_summary = None;
+                    g.ai_summary_at = None;
+                    g.push_progress_note(
+                        chrono::Utc::now(),
+                        "user confirmed deactivation (AI proposal)",
+                    );
                     true
                 } else {
                     false
@@ -1154,10 +1183,10 @@ async fn handle_plan_cb(
                 .unwrap_or(0);
             let found = store.write(user_id, |p| {
                 if let Some(g) = p.goals.iter_mut().find(|g| g.id == goal_id) {
-                    g.progress_notes.push(crate::models::ProgressNote {
-                        at: chrono::Utc::now(),
-                        text: "user chose to KEEP this goal active (AI proposal declined)".into(),
-                    });
+                    g.push_progress_note(
+                        chrono::Utc::now(),
+                        "user chose to KEEP this goal active (AI proposal declined)",
+                    );
                     g.last_alert_at = Some(chrono::Utc::now());
                     g.last_declined_at = Some(chrono::Utc::now());
                     // Permanent: never propose cancelling this goal again.
@@ -1507,6 +1536,57 @@ async fn handle_callback(
                     .parse_mode(ParseMode::MarkdownV2)
                     .reply_markup(keyboards::news_coin_picker())
                     .await?;
+            }
+            "menu:trading" => {
+                bot.send_message(msg.chat.id,
+                    "📈 *Trading Toolkit*\n\n\
+                     Pick a coin for a full read — forecast, dip zones, sniper traps, bottom radar, \
+                     AI analysis and news — or open the whole-book views:")
+                    .parse_mode(ParseMode::MarkdownV2)
+                    .reply_markup(keyboards::trading_coin_picker())
+                    .await?;
+            }
+            "trade:decide" => {
+                let Some(sqlite) = cmc.sqlite() else {
+                    bot.send_message(msg.chat.id, "⚠️ Decision board needs the local database, which isn't available right now.").await?;
+                    return Ok(());
+                };
+                handlers::handle_decide_cmd(
+                    bot.clone(),
+                    msg.clone(),
+                    store.clone(),
+                    cmc.clone(),
+                    sqlite,
+                    config.clone(),
+                    String::new(),
+                )
+                .await?;
+            }
+            "trade:ladder" => {
+                let Some(sqlite) = cmc.sqlite() else {
+                    bot.send_message(msg.chat.id, "⚠️ The ladder needs the local database, which isn't available right now.").await?;
+                    return Ok(());
+                };
+                handlers::handle_ladder_cmd(
+                    bot.clone(),
+                    msg.clone(),
+                    store.clone(),
+                    cmc.clone(),
+                    sqlite,
+                    config.clone(),
+                    String::new(),
+                )
+                .await?;
+            }
+            d if d.starts_with("trade:coin:") => {
+                let symbol = d.strip_prefix("trade:coin:").unwrap().to_string();
+                bot.send_message(
+                    msg.chat.id,
+                    format!("📈 *{symbol} trading view*\n\nPick a report below:"),
+                )
+                .parse_mode(ParseMode::MarkdownV2)
+                .reply_markup(keyboards::trading_actions(&symbol))
+                .await?;
             }
             d if d.starts_with("ai_select:") => {
                 let symbol = d.strip_prefix("ai_select:").unwrap().to_string();

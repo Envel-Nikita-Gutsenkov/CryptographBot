@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, Timelike, Utc};
+use chrono::{DateTime, Utc};
 use teloxide::prelude::*;
 use tracing::{info, warn};
 
@@ -55,21 +55,26 @@ pub async fn run(
     }
 }
 
-fn in_quiet_hours(now_hour: u8, start: Option<u8>, end: Option<u8>) -> bool {
-    let (Some(s), Some(e)) = (start, end) else {
-        return false;
+/// True when `hour` falls inside the quiet window [start, end), with wrap
+/// support (e.g. 22 → 08). Kept as a small pure helper for unit tests; the
+/// live path uses [`UserSettings::in_quiet_hours`], which applies the user's
+/// UTC offset.
+#[allow(dead_code)]
+fn in_quiet_hours(hour: u8, start: Option<u8>, end: Option<u8>) -> bool {
+    let (s, e) = match (start, end) {
+        (Some(s), Some(e)) => (s, e),
+        _ => return false,
     };
     if s == e {
         return false;
     }
     if s < e {
-        now_hour >= s && now_hour < e
+        hour >= s && hour < e
     } else {
-        now_hour >= s || now_hour < e
+        hour >= s || hour < e
     }
 }
 
-/// Record `key` for `now` and return whether the caller should notify.
 /// Pruning uses four cooldown windows (28 days by default), so `dip_seen`
 /// cannot grow forever, while distinct zones/symbols stay independently
 /// deduplicated — the map is the fix for the security-alert spam regression.
@@ -164,7 +169,7 @@ async fn scan(
 ) -> anyhow::Result<()> {
     let now = Utc::now();
     for user_id in store.all_user_ids() {
-        let (dip_enabled, sniper_enabled, quiet_start, quiet_end, symbols) =
+        let (dip_enabled, sniper_enabled, quiet, symbols) =
             store.read(user_id, |p| {
                 let mut watch = p.settings.default_watchlist.clone();
                 watch.extend(p.holdings_by_symbol().into_keys());
@@ -174,15 +179,14 @@ async fn scan(
                 (
                     p.settings.dip_alert_enabled,
                     p.settings.sniper_alerts_enabled,
-                    p.settings.alert_quiet_hours_start,
-                    p.settings.alert_quiet_hours_end,
+                    p.settings.in_quiet_hours(p.settings.local_hour()),
                     watch,
                 )
             });
         if symbols.is_empty() || (!dip_enabled && !sniper_enabled) {
             continue;
         }
-        if in_quiet_hours(now.hour() as u8, quiet_start, quiet_end) {
+        if quiet {
             continue;
         }
 

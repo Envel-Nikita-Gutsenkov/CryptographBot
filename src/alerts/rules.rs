@@ -52,7 +52,17 @@ pub fn period_change(quote: &CmcQuote, period: Option<&crate::models::Period>) -
     use crate::models::Period;
     match period {
         Some(Period::OneHour) => quote.change_1h.unwrap_or(0.0),
-        Some(Period::FourHours) => quote.change_24h.unwrap_or(0.0),
+        Some(Period::FourHours) => {
+            // No native 4h field: interpolate between the 1h and 24h changes
+            // (linear in time, ~3/23 of the way from 1h to 24h). Previously this
+            // wrongly returned the full 24h change.
+            match (quote.change_1h, quote.change_24h) {
+                (Some(h1), Some(h24)) => h1 + (h24 - h1) * (3.0 / 23.0),
+                (Some(h1), None) => h1,
+                (None, Some(h24)) => h24 * (4.0f64 / 24.0).sqrt(),
+                (None, None) => 0.0,
+            }
+        }
         Some(Period::OneDay) => quote.change_24h.unwrap_or(0.0),
         Some(Period::SevenDays) => quote.change_7d.unwrap_or(0.0),
         Some(Period::ThirtyDays) => quote.change_30d.unwrap_or(0.0),
@@ -270,17 +280,26 @@ mod tests {
     }
 
     #[test]
-    fn four_hour_period_uses_24h_change() {
-        // There is no native 4h field on CmcQuote; the rule must read the 24h
-        // change rather than silently falling back to 0 (< threshold).
+    fn four_hour_period_scales_24h_change() {
+        // There is no native 4h field on CmcQuote. Using the full 24h change for
+        // a 4h rule made "-5% in 4h" fire on a slow all-day bleed. Instead we
+        // interpolate toward the 1h change when present, and otherwise scale the
+        // 24h change down (Brownian sqrt-time) so magnitudes stay plausible.
         let mut r = rule(AlertCondition::DropPercent, 5.0);
         r.period = Some(Period::FourHours);
-        assert!(evaluate(&r, &mock_quote(100.0, -6.0, 0.0)));
-        assert!(!evaluate(&r, &mock_quote(100.0, -4.0, 0.0)));
-        assert_eq!(
-            period_change(&mock_quote(100.0, -6.0, -2.0), Some(&Period::FourHours)),
-            -6.0
-        );
+
+        // Only 24h known: -6% over 24h is a far smaller 4h move (sqrt(4/24)).
+        let only24 = mock_quote(100.0, -6.0, 0.0);
+        let est = period_change(&only24, Some(&Period::FourHours));
+        assert!(est > -6.0 && est < 0.0, "4h estimate collapsed: {est}");
+        assert!(!evaluate(&r, &only24));
+
+        // With a 1h change the estimate interpolates between 1h and 24h.
+        let mut q = mock_quote(100.0, -6.0, 0.0);
+        q.change_1h = Some(-8.0);
+        assert!(evaluate(&r, &q));
+        let interp = period_change(&q, Some(&Period::FourHours));
+        assert!(interp < -6.0 && interp > -8.0, "interp wrong: {interp}");
     }
 
     #[test]

@@ -43,7 +43,10 @@ pub const GUARD_DILUTION: f64 = 0.10;
 /// "Strongly in profit" threshold that switches the avg-entry guard on.
 pub const GUARD_PROFIT: f64 = 0.25;
 
-pub const BUCKET_LABELS: [&str; 3] = ["deep", "cascade", "swan"];
+/// Bucket labels ordered shallowest → deepest. The first bucket is a mild dip
+/// (highest touch probability), the last is a tail "swan" event (lowest
+/// probability, deepest limit) — matching the TRAP_TARGET_TOUCH ordering.
+pub const BUCKET_LABELS: [&str; 3] = ["dip", "cascade", "swan"];
 pub const DAY_MS: i64 = 86_400_000;
 
 /// One aggregated daily candle. `open/high/low` may equal `close` when the
@@ -468,7 +471,7 @@ pub fn sniper_report_with_derivatives(
 ///
 /// [`touch_probability`] is monotonically increasing in `level` on
 /// `(0, price)` (a closer, higher limit is easier to touch) and returns 0 at or
-/// above spot. We binary-search the level in `[price*0.02, hi_cap]`, so every
+/// above spot. We binary-search the level in `[price*0.25, hi_cap]`, so every
 /// bucket carries a *known, honest* probability instead of an arbitrary far-tail
 /// quantile (−23% / −35% / −50% style levels the user rightly rejected).
 fn level_for_touch_target(
@@ -480,7 +483,9 @@ fn level_for_touch_target(
     hi_cap: f64,
 ) -> f64 {
     let hi_cap = hi_cap.min(price * 0.999);
-    let floor = price * 0.02;
+    // Deepest level we are willing to print: −75%. Deeper targets (−98% etc.)
+    // are not actionable and look like false precision, so we clamp here.
+    let floor = price * 0.25;
     if !(price > 0.0) || !target.is_finite() {
         return hi_cap;
     }

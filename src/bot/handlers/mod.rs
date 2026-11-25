@@ -11,6 +11,7 @@ pub mod dip;
 pub mod fng;
 pub mod forecast;
 pub mod ladder;
+pub mod learn;
 pub mod long;
 pub mod memo_goal;
 pub mod model_select;
@@ -41,6 +42,7 @@ pub use dip::{build_dip_report, build_dip_report_and_closes, build_dip_report_cl
 pub use fng::handle_fng_cmd;
 pub use forecast::{build_forecast, handle_forecast_callback, handle_forecast_cmd};
 pub use ladder::{handle_ladder_callback, handle_ladder_cmd};
+pub use learn::handle_learn_cmd;
 pub use long::{handle_long_callback, handle_long_cmd};
 pub use memo_goal::{handle_goal_cmd, handle_memo_cmd, handle_plan_cmd};
 pub use model_select::{handle_aihealth_callback, handle_aihealth_cmd, handle_model_cmd};

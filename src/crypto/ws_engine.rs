@@ -23,6 +23,11 @@ struct WsTicker {
 }
 
 pub async fn start_binance_ws(cache: Cache<String, CmcQuote>) {
+    // Rolling per-symbol price samples (ms, price) kept for ~61 min so we can
+    // recompute a real 1h change from WS ticks. Without this, change_1h stayed
+    // frozen at whatever the HTTP quote said while the TTL kept being reset.
+    let mut hist: std::collections::HashMap<String, std::collections::VecDeque<(i64, f64)>> =
+        std::collections::HashMap::new();
     loop {
         info!("Connecting to Binance WebSocket...");
         match connect_async(BINANCE_WS_URL).await {
@@ -50,6 +55,29 @@ pub async fn start_binance_ws(cache: Cache<String, CmcQuote>) {
                                     }
 
                                     if let Some(mut q) = cache.get(base_sym).await {
+                                        let now_ms = chrono::Utc::now().timestamp_millis();
+                                        let entry = hist.entry(base_sym.to_string()).or_default();
+                                        // Drop samples older than 61 minutes.
+                                        while let Some(&(t, _)) = entry.front() {
+                                            if now_ms - t > 61 * 60 * 1000 {
+                                                entry.pop_front();
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                        // Recompute 1h change from the oldest sample in the
+                                        // window once it is at least ~50 min old; otherwise we
+                                        // have no honest 1h baseline, so clear it instead of
+                                        // serving a frozen value.
+                                        q.change_1h = match entry.front() {
+                                            Some(&(t0, p0))
+                                                if now_ms - t0 >= 50 * 60 * 1000 && p0 > 0.0 =>
+                                            {
+                                                Some((price_usd / p0 - 1.0) * 100.0)
+                                            }
+                                            _ => None,
+                                        };
+                                        entry.push_back((now_ms, price_usd));
                                         q.price_usd = price_usd;
                                         q.change_24h = Some(change_24h);
                                         q.volume_24h = volume_24h;

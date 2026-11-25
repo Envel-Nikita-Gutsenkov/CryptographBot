@@ -68,6 +68,18 @@ pub async fn build_dip_report_closes_forecast(
         .filter(|p| *p > 0.0)
         .or_else(|| series.last().map(|&(_, p)| p))
         .ok_or_else(|| anyhow::anyhow!("no price or history available for {sym}"))?;
+    // Anchor the series to the live spot exactly like `/forecast` does, so
+    // `/dip`, `/sniper`, `/bottom`, `/analyze` and `/forecast` all read the SAME
+    // tail instead of one using today's quote and another yesterday's close.
+    let series = match live_price.filter(|p| *p > 0.0) {
+        Some(p) => crate::trading::forecast::anchor_to_spot(
+            &series,
+            p,
+            chrono::Utc::now().timestamp_millis(),
+            24 * 3_600_000,
+        ),
+        None => series,
+    };
     let forecast = crate::trading::forecast::forecast(&sym, price, &series);
     let closes: Vec<f64> = series.iter().map(|&(_, p)| p).collect();
     Ok((dip_report(&forecast, &series, avg_entry), closes, forecast))

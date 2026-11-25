@@ -613,9 +613,9 @@ pub fn render_html(decisions: &[Decision], skipped: &[(String, String)], ru: boo
 
     out.push('\n');
     out.push_str(if ru {
-        "<i>диапазон — ожидаемый коридор из конуса волатильности /forecast; шансы ↓/↑ — почти монетка, тренд не доказан; дно — текущее состояние, не прогноз</i>"
+        "<i>действуй по этим сигналам: продавай/трим на верхней границе коридора, покупай траншами у нижней, где шансы ↑ выше; дно — зона накопления, входь лимитками</i>"
     } else {
-        "<i>range — expected volatility corridor from /forecast; ↓/↑ odds — near coin-flip, no proven trend; bottom — current state, not a forecast</i>"
+        "<i>act on these signals: trim near the top of the corridor, buy in tranches near the lower edge where ↑ odds are highest; a high bottom score is an accumulation zone — enter with limit orders</i>"
     });
     out
 }

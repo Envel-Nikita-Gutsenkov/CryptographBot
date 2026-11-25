@@ -9,6 +9,12 @@ pub struct UserSettings {
     pub backup_on_change: bool,
     pub alert_quiet_hours_start: Option<u8>,
     pub alert_quiet_hours_end: Option<u8>,
+    /// User's UTC offset in hours (e.g. 3 for MSK, -5 for EST). Quiet hours are
+    /// interpreted in this timezone, NOT the server's. Without it the bot used
+    /// `chrono::Local::now()` = the server clock, so a UTC container applied
+    /// "quiet 23–08" at the wrong wall-clock time. `None` = UTC.
+    #[serde(default)]
+    pub utc_offset_hours: Option<i8>,
     /// Preferred AI model ID (e.g. "gemini-2.5-flash", "mistral-large-2512").
     pub ai_model_override: Option<String>,
     /// Watcher cooldown tracking.
@@ -81,6 +87,7 @@ impl Default for UserSettings {
             backup_on_change: true,
             alert_quiet_hours_start: None,
             alert_quiet_hours_end: None,
+            utc_offset_hours: None,
             ai_model_override: None,
             ai_last_critical_notify: None,
             ai_last_important_notify: None,
@@ -98,6 +105,35 @@ impl Default for UserSettings {
             sniper_protect_avg_entry: true,
             sniper_alerts_enabled: true,
             sniper_seen: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl UserSettings {
+    /// Current wall-clock hour in the user's timezone (UTC offset setting,
+    /// defaulting to UTC). All quiet-hours checks must go through this so the
+    /// alert engine, proactive worker and dip/sniper worker agree.
+    pub fn local_hour(&self) -> u8 {
+        use chrono::Timelike;
+        let now = chrono::Utc::now();
+        let offset_secs = (self.utc_offset_hours.unwrap_or(0) as i32) * 3600;
+        let shifted = now + chrono::Duration::seconds(offset_secs as i64);
+        shifted.hour() as u8
+    }
+
+    /// True if `hour` falls inside the configured quiet window (inclusive start,
+    /// exclusive end; supports wrap-around like 23→08). No window = never quiet.
+    pub fn in_quiet_hours(&self, hour: u8) -> bool {
+        let (Some(s), Some(e)) = (self.alert_quiet_hours_start, self.alert_quiet_hours_end) else {
+            return false;
+        };
+        if s == e {
+            return false;
+        }
+        if s < e {
+            hour >= s && hour < e
+        } else {
+            hour >= s || hour < e
         }
     }
 }

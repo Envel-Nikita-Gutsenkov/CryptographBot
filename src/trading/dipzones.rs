@@ -1013,18 +1013,9 @@ impl DipReport {
             .max()
             .unwrap_or(0)
             .clamp(10, 16);
-        // Sub-cent tokens render prices like `$0.000002558` (12 chars). Size the
-        // LEVEL column to the widest cell so it never runs into SOURCE, which
-        // used to collide as `$0.00000255830d cone`.
-        let level_w = shown
-            .iter()
-            .map(|z| money(z.price).chars().count())
-            .max()
-            .unwrap_or(0)
-            .max("LEVEL".len());
         let mut lines = Vec::new();
         let mut header = format!(
-            "{:<level_w$} {:<width$}{:>8}",
+            "{:<10}{:<width$}{:>8}",
             "LEVEL",
             "SOURCE",
             "DIST",
@@ -1036,7 +1027,7 @@ impl DipReport {
         lines.push(header);
         for (z, label) in shown.iter().zip(labels.iter()) {
             let mut row = format!(
-                "{:<level_w$} {:<width$}{:>8}",
+                "{:<10}{:<width$}{:>8}",
                 money(z.price),
                 label,
                 format!("{:+.1}%", z.distance_pct),
@@ -1086,7 +1077,7 @@ impl DipReport {
         let esc = html_escape::encode_text;
         let mut out = self.header_line();
         out.push_str(&format!(
-            "\n<b>P(touch within)</b> — first-passage, not a prediction:\n<pre>{}</pre>\n",
+            "\n<b>P(touch within)</b> — model-implied chance of reaching each level:\n<pre>{}</pre>\n",
             esc(&self.table_lines().join("\n"))
         ));
         out.push_str(&format!(

@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, Timelike, Utc};
+use chrono::{DateTime, Utc};
 use teloxide::prelude::*;
 use tokio::time::{sleep, Duration};
 use tracing::{info, warn};
@@ -118,21 +118,11 @@ async fn scan_user(
     user_id: u64,
 ) -> anyhow::Result<()> {
     // Respect quiet hours (skip scanning entirely so no alerts fire).
-    let (quiet_start, quiet_end) = store.read(user_id, |p| {
-        (
-            p.settings.alert_quiet_hours_start,
-            p.settings.alert_quiet_hours_end,
-        )
+    let quiet = store.read(user_id, |p| {
+        p.settings.in_quiet_hours(p.settings.local_hour())
     });
-    if let (Some(s), Some(e)) = (quiet_start, quiet_end) {
-        let hour = chrono::Local::now().hour() as u8;
-        if if s < e {
-            hour >= s && hour < e
-        } else {
-            hour >= s || hour < e
-        } {
-            return Ok(());
-        }
+    if quiet {
+        return Ok(());
     }
 
     let outcome = run_scan(store, cmc, sqlite, user_id, true, true).await?;
@@ -187,6 +177,7 @@ pub struct GoalAction {
 /// Full trace of one goal-check pipeline run. The CLI prints stages live via
 /// the `run_scan_with` callback; the struct is kept for debugging/verbose use.
 #[allow(dead_code)]
+#[derive(Default)]
 pub struct PipelineTrace {
     pub prompt: String,
     pub gen_a_model: String,
@@ -249,10 +240,16 @@ pub async fn run_scan_with<F: Fn(&str, &str)>(
         .cloned()
         .collect();
     if active_goals.is_empty() {
-        return Err(anyhow::anyhow!(
-            "User {} has no active goals — nothing to scan",
-            user_id
-        ));
+        // Not an error: a user with no active goals is a perfectly normal state.
+        // Return an empty, successful outcome so callers don't log a scary error.
+        return Ok(ScanOutcome {
+            current_date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+            actions: Vec::new(),
+            messages: Vec::new(),
+            proposals: Vec::new(),
+            changed: Vec::new(),
+            trace: PipelineTrace::default(),
+        });
     }
 
     let current_date = Utc::now().format("%Y-%m-%d").to_string();
@@ -474,19 +471,28 @@ fn apply_action(
             if !cooldown_ok(goal, now) {
                 return None;
             }
-            goal.last_alert_at = Some(now);
-            goal.alert_count += 1;
+            // Validate *before* burning the cooldown: an empty message used to
+            // still stamp `last_alert_at` and bump `alert_count`, silently
+            // inflating stats and locking out real alerts for 24h.
             let msg = action.message.trim();
             if msg.is_empty() {
-                None
-            } else {
-                // Remember what we said so the next scan doesn't repeat it.
-                remember_alert(goal, now, msg);
-                Some((
-                    format!("🎯 Goal #{}: {}", goal.id, msg),
-                    "active".to_string(),
-                ))
+                return None;
             }
+            // Content dedup: the market often barely moves between scans, so the
+            // model rephrases the same nudge. Don't spam the user with (near-)
+            // identical alerts — and don't burn the cooldown on them either, so a
+            // genuinely new signal can still get through.
+            if is_repeat_nudge(goal, now, msg) {
+                return None;
+            }
+            goal.last_alert_at = Some(now);
+            goal.alert_count += 1;
+            // Remember what we said so the next scan doesn't repeat it.
+            remember_alert(goal, now, msg);
+            Some((
+                format!("🎯 Goal #{}: {}", goal.id, msg),
+                "active".to_string(),
+            ))
         }
         "done" => {
             goal.done = true;
@@ -512,6 +518,9 @@ fn apply_action(
             goal.last_declined_at = Some(now);
             goal.alert_count += 1;
             let note = pick_note(action, "the goal may no longer be relevant.");
+            if is_repeat_nudge(goal, now, &note) {
+                return None;
+            }
             remember_alert(goal, now, &note);
             Some((
                 format!("💡 Goal #{}: {}", goal.id, note),
@@ -556,6 +565,42 @@ fn decline_suppressed(goal: &Goal, now: DateTime<Utc>) -> bool {
     goal.last_declined_at
         .map(|t| now.signed_duration_since(t).num_hours() < GOAL_DECLINE_SUPPRESS_HOURS)
         .unwrap_or(false)
+}
+
+/// Would sending `msg` right now just repeat something we already said recently?
+///
+/// Compares the current nudge against alerts sent in the last 72h using a
+/// token-set Jaccard similarity (order- and punctuation-insensitive), which is
+/// robust to the model rephrasing the same idea. Anything >= 0.72 is treated as
+/// a repeat.
+fn is_repeat_nudge(goal: &Goal, now: DateTime<Utc>, msg: &str) -> bool {
+    const DEDUP_WINDOW_HOURS: i64 = 72;
+    const SIMILARITY_THRESHOLD: f64 = 0.72;
+    let new_tokens = token_set(msg);
+    if new_tokens.is_empty() {
+        return false;
+    }
+    goal.sent_alerts.iter().any(|prev| {
+        if now.signed_duration_since(prev.at).num_hours() >= DEDUP_WINDOW_HOURS {
+            return false;
+        }
+        let prev_tokens = token_set(&prev.text);
+        if prev_tokens.is_empty() {
+            return false;
+        }
+        let inter = new_tokens.intersection(&prev_tokens).count();
+        let union = new_tokens.union(&prev_tokens).count();
+        union > 0 && (inter as f64 / union as f64) >= SIMILARITY_THRESHOLD
+    })
+}
+
+/// Lowercased word set (length >= 3) for similarity comparison.
+fn token_set(text: &str) -> std::collections::HashSet<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 3)
+        .map(str::to_string)
+        .collect()
 }
 
 /// Push a sent message into the goal's alert memory (capped at MAX_ALERT_MEMORY).
@@ -1503,9 +1548,16 @@ mod tests {
         // Still suppressed before the 24h cooldown elapses.
         let early = now + ChronoDuration::hours(20);
         assert!(apply_action(&mut g, &a, early).is_none());
-        // After 24h+ it fires again.
+        // After 24h+ a *fresh* nudge fires again (a rephrased-but-similar one
+        // would be suppressed by content dedup, exercised elsewhere).
         let later = now + ChronoDuration::hours(25);
-        assert!(apply_action(&mut g, &a, later).is_some());
+        let a2 = GoalAction {
+            goal_id: 1,
+            action: "alert".into(),
+            message: "ETH just broke support, size in now".into(),
+            reason: String::new(),
+        };
+        assert!(apply_action(&mut g, &a2, later).is_some());
         assert_eq!(g.alert_count, 2);
     }
 

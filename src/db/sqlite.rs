@@ -454,6 +454,18 @@ impl SqliteStore {
                             "DELETE FROM market_signals WHERE fetched_at < datetime('now', '-3 days')",
                             [],
                         );
+                        // AI budget counters are keyed by date/month and would
+                        // otherwise grow forever (one row per category per
+                        // day/month). Only the current period is ever read, so
+                        // keep a short tail for introspection.
+                        let _ = conn.execute(
+                            "DELETE FROM daily_usage WHERE date < date('now', '-35 days')",
+                            [],
+                        );
+                        let _ = conn.execute(
+                            "DELETE FROM monthly_usage WHERE month < strftime('%Y-%m', 'now', '-3 months')",
+                            [],
+                        );
 
                         // We do NOT run VACUUM here by default to avoid blocking the DB for too long
                         // and consuming extra I/O. SQLite will reuse the freed pages automatically.
@@ -1873,6 +1885,9 @@ fn init_db(conn: &mut Connection) -> rusqlite::Result<()> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_events_user ON events(user_id);
+        -- The retention sweep deletes by created_at; without this index the
+        -- DELETE has to scan the whole table.
+        CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
 
         CREATE TABLE IF NOT EXISTS price_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

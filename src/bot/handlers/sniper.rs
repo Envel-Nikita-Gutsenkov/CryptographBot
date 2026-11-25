@@ -54,6 +54,17 @@ pub async fn build_sniper_report(
         }
     }
 
+    // Anchor the tail to the live spot exactly like `/dip` and `/forecast`, so
+    // the rolling high / drawdown-z used here line up with the other reports.
+    if let Some(p) = live_price.filter(|p| *p > 0.0) {
+        series = crate::trading::forecast::anchor_to_spot(
+            &series,
+            p,
+            chrono::Utc::now().timestamp_millis(),
+            24 * 3_600_000,
+        );
+    }
+
     // Today's candle (open/high/low) from the intraday rows, when present.
     let candle = sqlite
         .get_ohlcv_history(&sym, 2)
