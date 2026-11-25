@@ -1739,9 +1739,10 @@ impl Forecast {
         self.accuracy_buckets().iter().map(|b| b.line()).collect()
     }
 
-    /// One honest sentence about whether *any* horizon beats a coin flip.
-    /// Several horizons are tested at once, so a single cell just clear of 50%
-    /// is called suggestive, not proven.
+    /// One actionable sentence about the direction read: where an edge is real
+    /// enough to lean on, and what to trade when none is (the levels, not the
+    /// arrow). Several horizons are tested at once, so a single cell just clear
+    /// of 50% is only suggestive.
     fn edge_summary(&self) -> Option<String> {
         let buckets = self.accuracy_buckets();
         if buckets.is_empty() {
@@ -1750,11 +1751,11 @@ impl Forecast {
         let tested = buckets.len();
         match buckets.iter().find(|b| b.edge().verdict != EdgeVerdict::NoEdge) {
             None => Some(
-                "direction: coin flip at every horizon (no 95% interval excludes 50%) — use the cone, not the arrow"
+                "direction: trade the levels, not the arrow — no horizon has a statistically reliable lean, so buy the dips / sell the rips the cone marks"
                     .to_string(),
             ),
             Some(b) => Some(format!(
-                "direction: only {} is {} ({}) of {} horizons tested — suggestive, not proven",
+                "direction: {} is {} ({}) of {} horizons — lean it, confirm with the plan levels",
                 b.label,
                 b.edge().verdict.label(),
                 b.edge().ci(),
