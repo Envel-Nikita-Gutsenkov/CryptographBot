@@ -501,7 +501,7 @@ pub fn bottom_signal(report: &DipSniperReport) -> BottomSignal {
     let deeper_prob = report
         .buckets
         .first()
-        .map(|b| b.prob_touch_30d)
+        .map(|b| b.prob_touch)
         .unwrap_or(0.0)
         .clamp(0.0, 1.0);
     if deeper_prob > 0.35 {

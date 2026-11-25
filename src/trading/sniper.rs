@@ -8,8 +8,10 @@
 //! Everything here is deterministic and pure:
 //! * one drawdown anchor (rolling 14-day high) so a slow bleed does not drag the
 //!   "dip" down with it;
-//! * three martingale buckets placed on the Student-t left tail of the 30-day
-//!   cone (quantiles 12% / 4% / 1%);
+//! * three martingale buckets whose limit prices are *solved* so their
+//!   first-passage touch probability over [`TRAP_HORIZON_DAYS`] equals a fixed
+//!   target (60% / 35% / 18%) — the number printed is the real market chance of
+//!   the level filling, not a hand-picked discount;
 //! * a first-passage touch probability per bucket, using the *same* effective
 //!   sigma as the drawn cone (`σ·t68`);
 //! * an average-entry guard that flags any fill which would dilute a profitable
@@ -19,15 +21,18 @@
 //! No network, no clock, no randomness — so the whole thing is unit-tested.
 
 use crate::models::onchain::{DerivativesRead, DerivativesSignal, OnChainMetrics};
-use crate::trading::{
-    dipzones::touch_probability,
-    forecast::{cone_sigma_h, student_t_quantile, Forecast, STUDENT_DF},
-};
+use crate::trading::{dipzones::touch_probability, forecast::{cone_sigma_h, Forecast}};
 
-/// How far ahead the bucket ladder is drawn.
-pub const SNIPER_HORIZON_DAYS: i64 = 30;
-/// Left-tail cumulative probabilities for the three buckets.
-pub const BUCKET_QUANTILES: [f64; 3] = [0.12, 0.04, 0.01];
+/// Horizon over which a limit "trap" is expected to fill. Two weeks is a
+/// realistic window for a resting buy limit; at the same touch probability a
+/// shorter horizon yields a shallower, more tradeable level than 30/90 days.
+pub const TRAP_HORIZON_DAYS: i64 = 14;
+/// Target first-passage touch probabilities for the three buckets, shallow →
+/// deep. The limit *price* is solved for each probability via
+/// [`level_for_touch_target`], so a printed "60% / 35% / 18%" is the actual
+/// model chance of the level being touched inside [`TRAP_HORIZON_DAYS`] — the
+/// label and the number agree by construction, not by a bot's whim.
+pub const TRAP_TARGET_TOUCH: [f64; 3] = [0.60, 0.35, 0.18];
 /// Martingale pyramid: deeper blood gets more cash.
 pub const BUCKET_WEIGHTS: [f64; 3] = [0.20, 0.35, 0.45];
 /// Same pyramid when protecting an average entry: the shallow bucket (the one
@@ -110,8 +115,9 @@ pub struct SniperBucket {
     /// 1-based bucket number.
     pub index: usize,
     pub label: &'static str,
-    /// Cumulative left-tail probability this bucket sits at (0.12 = deeper than
-    /// 88% of the model's 30-day outcomes).
+    /// Target first-passage touch probability the level is solved for
+    /// (0.60 = shallow / most likely, 0.18 = deep / least likely). Equal to
+    /// [`Self::prob_touch`] when the target is reachable within the clamp range.
     pub quantile: f64,
     /// Standardised cone multiple, e.g. -1.27σ.
     pub sigma_mult: f64,
@@ -119,7 +125,9 @@ pub struct SniperBucket {
     pub discount_pct: f64,
     pub weight: f64,
     pub spend_usd: f64,
-    pub prob_touch_30d: f64,
+    /// First-passage chance the limit fills within [`TRAP_HORIZON_DAYS`]; by
+    /// construction it equals the bucket's [`TRAP_TARGET_TOUCH`] target.
+    pub prob_touch: f64,
     pub new_avg_entry: Option<f64>,
     /// The fill would push the average entry up by more than [`GUARD_DILUTION`].
     pub dilutes_avg: bool,
@@ -383,14 +391,6 @@ pub fn sniper_report_with_derivatives(
     };
 
     // The cone's own width at 30 days, in log space. Using the same function as
-    // the drawn forecast guarantees a bucket at p≈0.159 sits exactly on the
-    // visible lower band.
-    let sigma_30 = cone_sigma_h(sigma, SNIPER_HORIZON_DAYS as f64);
-    // The forecast damps its drift with the horizon (`mu / sqrt(1 + h/decay)`),
-    // and `/sniper` must place buckets on that same centre. Using the raw daily
-    // drift put every limit a few percent deeper than the cone on trending alts.
-    let decay_days = forecast.calibration.decay_days.max(1.0);
-    let mu_h = mu / (1.0 + SNIPER_HORIZON_DAYS as f64 / decay_days).sqrt();
     // Touch probabilities use the model's own daily diffusion. The cone is
     // drawn with the Student-t q68 multiplier, but the first-passage formula
     // below is Gaussian — scaling sigma there too double-counts the fat tail
@@ -400,11 +400,15 @@ pub fn sniper_report_with_derivatives(
     let position_size = position_size.max(0.0);
 
     let mut buckets = Vec::with_capacity(3);
-    for (i, &q) in BUCKET_QUANTILES.iter().enumerate() {
-        let t = student_t_quantile(q, STUDENT_DF);
-        let limit_price = (price * (mu_h * SNIPER_HORIZON_DAYS as f64 + t * sigma_30).exp())
-            .min(price * 0.999)
-            .max(price * 0.01);
+    // Each level must sit strictly below the previous one, so we walk the
+    // targets shallow → deep and cap the search at the prior limit.
+    let mut hi_cap = price * 0.999;
+    let sigma_h = cone_sigma_h(sigma, TRAP_HORIZON_DAYS as f64);
+    let mu_h_trap = mu * TRAP_HORIZON_DAYS as f64;
+    for (i, &target) in TRAP_TARGET_TOUCH.iter().enumerate() {
+        let limit_price =
+            level_for_touch_target(price, target, mu, sigma_eff, TRAP_HORIZON_DAYS, hi_cap);
+        hi_cap = limit_price;
         let weight = weights[i];
         let spend = cash * weight;
         let new_avg = new_avg_entry(avg, position_size, spend, limit_price);
@@ -412,22 +416,22 @@ pub fn sniper_report_with_derivatives(
             (Some(a), Some(n)) => guard_active && n > a * (1.0 + GUARD_DILUTION),
             _ => false,
         };
+        // z-score of the solved level within the trap-horizon cone (display only).
+        let sigma_mult = if sigma_h > 0.0 {
+            ((limit_price / price).ln() - mu_h_trap) / sigma_h
+        } else {
+            0.0
+        };
         buckets.push(SniperBucket {
             index: i + 1,
             label: BUCKET_LABELS[i],
-            quantile: q,
-            sigma_mult: t,
+            quantile: target,
+            sigma_mult,
             limit_price,
             discount_pct: (limit_price / price - 1.0) * 100.0,
             weight,
             spend_usd: spend,
-            prob_touch_30d: touch_probability(
-                price,
-                limit_price,
-                mu,
-                sigma_eff,
-                SNIPER_HORIZON_DAYS,
-            ),
+            prob_touch: touch_probability(price, limit_price, mu, sigma_eff, TRAP_HORIZON_DAYS),
             new_avg_entry: new_avg,
             dilutes_avg: dilutes,
             triggered: price <= limit_price * 1.0001,
@@ -456,6 +460,49 @@ pub fn sniper_report_with_derivatives(
         buckets,
         history_days: history.len(),
     }
+}
+
+/// Solve for the limit price whose first-passage touch probability over
+/// `days` — under the drift/vol diffusion used by `/dip` and `/forecast` —
+/// equals `target`.
+///
+/// [`touch_probability`] is monotonically increasing in `level` on
+/// `(0, price)` (a closer, higher limit is easier to touch) and returns 0 at or
+/// above spot. We binary-search the level in `[price*0.02, hi_cap]`, so every
+/// bucket carries a *known, honest* probability instead of an arbitrary far-tail
+/// quantile (−23% / −35% / −50% style levels the user rightly rejected).
+fn level_for_touch_target(
+    price: f64,
+    target: f64,
+    mu: f64,
+    sigma: f64,
+    days: i64,
+    hi_cap: f64,
+) -> f64 {
+    let hi_cap = hi_cap.min(price * 0.999);
+    let floor = price * 0.02;
+    if !(price > 0.0) || !target.is_finite() {
+        return hi_cap;
+    }
+    let mut lo = floor;
+    let mut hi = hi_cap.max(floor * 1.0001);
+    // Even the closest allowed level cannot reach the target: use the closest.
+    if touch_probability(price, hi, mu, sigma, days) < target {
+        return hi;
+    }
+    // Even the deepest allowed level is already more likely than target: floor.
+    if touch_probability(price, lo, mu, sigma, days) > target {
+        return lo;
+    }
+    for _ in 0..64 {
+        let mid = 0.5 * (lo + hi);
+        if touch_probability(price, mid, mu, sigma, days) < target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
 }
 
 /// Average price after spending `spend_usd` at `limit_price` on top of an
@@ -605,15 +652,17 @@ impl DipSniperReport {
                 let b1 = &self.buckets[0];
                 if russian {
                     format!(
-                        "Спокойно: ждём первое ведро на {} (шанс задеть за 30д ≈ {:.0}%).",
+                        "Спокойно: ждём первое ведро на {} (шанс задеть за {}д ≈ {:.0}%).",
                         fmt_money(b1.limit_price, dec),
-                        b1.prob_touch_30d * 100.0
+                        TRAP_HORIZON_DAYS,
+                        b1.prob_touch * 100.0
                     )
                 } else {
                     format!(
-                        "Steady: first bucket at {} (touch chance over 30d ≈ {:.0}%).",
+                        "Steady: first bucket at {} (touch chance over {}d ≈ {:.0}%).",
                         fmt_money(b1.limit_price, dec),
-                        b1.prob_touch_30d * 100.0
+                        TRAP_HORIZON_DAYS,
+                        b1.prob_touch * 100.0
                     )
                 }
             }
@@ -642,7 +691,7 @@ impl DipSniperReport {
             .max("new avg".len());
         let header = format!(
             "{:<2} {:<8} {:>7} {:>limit_w$} {:>7} {:>6} {:>7} {:>7} {:>avg_w$}",
-            "#", "zone", "sig", "limit", "disc", "weight", "spend", "P(t30d)", "new avg"
+            "#", "zone", "sig", "limit", "disc", "weight", "spend", "P(t14d)", "new avg"
         );
         let mut out = vec![header];
         for b in &self.buckets {
@@ -667,7 +716,7 @@ impl DipSniperReport {
                 } else {
                     "—".into()
                 },
-                fmt_prob(b.prob_touch_30d),
+                fmt_prob(b.prob_touch),
                 new_avg,
             );
             if b.dilutes_avg {
@@ -838,9 +887,9 @@ impl DipSniperReport {
         text.push_str(&format!(
             "\n<i>{} {} · {} closes</i>",
             if russian {
-                "Хвосты вёдер:"
+                format!("Шанс касания вёдер ({}д):", TRAP_HORIZON_DAYS)
             } else {
-                "Bucket tails:"
+                format!("Bucket touch odds ({}d):", TRAP_HORIZON_DAYS)
             },
             tails,
             self.history_days
@@ -945,10 +994,57 @@ mod tests {
     fn deeper_buckets_are_less_likely_to_be_touched() {
         let r = report(1000.0, false);
         for w in r.buckets.windows(2) {
-            assert!(w[1].prob_touch_30d < w[0].prob_touch_30d);
+            assert!(w[1].prob_touch < w[0].prob_touch);
         }
         for b in &r.buckets {
-            assert!((0.0..=1.0).contains(&b.prob_touch_30d));
+            assert!((0.0..=1.0).contains(&b.prob_touch));
+        }
+    }
+
+    /// Deterministic ~`daily_vol`-per-day random-walk-ish series (alternating
+    /// log-returns), so a known volatility drives the solver without RNG.
+    fn volatile_series(n: usize, base: f64, daily_vol: f64) -> Vec<(i64, f64)> {
+        let mut px = base;
+        (0..n)
+            .map(|i| {
+                let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+                px *= (sign * daily_vol).exp();
+                (i as i64 * DAY_MS, px)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn trap_levels_are_tradeable_not_absurd() {
+        // Regression: the old far-tail (12/4/1%) 30-day cone quantiles placed
+        // limits at roughly -23%/-35%/-50% on a normal-vol coin — nobody sets
+        // those. Levels are now solved for 60/35/18% touch odds over 14 days.
+        let history = volatile_series(400, 100.0, 0.03);
+        let f = forecast_for(&history);
+        let r = sniper_report(&f, &history, None, None, None, 0.0, 1000.0, false);
+
+        for b in &r.buckets {
+            assert!(
+                b.discount_pct > -30.0,
+                "bucket {} unreachable: {:.1}%",
+                b.index,
+                b.discount_pct
+            );
+        }
+        // Shallow target → shallow level; deepest target → deepest level.
+        assert!(r.buckets[0].discount_pct > r.buckets[1].discount_pct);
+        assert!(r.buckets[1].discount_pct > r.buckets[2].discount_pct);
+
+        // The printed probability must equal the requested touch target, i.e.
+        // the label and the number agree by construction.
+        for (b, &target) in r.buckets.iter().zip(TRAP_TARGET_TOUCH.iter()) {
+            assert!(
+                (b.prob_touch - target).abs() < 0.05,
+                "bucket {} prob {:.3} vs target {:.3}",
+                b.index,
+                b.prob_touch,
+                target
+            );
         }
     }
 

@@ -728,7 +728,7 @@ fn render_ladder(
                 right("#", 2),
                 right(if russian { "лимит" } else { "limit" }, 9),
                 right("disc", 7),
-                right("P30", 4),
+                right("P14", 4),
                 right(if russian { "сумма" } else { "spend" }, 7),
                 right(if russian { "кол-во" } else { "qty" }, 11),
                 right(if russian { "средн" } else { "newavg" }, 9),
@@ -755,7 +755,7 @@ fn render_ladder(
                 right(&(i + 1).to_string(), 1),
                 right(&price_str(b.limit_price), 9),
                 right(&format!("{:+.1}%", b.discount_pct), 7),
-                right(&format!("{:.0}%", b.prob_touch_30d * 100.0), 4),
+                right(&format!("{:.0}%", b.prob_touch * 100.0), 4),
                 right(&format!("${}", format_thousands(b.spend_usd, 0)), 7),
                 right(&qty_str(qty), 11),
                 right(&price_str(new_avg), 9),
@@ -832,9 +832,9 @@ fn render_ladder(
     out.push_str(&format!(
         "\n<i>{}</i>",
         if russian {
-            "Уровни из конуса волатильности /forecast; P30 — вероятность коснуться за 30 дней. Не финансовый совет."
+            "Уровни подобраны под реальную вероятность касания за 14 дней (диффузия /dip): P14 — шанс, что лимит зацепит в этот срок."
         } else {
-            "Levels from the /forecast volatility cone; P30 = chance to touch within 30d. Not financial advice."
+            "Levels are solved for a real 14-day touch probability (the /dip diffusion): P14 = chance the limit fills within that window."
         }
     ));
     out
