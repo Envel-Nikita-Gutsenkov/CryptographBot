@@ -271,13 +271,35 @@ pub async fn handle_analyze_cmd(
     };
 
     for sym in &symbols {
-        let text = match build_screen(sym, &store, user_id, &cmc, &sqlite, price_for(sym)).await {
-            Ok((report, bottom, russian)) => render_analyze(&report, bottom.as_ref(), russian),
+        let (text, action, reason, ctx) = match
+            build_screen(sym, &store, user_id, &cmc, &sqlite, price_for(sym)).await
+        {
+            Ok((report, bottom, russian)) => {
+                let text = render_analyze(&report, bottom.as_ref(), russian);
+                let action = format!("{:?}", report.verdict).to_lowercase();
+                let reason = report.reason.clone();
+                let ctx = serde_json::json!({
+                    "spot": report.price,
+                    "avg_entry": report.avg_entry,
+                    "rsi14": report.rsi14,
+                    "vol_daily_pct": report.vol_daily_pct,
+                    "zones": report.zones.iter().map(|z| z.price).collect::<Vec<_>>(),
+                    "bottom_score": bottom.as_ref().map(|b| b.bottom_score),
+                })
+                .to_string();
+                (text, action, reason, ctx)
+            }
             Err(e) => {
                 warn!("Analyze for {sym} failed: {e}");
-                format!("⚠️ <b>{sym}</b>: нет данных для анализа ({e})")
+                (
+                    format!("⚠️ <b>{sym}</b>: нет данных для анализа ({e})"),
+                    "no_data".to_string(),
+                    e.to_string(),
+                    "{}".to_string(),
+                )
             }
         };
+        sqlite.record_journal(user_id, "decision", "/analyze", sym, sym, &action, None, &reason, &ctx, &text);
         let sent = bot
             .send_message(ChatId(msg.chat.id.0), &text)
             .parse_mode(ParseMode::Html)

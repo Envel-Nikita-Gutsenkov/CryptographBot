@@ -130,6 +130,16 @@ pub async fn handle_bottom_cmd(
                 }
             }
         };
+        // Journal the rendered read so "what did the bottom radar say then?"
+        // can be answered later without the container logs.
+        let ctx = serde_json::json!({
+            "spot": live,
+            "avg_entry": avg,
+            "position": position,
+            "cash": cash,
+        })
+        .to_string();
+        sqlite.record_journal(user_id, "answer", "/bottom", sym, sym, "bottom", None, "", &ctx, &text);
         let sent = bot
             .send_message(ChatId(msg.chat.id.0), &text)
             .parse_mode(ParseMode::Html)
