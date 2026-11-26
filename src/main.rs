@@ -1196,7 +1196,7 @@ async fn main_inner() -> anyhow::Result<()> {
         }
         eprintln!(
             "Unknown command: {sub}\n\
-             Available: version, analyze, commentary, forecast, top, dip, sniper, bottom, \
+             Available: version, journal, analyze, commentary, forecast, top, dip, sniper, bottom, \
              backtest, goal, trade, models, wipe-knowledge, search, scenario, news, ask\n\
              Run with no arguments to start the Telegram bot."
         );
