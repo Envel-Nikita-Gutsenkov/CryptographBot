@@ -446,7 +446,7 @@ fn render_menu(
     }
 
     let title = if russian {
-        "🎯 <b>Buy Ladder</b> — ловушки на покупку ниже рынка"
+        "🎯 <b>Лестница покупок</b> — ловушки ниже рынка"
     } else {
         "🎯 <b>Buy Ladder</b> — limit traps below spot"
     };
@@ -925,9 +925,9 @@ fn scenario_line(sc: &Scenario, russian: bool) -> String {
         return format!(
             "{head} · {}",
             if russian {
-                "ордера глубже"
+                "ни один ордер не зацепится"
             } else {
-                "orders deeper"
+                "no fill"
             }
         );
     }
@@ -937,7 +937,7 @@ fn scenario_line(sc: &Scenario, russian: bool) -> String {
         .unwrap_or_default();
     format!(
         "{head} · {} ${}{avg_part}",
-        if russian { "вложишь" } else { "deploy" },
+        if russian { "вложить" } else { "deploy" },
         format_thousands(sc.deployed, 0),
     )
 }
@@ -988,7 +988,11 @@ fn render_ladder(
 
         let spot = report.price;
         let avg = avg.filter(|a| a.is_finite() && *a > 0.0);
-        let mut head = format!("<b>{sym}</b> · spot {}", fmt_price(spot));
+        let mut head = format!(
+            "<b>{sym}</b> · {} {}",
+            if russian { "спот" } else { "spot" },
+            fmt_price(spot)
+        );
         if let Some(a) = avg {
             let pct = (spot / a - 1.0) * 100.0;
             head.push_str(&format!(
@@ -1006,9 +1010,10 @@ fn render_ladder(
         }
         // Market read: current regime + how much this coin actually moves per day.
         head.push_str(&format!(
-            " · {} · σ {:.1}%/d",
+            " · {} · σ {:.1}%{}",
             regime_label(&report.regime, russian),
-            report.vol_daily_pct
+            report.vol_daily_pct,
+            if russian { "/д" } else { "/d" }
         ));
         out.push_str(&format!("\n{head}\n"));
 
@@ -1040,7 +1045,7 @@ fn render_ladder(
                 "{} {} {} {} {} {} {}",
                 right("#", 2),
                 right(if russian { "лимит" } else { "limit" }, 9),
-                right("disc", 7),
+                right(if russian { "скидка" } else { "disc" }, 7),
                 right("P14", 4),
                 right(if russian { "сумма" } else { "spend" }, 7),
                 right(if russian { "кол-во" } else { "qty" }, 11),
@@ -1126,7 +1131,12 @@ fn render_ladder(
 
     if !any_rendered {
         return format!(
-            "🎯 <b>Buy Ladder</b>\n\n{}",
+            "🎯 <b>{}</b>\n\n{}",
+            if russian {
+                "Лестница лимитных покупок"
+            } else {
+                "Buy Ladder"
+            },
             if russian {
                 "Не удалось получить данные ни по одной монете. Попробуй позже."
             } else {
@@ -1152,7 +1162,8 @@ fn render_ladder(
         ));
         if pct.abs() > 0.01 {
             out.push_str(&format!(
-                " (spot {:+.1}% {}, RSI {})",
+                " ({} {:+.1}% {}, RSI {})",
+                if russian { "спот" } else { "spot" },
                 pct,
                 if russian { "к средней" } else { "vs avg" },
                 rsi.map(|r| format!("{r:.0}")).unwrap_or_else(|| "—".into())
@@ -1190,15 +1201,24 @@ fn render_ladder(
     out
 }
 
-/// Pick the coin most worth catching now: lowest price vs its average, with a
-/// low-RSI tie-break bonus.
+/// Pick the coin most worth catching now: deepest discount to its average,
+/// nudged by RSI so an overbought name (poor entry) is demoted and an oversold
+/// one (currency in a capitulation) is promoted.
 fn best_pick(picks: &[(String, f64, Option<f64>)]) -> Option<(String, f64, Option<f64>)> {
+    let score = |r: &(String, f64, Option<f64>)| -> f64 {
+        let rsi_adj = match r.2 {
+            Some(rsi) if rsi > 60.0 => (rsi - 60.0) * 0.1,  // overbought → worse entry
+            Some(rsi) if rsi < 35.0 => -(35.0 - rsi) * 0.1, // oversold → better entry
+            _ => 0.0,
+        };
+        r.1 + rsi_adj
+    };
     picks
         .iter()
         .min_by(|a, b| {
-            let sa = a.1 + a.2.map(|r| (r - 30.0).max(0.0) * 0.05).unwrap_or(0.0);
-            let sb = b.1 + b.2.map(|r| (r - 30.0).max(0.0) * 0.05).unwrap_or(0.0);
-            sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+            score(a)
+                .partial_cmp(&score(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
         })
         .cloned()
 }
@@ -1304,5 +1324,39 @@ mod tests {
         let sc = ladder_scenarios(100.0, 0.0, 0.03, &[], &[], None, 0.0);
         assert!(sc.iter().all(|s| s.deployed == 0.0));
         assert!(sc.iter().all(|s| s.blended.is_none()));
+    }
+
+    fn has_cyrillic(s: &str) -> bool {
+        s.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c))
+    }
+
+    #[test]
+    fn scenario_line_is_fully_english_or_fully_russian() {
+        let sc = Scenario {
+            drop_pct: 20.0,
+            level: 80.0,
+            prob: 0.15,
+            deployed: 120.0,
+            blended: Some(92.0),
+        };
+        let en = scenario_line(&sc, false);
+        assert!(!has_cyrillic(&en), "english line leaked cyrillic: {en}");
+        assert!(en.contains("deploy") && en.contains("odds"), "{en}");
+
+        let ru = scenario_line(&sc, true);
+        assert!(!ru.contains("deploy"), "russian line leaked english: {ru}");
+        assert!(has_cyrillic(&ru), "russian line lost cyrillic: {ru}");
+    }
+
+    #[test]
+    fn best_pick_prefers_oversold_over_overbought_at_equal_discount() {
+        // Same -5% vs avg for both; the oversold (RSI 25) coin must win over the
+        // overbought (RSI 78) one.
+        let picks = vec![
+            ("OVER".to_string(), -5.0, Some(78.0)),
+            ("OVER2".to_string(), -5.0, Some(25.0)),
+        ];
+        let (name, _, _) = best_pick(&picks).unwrap();
+        assert_eq!(name, "OVER2");
     }
 }
