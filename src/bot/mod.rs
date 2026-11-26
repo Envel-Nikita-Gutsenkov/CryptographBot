@@ -2127,6 +2127,89 @@ mod handler_smoke_tests {
         }
     }
 
+    /// Every inbound update must land in the journal before dispatch, even
+    /// when the handler does nothing visible. This guards the choke point that
+    /// answers "what did the user actually send?" after the fact.
+    #[tokio::test]
+    async fn inbound_update_is_journaled_before_dispatch() {
+        std::env::set_var("TELOXIDE_TOKEN", "123456:AAHfake");
+        std::env::set_var("CMC_API_KEY", "dummy");
+        std::env::set_var("ALLOWED_ADMIN_IDS", "123456789");
+
+        let path = std::env::temp_dir().join(format!(
+            "cryptograph_inbound_journal_{}_{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db_path = path.to_string_lossy().to_string();
+        crate::db::SqliteStore::initialize_schema(&db_path).unwrap();
+
+        let config = Arc::new(crate::config::Config::from_env().unwrap());
+        let sqlite = Arc::new(crate::db::SqliteStore::new(&db_path).unwrap());
+        let cmc = Arc::new(crate::crypto::CryptoClient::new(
+            "k",
+            "",
+            "",
+            "",
+            Some(sqlite.clone()),
+        ));
+        let blockchain = Arc::new(crate::crypto::BlockchainClient::new("", ""));
+        let acl = Arc::new(crate::access::AccessControl::new(vec![123456789]));
+        let store = Arc::new(crate::db::Store::new());
+        let storage = InMemStorage::<State>::new();
+        let patch_store = handlers::new_patch_store();
+        let bot = Bot::new("123456:AAHfake");
+        let me: teloxide::types::Me = serde_json::from_str(
+            r#"{"id":123456,"is_bot":true,"first_name":"Cryptograph","username":"CryptographAppBot","can_join_groups":true,"can_read_all_group_messages":false,"supports_inline_queries":false,"can_connect_to_business":false,"has_main_web_app":false}"#,
+        )
+        .unwrap();
+        let handler = build_handler();
+
+        let mut deps = dptree::deps![
+            bot.clone(),
+            me,
+            acl.clone(),
+            store.clone(),
+            cmc.clone(),
+            blockchain.clone(),
+            config.clone(),
+            storage.clone(),
+            patch_store.clone(),
+            sqlite.clone()
+        ];
+        let raw = r#"{"update_id":7,"message":{"message_id":1,"date":0,"chat":{"id":123456789,"type":"private","first_name":"a"},"text":"/decide BTC","from":{"id":123456789,"is_bot":false,"first_name":"a"}}}"#;
+        let upd: Update = serde_json::from_str(raw).unwrap();
+        deps.insert(upd);
+        let _ = handler.dispatch(deps).await;
+
+        // The journal write is fire-and-forget through the store's worker, so
+        // poll briefly instead of assuming it landed synchronously.
+        let mut rows = Vec::new();
+        for _ in 0..40 {
+            rows = sqlite.recent_journal(10).unwrap_or_default();
+            if !rows.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(!rows.is_empty(), "no inbound journal row was written");
+        // `/decide` also writes its own decision/answer rows; the inbound one is
+        // written first, so search rather than assume ordering.
+        let row = rows
+            .iter()
+            .find(|r| r.kind == "inbound")
+            .expect("no inbound row among the journal entries");
+        assert_eq!(row.command, "/decide");
+        assert_eq!(row.args, "BTC");
+        assert_eq!(row.user_id, 123456789);
+
+        drop(sqlite);
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// The `/aihealth` "Recheck now" button must reach a real endpoint. Buttons
     /// on rich messages used to be dropped before their handler ran, so a
     /// callback that silently does nothing is a bug class worth a test.
