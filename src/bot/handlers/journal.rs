@@ -39,13 +39,19 @@ pub async fn handle_journal_cmd(
         "help" => usage(),
         "stats" => match sqlite.journal_stats() {
             Ok(stats) => render_stats(&stats, crate::db::sqlite::JOURNAL_KEEP_LAST),
-            Err(e) => format!("❌ journal stats failed: {}", html_escape::encode_text(&e.to_string())),
+            Err(e) => format!(
+                "❌ journal stats failed: {}",
+                html_escape::encode_text(&e.to_string())
+            ),
         },
         "grade" => {
             let horizon = words.get(1).and_then(|s| s.parse().ok()).unwrap_or(14);
             match sqlite.journal_grade(horizon) {
                 Ok(grades) => render_grade(&grades, horizon),
-                Err(e) => format!("❌ journal grade failed: {}", html_escape::encode_text(&e.to_string())),
+                Err(e) => format!(
+                    "❌ journal grade failed: {}",
+                    html_escape::encode_text(&e.to_string())
+                ),
             }
         }
         "prune" => {
@@ -55,7 +61,10 @@ pub async fn handle_journal_cmd(
                 .unwrap_or(crate::db::sqlite::JOURNAL_KEEP_LAST);
             match sqlite.prune_journal(keep) {
                 Ok(n) => format!("🧹 Pruned <b>{n}</b> old rows (keeping newest {keep})."),
-                Err(e) => format!("❌ prune failed: {}", html_escape::encode_text(&e.to_string())),
+                Err(e) => format!(
+                    "❌ prune failed: {}",
+                    html_escape::encode_text(&e.to_string())
+                ),
             }
         }
         "" | "list" => {
@@ -87,7 +96,12 @@ fn recent(sqlite: &SqliteStore, limit: i64, kind: Option<&str>) -> String {
     let limit = limit.clamp(1, MAX_LIMIT);
     let rows = match sqlite.recent_journal(limit) {
         Ok(rows) => rows,
-        Err(e) => return format!("❌ journal read failed: {}", html_escape::encode_text(&e.to_string())),
+        Err(e) => {
+            return format!(
+                "❌ journal read failed: {}",
+                html_escape::encode_text(&e.to_string())
+            )
+        }
     };
     let rows: Vec<JournalRow> = match kind {
         Some(k) => rows.into_iter().filter(|r| r.kind == k).collect(),
@@ -161,7 +175,8 @@ fn render_recent(rows: &[JournalRow], limit: i64, kind: Option<&str>) -> String 
             }
         }
     }
-    out.trim_end().to_string() + "\n\n<i>/journal stats · /journal grade [days] · /journal prune [keep]</i>"
+    out.trim_end().to_string()
+        + "\n\n<i>/journal stats · /journal grade [days] · /journal prune [keep]</i>"
 }
 
 /// Pull the market snapshot out of a decision's `context_json`, keeping only the
@@ -238,7 +253,9 @@ fn render_grade(grades: &[crate::db::JournalGrade], horizon: i64) -> String {
             sum / n as f64
         ));
     }
-    out.push_str("</pre>\n<i>Forward change after each call: buy should be positive, wait negative.</i>");
+    out.push_str(
+        "</pre>\n<i>Forward change after each call: buy should be positive, wait negative.</i>",
+    );
     out
 }
 
@@ -311,8 +328,9 @@ mod tests {
             action: action.to_string(),
             confidence: Some(0.62),
             reason: "levels solved | RSI 41".to_string(),
-            context_json: r#"{"price":60000.0,"rsi14":41.0,"regime":"sideways","vol_daily_pct":3.2}"#
-                .to_string(),
+            context_json:
+                r#"{"price":60000.0,"rsi14":41.0,"regime":"sideways","vol_daily_pct":3.2}"#
+                    .to_string(),
             result: String::new(),
             outcome: None,
         }

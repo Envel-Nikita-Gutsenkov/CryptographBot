@@ -250,13 +250,57 @@ async fn main_inner() -> anyhow::Result<()> {
             }
             return Ok(());
         }
-        let limit: i64 = args
-            .get(2)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(50);
+        // `journal selftest` — writes a marker row, reads it back and deletes
+        // it. This proves the full write/read path on the live database without
+        // waiting for the next Telegram update.
+        if args.get(2).map(|s| s.as_str()) == Some("selftest") {
+            let marker = "journal-selftest";
+            sqlite.record_journal(
+                0,
+                marker,
+                marker,
+                marker,
+                "BTC",
+                "selftest",
+                None,
+                "selftest row, deleted immediately",
+                "{}",
+                "",
+            );
+            // The writer is async (channel-fed); give it a moment to land.
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let ok = sqlite
+                .recent_journal(50)
+                .map(|rows| rows.iter().any(|r| r.kind == marker))
+                .unwrap_or(false);
+            let removed = sqlite
+                .delete_journal_kind(marker)
+                .map(|n| n.max(0))
+                .unwrap_or(0);
+            if ok {
+                println!("journal selftest OK (wrote and read back a row, removed {removed})");
+            } else {
+                println!("journal selftest FAILED: the row never became readable");
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        let limit: i64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(50);
         let kind = args.get(3).map(|s| s.as_str());
         let rows = sqlite.recent_journal(limit.max(1))?;
-        for r in rows.iter().filter(|r| kind.map(|k| r.kind == k).unwrap_or(true)) {
+        let shown: Vec<&db::JournalRow> = rows
+            .iter()
+            .filter(|r| kind.map(|k| r.kind == k).unwrap_or(true))
+            .collect();
+        if shown.is_empty() {
+            println!(
+                "journal empty for this filter (cap {} rows, {} days)",
+                db::sqlite::JOURNAL_KEEP_LAST,
+                db::sqlite::JOURNAL_MAX_AGE_DAYS
+            );
+            return Ok(());
+        }
+        for r in shown {
             let body = if !r.result.is_empty() {
                 &r.result
             } else {
@@ -273,7 +317,11 @@ async fn main_inner() -> anyhow::Result<()> {
                 r.confidence
                     .map(|c| format!(" ({c:.2})"))
                     .unwrap_or_default(),
-                if body.is_empty() { r.reason.as_str() } else { body }
+                if body.is_empty() {
+                    r.reason.as_str()
+                } else {
+                    body
+                }
             );
             // The decision snapshot (prices, RSI, levels) is what makes an entry
             // auditable, so show it under the one-line summary.
@@ -1684,8 +1732,8 @@ mod cli_usage_tests {
     #[test]
     fn known_commands_without_args_get_a_usage_hint() {
         for cmd in [
-            "forecast", "dip", "sniper", "bottom", "backtest", "analyze",
-            "search", "scenario", "ask", "news", "goal", "models",
+            "forecast", "dip", "sniper", "bottom", "backtest", "analyze", "search", "scenario",
+            "ask", "news", "goal", "models",
         ] {
             assert!(
                 cli_usage_hint(cmd).is_some(),

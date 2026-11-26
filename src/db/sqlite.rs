@@ -831,7 +831,10 @@ impl SqliteStore {
         context_json: &str,
         result: &str,
     ) {
-        let _ = self.tx.send(SqliteMessage::RecordJournal {
+        // `try_send` (not `send`): this fn is synchronous and the caller must
+        // not await. A dropped `send` future would silently never enqueue, which
+        // is exactly how journaling can look wired up but write nothing.
+        let _ = self.tx.try_send(SqliteMessage::RecordJournal {
             user_id,
             kind: kind.to_string(),
             command: command.to_string(),
@@ -890,6 +893,13 @@ impl SqliteStore {
     pub fn prune_journal(&self, keep: i64) -> anyhow::Result<usize> {
         let conn = Connection::open(&self.db_path)?;
         Ok(trim_journal(&conn, keep)?)
+    }
+
+    /// Delete every journal row of `kind`. Used by `journal selftest` to remove
+    /// its own marker so the diagnostic never pollutes real history.
+    pub fn delete_journal_kind(&self, kind: &str) -> anyhow::Result<usize> {
+        let conn = Connection::open(&self.db_path)?;
+        Ok(conn.execute("DELETE FROM journal WHERE kind = ?1", [kind])?)
     }
 
     /// Grade past decisions: for each `decision` journal row that carries a
@@ -2786,6 +2796,28 @@ mod tests {
         assert_eq!(trim_journal(&conn, 3).unwrap(), 0);
         drop(conn);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn record_journal_actually_enqueues_a_row() {
+        // Regression: `record_journal` is sync and must use `try_send`; a dropped
+        // `send` future left the journal silently empty even though every call
+        // site looked wired up.
+        let store = tmp_store();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            store.record_journal(
+                7, "answer", "/decide", "BTC", "BTC", "buy", None, "r", "{}", "hello",
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        });
+        let rows = store.recent_journal(10).unwrap();
+        assert_eq!(rows.len(), 1, "journal entry was not persisted");
+        assert_eq!(rows[0].kind, "answer");
+        assert_eq!(rows[0].result, "hello");
     }
 
     #[test]
