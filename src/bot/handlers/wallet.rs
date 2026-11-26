@@ -56,7 +56,7 @@ pub async fn handle_wallet_step2(
                 bot.send_message(
                     msg.chat.id,
                     format!(
-                        "❌ `{}` is not a ticker. Send a symbol like BTC/ETH, or just the name to skip:",
+                        "❌ `{}` is not a ticker\\. Send a symbol like BTC/ETH, or just the name to skip:",
                         crate::format::esc(sym)
                     ),
                 )
@@ -173,7 +173,7 @@ pub async fn handle_wallet_add(
         bot.send_message(
             msg.chat.id,
             format!(
-                "❌ `{}` is not a ticker. Symbol must be 2–10 letters/digits (e.g. BTC, ETH, SOL).",
+                "❌ `{}` is not a ticker\\. Symbol must be 2–10 letters/digits \\(e\\.g\\. BTC, ETH, SOL\\)\\.",
                 crate::format::esc(&symbol)
             ),
         )

@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod handlers;
 pub mod keyboards;
+pub mod mdv2;
 pub mod rich_messages;
 pub mod state;
 pub mod updates;
@@ -1618,9 +1619,10 @@ async fn handle_callback(
             }
             "menu:trading" => {
                 bot.send_message(msg.chat.id,
-                    "📈 *Trading Toolkit*\n\n\
-                     Pick a coin for a full read — forecast, dip zones, sniper traps, bottom radar, \
-                     AI analysis and news — or open the whole-book views:")
+                    mdv2::prepare(
+                        "📈 *Trading Toolkit*\n\n\
+                         Pick a coin for a full read — forecast, dip zones, sniper traps, bottom radar, \
+                         AI analysis and news — or open the whole\\-book views:"))
                     .parse_mode(ParseMode::MarkdownV2)
                     .reply_markup(keyboards::trading_coin_picker())
                     .await?;
@@ -1661,7 +1663,7 @@ async fn handle_callback(
                 let symbol = d.strip_prefix("trade:coin:").unwrap().to_string();
                 bot.send_message(
                     msg.chat.id,
-                    format!("📈 *{symbol} trading view*\n\nPick a report below:"),
+                    format!("📈 *{} trading view*\n\nPick a report below:", crate::format::esc(&symbol)),
                 )
                 .parse_mode(ParseMode::MarkdownV2)
                 .reply_markup(keyboards::trading_actions(&symbol))

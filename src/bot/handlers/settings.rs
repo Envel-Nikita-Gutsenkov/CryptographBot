@@ -333,7 +333,7 @@ pub async fn handle_convert(
 
     bot.send_message(
         msg.chat.id,
-        format!("💱 *{} {}* = *{:.8} {}*", amount, from, result, to),
+        format!("💱 *{} {}* \\= *{:.8} {}*", amount, from, result, to),
     )
     .parse_mode(ParseMode::MarkdownV2)
     .await?;

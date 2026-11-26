@@ -563,7 +563,7 @@ pub async fn handle_correct(
         Ok(old) => {
             bot.send_message(
                 msg.chat.id,
-                format!("✅ Purchase #{id} corrected\n`{field}`: `{old}` → `{new_value}`"),
+                format!("✅ Purchase \\#{id} corrected\n`{field}`: `{old}` → `{new_value}`"),
             )
             .parse_mode(ParseMode::MarkdownV2)
             .await?;
