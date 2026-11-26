@@ -375,6 +375,18 @@ pub async fn handle_ladder_cmd(
             .await?;
         let text =
             build_ladder_text(&store, &cmc, &sqlite, user_id, &symbols, budget, russian).await;
+        sqlite.record_journal(
+            user_id,
+            "answer",
+            "/ladder",
+            &symbols.join(","),
+            "",
+            "",
+            None,
+            &format!("budget {budget}"),
+            "{}",
+            &text,
+        );
         let kb = result_kb(budget, &symbols);
         bot.send_message(chat, text)
             .parse_mode(ParseMode::Html)
@@ -770,6 +782,55 @@ async fn build_ladder_text(
                 None
             }
         };
+        // Journal the per-coin plan with the snapshot it was derived from, so a
+        // later "was this ladder any good?" question can be answered from data
+        // rather than guesswork.
+        let (action, reason, ctx) = match &report {
+            Some(r) => {
+                let levels: Vec<f64> = r
+                    .buckets
+                    .iter()
+                    .map(|b| b.limit_price)
+                    .collect();
+                let action = if levels.is_empty() { "wait" } else { "ladder" };
+                let reason = format!(
+                    "{} | RSI {} | regime {} | σ {:.1}%/d",
+                    if levels.is_empty() { "no levels" } else { "levels solved" },
+                    r.rsi14.map(|v| format!("{v:.0}")).unwrap_or_else(|| "n/a".into()),
+                    r.regime,
+                    r.vol_daily_pct
+                );
+                let ctx = serde_json::json!({
+                    "price": r.price,
+                    "avg_entry": r.avg_entry,
+                    "rsi14": r.rsi14,
+                    "regime": r.regime,
+                    "vol_daily_pct": r.vol_daily_pct,
+                    "anchor_price": r.anchor_price,
+                    "per_coin_budget": per_coin,
+                    "levels": levels,
+                })
+                .to_string();
+                (action, reason, ctx)
+            }
+            None => (
+                "skip",
+                "sniper report unavailable".to_string(),
+                serde_json::json!({ "per_coin_budget": per_coin }).to_string(),
+            ),
+        };
+        sqlite.record_journal(
+            user_id,
+            "decision",
+            "/ladder",
+            &symbols.join(","),
+            sym,
+            action,
+            None,
+            &reason,
+            &ctx,
+            "",
+        );
         reports.push((sym.clone(), avg, position, report));
     }
 

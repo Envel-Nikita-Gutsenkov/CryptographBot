@@ -286,19 +286,56 @@ pub async fn handle_sniper_cmd(
             .iter()
             .find(|q| q.symbol.eq_ignore_ascii_case(sym))
             .map(|q| q.price_usd);
-        let text = match build_sniper_report(sym, &cmc, &sqlite, live, avg, position, cash, protect)
+        let (text, journal) = match build_sniper_report(sym, &cmc, &sqlite, live, avg, position, cash, protect)
             .await
         {
-            Ok(r) => r.render_html(russian),
+            Ok(r) => {
+                let levels: Vec<f64> = r.buckets.iter().map(|b| b.limit_price).collect();
+                let ctx = serde_json::json!({
+                    "price": r.price,
+                    "avg_entry": r.avg_entry,
+                    "regime": r.regime,
+                    "rsi14": r.rsi14,
+                    "vol_daily_pct": r.vol_daily_pct,
+                    "drift_daily_pct": r.drift_daily_pct,
+                    "anchor_price": r.anchor_price,
+                    "levels": levels,
+                    "history_days": r.history_days,
+                    "cash": cash,
+                    "position_size": position,
+                })
+                .to_string();
+                let action = if r.buckets.is_empty() { "wait" } else { "ladder" };
+                let reason = format!(
+                    "{} levels | regime {} | σ {:.1}%/d",
+                    r.buckets.len(),
+                    r.regime,
+                    r.vol_daily_pct
+                );
+                (r.render_html(russian), (action.to_string(), reason, ctx))
+            }
             Err(e) => {
                 warn!("Sniper report for {sym} failed: {e}");
-                if russian {
+                let text = if russian {
                     format!("⚠️ <b>{sym}</b>: нет данных для Sniper ({e})")
                 } else {
                     format!("⚠️ <b>{sym}</b>: no data for Sniper ({e})")
-                }
+                };
+                (text, ("no_data".to_string(), e.to_string(), "{}".to_string()))
             }
         };
+        sqlite.record_journal(
+            user_id,
+            "answer",
+            "/sniper",
+            sym,
+            sym,
+            &journal.0,
+            None,
+            &journal.1,
+            &journal.2,
+            &text,
+        );
         let sent = bot
             .send_message(chat, &text)
             .parse_mode(ParseMode::Html)

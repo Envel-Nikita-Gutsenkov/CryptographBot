@@ -208,6 +208,23 @@ pub async fn handle_forecast_cmd(
             symbols.len() == 1,
         )
         .await;
+        let ctx = serde_json::json!({
+            "price": price_for(sym),
+            "avg_entry": avg_entry,
+        })
+        .to_string();
+        sqlite.record_journal(
+            user_id,
+            "answer",
+            "/forecast",
+            sym,
+            sym,
+            "forecast",
+            None,
+            "",
+            &ctx,
+            &html,
+        );
     }
 
     Ok(())

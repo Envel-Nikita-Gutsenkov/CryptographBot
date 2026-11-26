@@ -4,6 +4,41 @@ use tracing::{error, info, warn};
 
 use crate::models::MarketSignal;
 
+/// Hard cap on the bot journal. The table is a ring buffer: after every
+/// insert we drop everything older than the newest `JOURNAL_KEEP_LAST` rows, so
+/// disk use stays flat no matter how long the bot runs. Every free-text field is
+/// also truncated on insert, so even a full journal is only a few MB.
+pub const JOURNAL_KEEP_LAST: i64 = 1000;
+/// Age sweep for the journal, applied alongside the other retention sweeps.
+pub const JOURNAL_MAX_AGE_DAYS: i64 = 120;
+/// Per-field character cap for journal text (args, reason, result, context).
+/// 1000 rows × ~6 fields × this cap stays comfortably under a few MB.
+const JOURNAL_FIELD_MAX_CHARS: usize = 1200;
+
+/// Truncate a journal text field to [`JOURNAL_FIELD_MAX_CHARS`], respecting
+/// UTF-8 boundaries. Keeps the head (the part that carries the signal) and
+/// appends an ellipsis marker when shortened.
+fn truncate_journal_field(s: &str) -> String {
+    if s.chars().count() <= JOURNAL_FIELD_MAX_CHARS {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(JOURNAL_FIELD_MAX_CHARS).collect();
+    out.push('…');
+    out
+}
+
+fn trim_journal(conn: &Connection, keep: i64) -> rusqlite::Result<usize> {
+    // Keep the newest `keep` rows. When the table has `keep` rows or fewer the
+    // subquery yields NULL and `id <= NULL` matches nothing — a no-op, so this
+    // is safe to run on every insert.
+    conn.execute(
+        "DELETE FROM journal
+         WHERE id <= (SELECT id FROM journal
+                      ORDER BY id DESC LIMIT 1 OFFSET ?1)",
+        params![keep.max(0)],
+    )
+}
+
 pub enum SqliteMessage {
     SaveUser {
         user_id: u64,
@@ -14,6 +49,18 @@ pub enum SqliteMessage {
         user_id: u64,
         event_type: String,
         data: String,
+    },
+    RecordJournal {
+        user_id: u64,
+        kind: String,
+        command: String,
+        args: String,
+        symbol: String,
+        action: String,
+        confidence: Option<f64>,
+        reason: String,
+        context_json: String,
+        result: String,
     },
     LogPrice {
         symbol: String,
@@ -82,6 +129,43 @@ pub enum SqliteMessage {
 pub struct SqliteStore {
     tx: mpsc::Sender<SqliteMessage>,
     db_path: String,
+}
+
+/// One row of the bot journal: what came in (`command`, `args`), what the bot
+/// answered or decided (`action`, `result`), why (`reason`), and the market
+/// inputs it saw (`context_json`). `outcome` is filled in by a later grading
+/// pass. The table is a rotating ring buffer (see [`JOURNAL_KEEP_LAST`]).
+#[derive(Debug, Clone)]
+pub struct JournalRow {
+    pub created_at: String,
+    pub user_id: u64,
+    pub kind: String,
+    pub command: String,
+    pub args: String,
+    pub symbol: String,
+    pub action: String,
+    pub confidence: Option<f64>,
+    pub reason: String,
+    pub context_json: String,
+    pub result: String,
+    pub outcome: Option<String>,
+}
+
+/// One graded decision: what the bot said, the price it saw, and where the
+/// price actually went `horizon_days` later (from the local `price_history`).
+/// Used by `journal grade` to measure decision accuracy offline.
+#[derive(Debug, Clone)]
+pub struct JournalGrade {
+    pub created_at: String,
+    pub symbol: String,
+    pub action: String,
+    /// Price at decision time (parsed from the journal context), when present.
+    pub price: Option<f64>,
+    /// Price `horizon_days` later, from `price_history`; `None` when no sample
+    /// is old enough yet or the history has a gap.
+    pub later_price: Option<f64>,
+    /// Percent change from `price` to `later_price`.
+    pub change_pct: Option<f64>,
 }
 
 /// Positive verdict that the file on disk is not a usable SQLite database.
@@ -294,6 +378,48 @@ impl SqliteStore {
                             warn!("Failed to log event {} to SQLite: {}", event_type, e);
                         }
                     }
+                    SqliteMessage::RecordJournal {
+                        user_id,
+                        kind,
+                        command,
+                        args,
+                        symbol,
+                        action,
+                        confidence,
+                        reason,
+                        context_json,
+                        result,
+                    } => {
+                        // Bound every free-text field at insert time so a single
+                        // huge answer or context blob can never dominate the
+                        // journal's disk footprint.
+                        let res = conn.execute(
+                            "INSERT INTO journal
+                                (user_id, kind, command, args, symbol, action,
+                                 confidence, reason, context_json, result)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                            params![
+                                user_id,
+                                kind,
+                                truncate_journal_field(&command),
+                                truncate_journal_field(&args),
+                                truncate_journal_field(&symbol),
+                                truncate_journal_field(&action),
+                                confidence,
+                                truncate_journal_field(&reason),
+                                truncate_journal_field(&context_json),
+                                truncate_journal_field(&result),
+                            ],
+                        );
+                        if let Err(e) = res {
+                            warn!(
+                                "Failed to record journal entry ({} {}) to SQLite: {}",
+                                kind, command, e
+                            );
+                        } else if let Err(e) = trim_journal(&conn, JOURNAL_KEEP_LAST) {
+                            warn!("Failed to rotate journal: {}", e);
+                        }
+                    }
                     SqliteMessage::LogPrice {
                         symbol,
                         price,
@@ -437,6 +563,15 @@ impl SqliteStore {
                         if let Err(e) = res {
                             warn!("Failed to cleanup old events: {}", e);
                         }
+                        // Bot journal: row-capped on insert, plus an age
+                        // sweep so a long-idle bot does not keep stale grades.
+                        let _ = conn.execute(
+                            &format!(
+                                "DELETE FROM journal WHERE created_at < datetime('now', '-{} days')",
+                                JOURNAL_MAX_AGE_DAYS
+                            ),
+                            [],
+                        );
                         // One row per symbol per day now, so a full year costs
                         // ~5 rows/symbol instead of 52k rows. The longer window
                         // lets /forecast, /dip and /sniper build their series
@@ -676,6 +811,124 @@ impl SqliteStore {
                 data: data.to_string(),
             })
             .await;
+    }
+
+    /// Fire-and-forget a journal entry. Cheap (queued on the SQLite worker);
+    /// the table is a ring buffer capped at [`JOURNAL_KEEP_LAST`], so logging
+    /// every command, answer and decision cannot grow the database without
+    /// bound. Long text fields are truncated at insert time.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_journal(
+        &self,
+        user_id: u64,
+        kind: &str,
+        command: &str,
+        args: &str,
+        symbol: &str,
+        action: &str,
+        confidence: Option<f64>,
+        reason: &str,
+        context_json: &str,
+        result: &str,
+    ) {
+        let _ = self.tx.send(SqliteMessage::RecordJournal {
+            user_id,
+            kind: kind.to_string(),
+            command: command.to_string(),
+            args: args.to_string(),
+            symbol: symbol.to_string(),
+            action: action.to_string(),
+            confidence,
+            reason: reason.to_string(),
+            context_json: context_json.to_string(),
+            result: result.to_string(),
+        });
+    }
+
+    /// Most recent journal entries, newest first, truncated to `limit`.
+    pub fn recent_journal(&self, limit: i64) -> anyhow::Result<Vec<JournalRow>> {
+        let conn = Connection::open(&self.db_path)?;
+        let mut stmt = conn.prepare(
+            "SELECT created_at, user_id, kind, command, args, symbol, action,
+                    confidence, reason, context_json, result, outcome
+             FROM journal
+             ORDER BY id DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit.max(0)], |r| {
+            Ok(JournalRow {
+                created_at: r.get(0)?,
+                user_id: r.get(1)?,
+                kind: r.get(2)?,
+                command: r.get(3)?,
+                args: r.get(4)?,
+                symbol: r.get(5)?,
+                action: r.get(6)?,
+                confidence: r.get(7)?,
+                reason: r.get(8)?,
+                context_json: r.get(9)?,
+                result: r.get(10)?,
+                outcome: r.get(11)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Counts grouped by (kind, command) — the basis for "what commands came
+    /// in and how often the bot answered" usage/accuracy analysis.
+    pub fn journal_stats(&self) -> anyhow::Result<Vec<(String, String, i64)>> {
+        let conn = Connection::open(&self.db_path)?;
+        let mut stmt = conn.prepare(
+            "SELECT kind, command, COUNT(*) FROM journal
+             GROUP BY kind, command ORDER BY kind, COUNT(*) DESC",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Force the ring-buffer trim (used by the `journal prune` CLI and tests).
+    pub fn prune_journal(&self, keep: i64) -> anyhow::Result<usize> {
+        let conn = Connection::open(&self.db_path)?;
+        Ok(trim_journal(&conn, keep)?)
+    }
+
+    /// Grade past decisions: for each `decision` journal row that carries a
+    /// price, look up the price `horizon_days` later in `price_history` and
+    /// report the move. This is how decision accuracy is measured without
+    /// asking the network — it reads only what the bot already recorded.
+    pub fn journal_grade(&self, horizon_days: i64) -> anyhow::Result<Vec<JournalGrade>> {
+        let conn = Connection::open(&self.db_path)?;
+        let offset = format!("+{} days", horizon_days.max(1));
+        let mut stmt = conn.prepare(
+            "SELECT created_at, symbol, action, context_json,
+                    (SELECT p.price FROM price_history p
+                     WHERE p.symbol = journal.symbol
+                       AND p.timestamp >= datetime(journal.created_at, ?1)
+                     ORDER BY p.timestamp ASC LIMIT 1)
+             FROM journal
+             WHERE kind = 'decision' AND symbol <> ''
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([&offset], |r| {
+            let ctx: String = r.get(3)?;
+            let price = serde_json::from_str::<serde_json::Value>(&ctx)
+                .ok()
+                .and_then(|v| v.get("price").and_then(|p| p.as_f64()));
+            let later_price: Option<f64> = r.get(4)?;
+            let change_pct = match (price, later_price) {
+                (Some(a), Some(b)) if a > 0.0 => Some((b - a) / a * 100.0),
+                _ => None,
+            };
+            Ok(JournalGrade {
+                created_at: r.get(0)?,
+                symbol: r.get(1)?,
+                action: r.get(2)?,
+                price,
+                later_price,
+                change_pct,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Asynchronously fire-and-forget an OHLCV price log (open/high/low/close).
@@ -1889,6 +2142,34 @@ fn init_db(conn: &mut Connection) -> rusqlite::Result<()> {
         -- DELETE has to scan the whole table.
         CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
 
+        -- Bounded bot journal: every inbound command/text/callback and every
+        -- substantive answer, with the market snapshot and the reason behind
+        -- each decision. Kept as a fixed-size ring buffer (row cap on insert +
+        -- age sweep) so it can never grow without bound or fill the disk.
+        -- `context_json` holds the snapshot the call was made from; `result` is
+        -- what was answered (truncated); `outcome` is filled later when a
+        -- follow-up check grades the call.
+        CREATE TABLE IF NOT EXISTS journal (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            user_id INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            command TEXT NOT NULL DEFAULT '',
+            args TEXT NOT NULL DEFAULT '',
+            symbol TEXT NOT NULL DEFAULT '',
+            action TEXT NOT NULL DEFAULT '',
+            confidence REAL,
+            reason TEXT NOT NULL DEFAULT '',
+            context_json TEXT NOT NULL DEFAULT '{}',
+            result TEXT NOT NULL DEFAULT '',
+            outcome TEXT,
+            outcome_checked_at DATETIME
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_journal_created ON journal(created_at);
+        CREATE INDEX IF NOT EXISTS idx_journal_user ON journal(user_id);
+        CREATE INDEX IF NOT EXISTS idx_journal_kind ON journal(kind, created_at);
+
         CREATE TABLE IF NOT EXISTS price_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             symbol TEXT NOT NULL,
@@ -2468,5 +2749,71 @@ mod tests {
         assert_eq!(verdict, "ok");
         drop(conn);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn journal_ring_buffer_keeps_only_the_newest_rows() {
+        // The journal is disk-capped by keeping only the newest N rows, so the
+        // bot can log every command forever without growing the DB.
+        let path = std::env::temp_dir().join(format!(
+            "cryptograph_journal_trim_{}_{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let conn = open_and_init_db(&path.to_string_lossy()).unwrap();
+        for i in 0..5 {
+            conn.execute(
+                "INSERT INTO journal (user_id, kind, command, args, symbol, action, confidence, reason, context_json, result)
+                 VALUES (?1, 'inbound', '/price', ?2, '', '', NULL, '', '{}', '')",
+                params![i, format!("arg{i}")],
+            )
+            .unwrap();
+        }
+        let removed = trim_journal(&conn, 3).unwrap();
+        assert_eq!(removed, 2);
+        let remaining: Vec<String> = conn
+            .prepare("SELECT args FROM journal ORDER BY id ASC")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(remaining, vec!["arg2", "arg3", "arg4"]);
+        // Trimming again when already under the cap must be a no-op.
+        assert_eq!(trim_journal(&conn, 3).unwrap(), 0);
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn journal_grade_scores_decisions_against_later_price() {
+        // A decision stored with a price must be graded by the first price_history
+        // row at/after the horizon, so accuracy can be measured after the fact.
+        let store = tmp_store();
+        let conn = Connection::open(&store.db_path).unwrap();
+        conn.execute(
+            "INSERT INTO journal (created_at, user_id, kind, command, args, symbol, action, confidence, reason, context_json, result)
+             VALUES (datetime('now','-20 days'), 1, 'decision', '/decide', '', 'BTC', 'buy', NULL, 'rsi low', ?1, '')",
+            params![serde_json::json!({"price": 100.0}).to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO price_history (symbol, price, timestamp)
+             VALUES ('BTC', 110.0, datetime('now','-6 days'))",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let grades = store.journal_grade(14).unwrap();
+        assert_eq!(grades.len(), 1);
+        let g = &grades[0];
+        assert_eq!(g.action, "buy");
+        assert_eq!(g.price, Some(100.0));
+        assert_eq!(g.later_price, Some(110.0));
+        assert!((g.change_pct.unwrap() - 10.0).abs() < 1e-9);
     }
 }

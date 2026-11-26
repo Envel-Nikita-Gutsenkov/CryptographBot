@@ -69,10 +69,52 @@ pub async fn start(
         .await;
 }
 
+/// Extract `(user_id, command, args)` from an inbound update for the activity
+/// journal. Commands become `/name` (bot suffix stripped); free text and other
+/// payloads get a coarse label so a bare "text"/"callback" row still records
+/// *that* something arrived even if the body is empty.
+fn inbound_journal_fields(update: &teloxide::types::Update) -> Option<(u64, String, String)> {
+    use teloxide::types::UpdateKind;
+
+    let user_id = update.user().map(|u| u.id.0)?;
+    let split = |text: &str| -> (String, String) {
+        if let Some(rest) = text.strip_prefix('/') {
+            let mut it = rest.splitn(2, char::is_whitespace);
+            let raw = it.next().unwrap_or("");
+            // `/decide@MyBot` -> `/decide`.
+            let name = raw.split('@').next().unwrap_or(raw).to_lowercase();
+            let args = it.next().unwrap_or("").trim().to_string();
+            (format!("/{name}"), args)
+        } else {
+            ("text".to_string(), text.trim().to_string())
+        }
+    };
+
+    match &update.kind {
+        UpdateKind::Message(m) | UpdateKind::EditedMessage(m) => {
+            if let Some(t) = m.text() {
+                let (c, a) = split(t);
+                Some((user_id, c, a))
+            } else if let Some(cap) = m.caption() {
+                Some((user_id, "media".to_string(), cap.to_string()))
+            } else {
+                Some((user_id, "media".to_string(), String::new()))
+            }
+        }
+        UpdateKind::CallbackQuery(q) => Some((
+            user_id,
+            "callback".to_string(),
+            q.data.clone().unwrap_or_default(),
+        )),
+        _ => Some((user_id, "other".to_string(), String::new())),
+    }
+}
+
 fn build_handler() -> UpdateHandler<anyhow::Error> {
     use dptree::case;
 
-    let acl_filter = dptree::entry().filter(|update: Update, acl: Arc<AccessControl>| {
+    let acl_filter = dptree::entry().filter(
+        |update: Update, acl: Arc<AccessControl>, sqlite: Arc<crate::db::SqliteStore>| {
         // One INFO line per update: without it a silently dropped update looks
         // identical to a button that was never pressed, which is how the
         // rich-message callback bug stayed invisible for days.
@@ -84,6 +126,29 @@ fn build_handler() -> UpdateHandler<anyhow::Error> {
             teloxide::types::UpdateKind::EditedMessage(_) => ("edited", String::new()),
             _ => ("other", String::new()),
         };
+        // Journal EVERY inbound update before dispatch, whether or not the
+        // caller is allowed. This is the single choke point that sees all
+        // commands, free-text questions and button presses, so nothing the
+        // user sends can go unrecorded.
+        if let Some((uid, command, args)) = inbound_journal_fields(&update) {
+            let ctx = serde_json::json!({
+                "update_id": update.id,
+                "update_kind": kind,
+            })
+            .to_string();
+            sqlite.record_journal(
+                uid,
+                "inbound",
+                &command,
+                &args,
+                "",
+                "",
+                None,
+                "",
+                &ctx,
+                "",
+            );
+        }
         match update.user() {
             Some(user) => {
                 let allowed = acl.is_allowed(user.id.0);

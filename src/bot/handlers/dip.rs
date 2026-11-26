@@ -134,13 +134,45 @@ pub async fn handle_dip_cmd(
 
     for sym in &symbols {
         let avg = store.read(user_id, |p| p.avg_buy_price(sym));
-        let text = match build_dip_report(sym, &cmc, &sqlite, price_for(sym), avg).await {
-            Ok(r) => r.render_html(),
+        let (text, journal) = match build_dip_report(sym, &cmc, &sqlite, price_for(sym), avg).await {
+            Ok(r) => {
+                let zones: Vec<f64> = r.zones.iter().map(|z| z.price).collect();
+                let ctx = serde_json::json!({
+                    "price": r.price,
+                    "avg_entry": r.avg_entry,
+                    "zones": zones,
+                    "vol_daily_pct": r.vol_daily_pct,
+                    "drift_daily_pct": r.drift_daily_pct,
+                    "rsi14": r.rsi14,
+                    "sma200": r.sma200,
+                    "history_days": r.history_days,
+                })
+                .to_string();
+                (
+                    r.render_html(),
+                    (format!("{:?}", r.verdict).to_lowercase(), r.reason.clone(), ctx),
+                )
+            }
             Err(e) => {
                 warn!("Dip report for {sym} failed: {e}");
-                format!("⚠️ <b>{sym}</b>: нет данных для анализа ({e})")
+                (
+                    format!("⚠️ <b>{sym}</b>: нет данных для анализа ({e})"),
+                    ("no_data".to_string(), e.to_string(), "{}".to_string()),
+                )
             }
         };
+        sqlite.record_journal(
+            user_id,
+            "answer",
+            "/dip",
+            sym,
+            sym,
+            &journal.0,
+            None,
+            &journal.1,
+            &journal.2,
+            &text,
+        );
         let sent = bot
             .send_message(ChatId(msg.chat.id.0), &text)
             .parse_mode(ParseMode::Html)

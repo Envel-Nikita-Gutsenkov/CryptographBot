@@ -136,6 +136,54 @@ pub async fn handle_decide_cmd(
     let ru = is_russian(&store, user_id);
     let text = render_html(&decisions, &skipped, ru);
 
+    // Decision journal: one row per coin with the exact market snapshot the
+    // verdict was derived from, plus one row for the answer the user saw. This
+    // is what lets us audit later "why did it say wait here?".
+    let arg_symbols = symbols.join(",");
+    for d in &decisions {
+        let ctx = serde_json::json!({
+            "price": d.price,
+            "avg_entry": d.avg_entry,
+            "rsi14": d.rsi14,
+            "downtrend": d.downtrend,
+            "trend_gated": d.trend_gated,
+            "now_pct": d.now_pct,
+            "last_topup_days": d.last_topup_days,
+            "level": d.level.as_ref().map(|l| serde_json::json!({
+                "price": l.price,
+                "distance_pct": l.distance_pct,
+                "touch_prob": l.touch_prob,
+                "horizon_days": l.horizon_days,
+                "label": l.label,
+            })),
+            "p_down": d.outlook.as_ref().map(|o| o.p_down),
+            "bottom_score": d.bottom.as_ref().map(|b| b.score),
+        })
+        .to_string();
+        let reason = d.level.as_ref().map(|l| l.label.clone()).unwrap_or_default();
+        sqlite.record_journal(
+            user_id,
+            "decision",
+            "/decide",
+            &arg_symbols,
+            &d.symbol,
+            d.action.as_str(),
+            None,
+            &reason,
+            &ctx,
+            "",
+        );
+    }
+    if !skipped.is_empty() {
+        let reason = skipped
+            .iter()
+            .map(|(s, e)| format!("{s}: {e}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        sqlite.record_journal(user_id, "decision", "/decide", &arg_symbols, "", "skip", None, &reason, "{}", "");
+    }
+    sqlite.record_journal(user_id, "answer", "/decide", &arg_symbols, "", "", None, "", "{}", &text);
+
     let _ = bot
         .send_message(msg.chat.id, text)
         .parse_mode(ParseMode::Html)

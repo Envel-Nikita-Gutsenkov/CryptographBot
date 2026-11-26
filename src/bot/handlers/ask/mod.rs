@@ -102,7 +102,7 @@ pub async fn handle_ask_cmd(
                 store,
                 cmc,
                 config.clone(),
-                sqlite,
+                sqlite.clone(),
                 Some(tx),
                 reply_context,
             ),
@@ -119,6 +119,20 @@ pub async fn handle_ask_cmd(
 
         match result {
             Ok(answer) => {
+                // Journal the question and the answer the user actually saw, so
+                // the bot's replies can be audited later without the live logs.
+                sqlite.record_journal(
+                    user_id,
+                    "answer",
+                    "/ask",
+                    &question,
+                    "",
+                    "",
+                    None,
+                    "",
+                    "{}",
+                    &answer,
+                );
                 if let Err(e) = crate::bot::handlers::ai::send_rich_message_via_api(
                     &bot_task,
                     config.clone(),

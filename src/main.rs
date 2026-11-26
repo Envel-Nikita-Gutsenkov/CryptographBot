@@ -171,6 +171,105 @@ async fn main_inner() -> anyhow::Result<()> {
         println!("{}", bot::build_summary());
         return Ok(());
     }
+    // `cryptograph journal [N] [kind]` — dump the newest journal entries so the
+    // bot's past commands, answers and decisions can be audited offline.
+    if args.len() > 1 && (args[1] == "journal" || args[1] == "--journal") {
+        let config = Arc::new(config::Config::from_env()?);
+        if let Some(parent) = std::path::Path::new(&config.sqlite_db).parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        db::SqliteStore::initialize_schema(&config.sqlite_db)?;
+        let sqlite = db::SqliteStore::new(&config.sqlite_db)?;
+        // `journal stats` — row counts by kind, to see volume vs the ring cap.
+        if args.get(2).map(|s| s.as_str()) == Some("stats") {
+            for (kind, action, n) in sqlite.journal_stats()? {
+                println!("{kind:10} {action:12} {n}");
+            }
+            return Ok(());
+        }
+        // `journal prune` — force the ring-buffer trim now (also runs on boot).
+        if args.get(2).map(|s| s.as_str()) == Some("prune") {
+            let removed = sqlite.prune_journal(db::sqlite::JOURNAL_KEEP_LAST)?;
+            println!("pruned {removed} journal rows");
+            return Ok(());
+        }
+        // `journal grade [days]` — score past decisions against how the price
+        // actually moved `days` later (default 14), from local price_history.
+        if args.get(2).map(|s| s.as_str()) == Some("grade") {
+            let horizon: i64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(14);
+            let grades = sqlite.journal_grade(horizon)?;
+            if grades.is_empty() {
+                println!("no graded decisions yet");
+                return Ok(());
+            }
+            // Aggregate mean move per action so a systematic bias is visible:
+            // if "wait" calls are followed by rallies, the bot waits too much.
+            use std::collections::BTreeMap;
+            let mut agg: BTreeMap<String, (usize, f64)> = BTreeMap::new();
+            for g in &grades {
+                if let Some(ch) = g.change_pct {
+                    let e = agg.entry(g.action.clone()).or_insert((0, 0.0));
+                    e.0 += 1;
+                    e.1 += ch;
+                }
+            }
+            println!("graded {} decisions at +{horizon}d horizon", grades.len());
+            for (action, (n, sum)) in &agg {
+                println!("  {action:8} n={n:<4} mean move {:+.2}%", sum / *n as f64);
+            }
+            println!("--- rows (newest first) ---");
+            for g in &grades {
+                match (g.price, g.later_price, g.change_pct) {
+                    (Some(p), Some(l), Some(ch)) => println!(
+                        "{} {:<6} {:<6} {:>12.4} -> {:>12.4}  {:+.2}%",
+                        g.created_at, g.symbol, g.action, p, l, ch
+                    ),
+                    _ => println!(
+                        "{} {:<6} {:<6} (ungraded)",
+                        g.created_at, g.symbol, g.action
+                    ),
+                }
+            }
+            return Ok(());
+        }
+        let limit: i64 = args
+            .get(2)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(50);
+        let kind = args.get(3).map(|s| s.as_str());
+        let rows = sqlite.recent_journal(limit.max(1))?;
+        for r in rows.iter().filter(|r| kind.map(|k| r.kind == k).unwrap_or(true)) {
+            let body = if !r.result.is_empty() {
+                &r.result
+            } else {
+                &r.args
+            };
+            println!(
+                "{} [{}] user={} {} {} {}{} · {}",
+                r.created_at,
+                r.kind,
+                r.user_id,
+                r.command,
+                r.symbol,
+                r.action,
+                r.confidence
+                    .map(|c| format!(" ({c:.2})"))
+                    .unwrap_or_default(),
+                if body.is_empty() { r.reason.as_str() } else { body }
+            );
+            // The decision snapshot (prices, RSI, levels) is what makes an entry
+            // auditable, so show it under the one-line summary.
+            if !r.context_json.is_empty() && r.context_json != "{}" {
+                println!("           ctx: {}", r.context_json);
+            }
+            if let Some(o) = &r.outcome {
+                println!("           outcome: {o}");
+            }
+        }
+        return Ok(());
+    }
     if args.len() > 2 && (args[1] == "analyze" || args[1] == "--analyze") {
         let config = Arc::new(config::Config::from_env()?);
         if let Some(parent) = std::path::Path::new(&config.sqlite_db).parent() {

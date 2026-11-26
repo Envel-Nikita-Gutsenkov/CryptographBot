@@ -25,6 +25,19 @@ pub enum Action {
 }
 
 impl Action {
+    /// Stable machine-readable code for the decision journal (never localized).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Action::Buy => "buy",
+            Action::Scale => "scale",
+            Action::Wait => "wait",
+            Action::Hold => "hold",
+            Action::NoData => "no-data",
+        }
+    }
+}
+
+impl Action {
     fn from_verdict(v: &DipVerdict) -> Action {
         match v {
             DipVerdict::BuyNow => Action::Buy,
