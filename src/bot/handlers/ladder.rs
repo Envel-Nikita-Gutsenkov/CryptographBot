@@ -288,10 +288,11 @@ fn right(s: &str, w: usize) -> String {
     }
 }
 
-/// Quote decimals that keep small-cap prices readable.
+/// Quote decimals that keep small-cap prices readable, with thousands
+/// separators so large prices match the header formatting (e.g. `57,000.0`).
 fn price_str(p: f64) -> String {
     if p >= 1000.0 {
-        format!("{:.1}", p)
+        crate::format::format_thousands(p, 1)
     } else if p >= 1.0 {
         format!("{:.3}", p)
     } else {
@@ -937,7 +938,7 @@ fn scenario_line(sc: &Scenario, russian: bool) -> String {
         .unwrap_or_default();
     format!(
         "{head} · {} ${}{avg_part}",
-        if russian { "вложить" } else { "deploy" },
+        if russian { "вложишь" } else { "deploy" },
         format_thousands(sc.deployed, 0),
     )
 }
@@ -1049,7 +1050,7 @@ fn render_ladder(
                 right("P14", 4),
                 right(if russian { "сумма" } else { "spend" }, 7),
                 right(if russian { "кол-во" } else { "qty" }, 11),
-                right(if russian { "средн" } else { "newavg" }, 9),
+                right(if russian { "средняя" } else { "newavg" }, 11),
             )
         )];
         lines.push("-".repeat(54));
@@ -1076,7 +1077,7 @@ fn render_ladder(
                 right(&format!("{:.0}%", b.prob_touch * 100.0), 4),
                 right(&format!("${}", format_thousands(spend, 0)), 7),
                 right(&qty_str(qty), 11),
-                right(&price_str(new_avg), 9),
+                right(&price_str(new_avg), 11),
             ));
         }
 
@@ -1148,25 +1149,38 @@ fn render_ladder(
     // Footer: totals + the best coin to catch right now.
     out.push_str(&format!(
         "\n━━━━━━━━━━\n{} ${} · {} {}\n",
-        if russian { "Итого ловушек:" } else { "Total planned:" },
+        if russian { "Запланировано:" } else { "Total planned:" },
         format_thousands(total_planned, 0),
         traps,
-        if russian { "ордеров" } else { "traps" }
+        if russian {
+            orders_word_ru(traps)
+        } else if traps == 1 {
+            "trap"
+        } else {
+            "traps"
+        }
     ));
 
     if let Some((name, pct, rsi)) = best_pick(&picks) {
-        out.push_str(&format!(
-            "🎯 {} <b>{}</b>",
-            if russian { "Лучше ловить сейчас:" } else { "Best to catch now:" },
-            name
-        ));
-        if pct.abs() > 0.01 {
+        // Only claim something is worth catching when it actually is: below the
+        // average, or genuinely oversold. A coin above its average with a normal
+        // RSI is not a dip, so say so plainly instead of overselling it.
+        let rsi_n = rsi.map(|r| format!("{r:.0}")).unwrap_or_else(|| "—".into());
+        let is_dip = pct < -1.0 || rsi.is_some_and(|r| r < 35.0);
+        let lead = if is_dip {
+            if russian { "🎯 Лучше ловить сейчас:" } else { "🎯 Best to catch now:" }
+        } else if russian {
+            "💤 Ловить пока нечего, ближе всех:"
+        } else {
+            "💤 Nothing dipping right now; closest:"
+        };
+        out.push_str(&format!("{lead} <b>{name}</b>"));
+        if pct.abs() > 0.01 || rsi.is_some() {
             out.push_str(&format!(
-                " ({} {:+.1}% {}, RSI {})",
+                " ({} {:+.1}% {}, RSI {rsi_n})",
                 if russian { "спот" } else { "spot" },
                 pct,
                 if russian { "к средней" } else { "vs avg" },
-                rsi.map(|r| format!("{r:.0}")).unwrap_or_else(|| "—".into())
             ));
         }
         out.push('\n');
@@ -1221,6 +1235,21 @@ fn best_pick(picks: &[(String, f64, Option<f64>)]) -> Option<(String, f64, Optio
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
         .cloned()
+}
+
+/// Russian plural for "ордер" (1 → ордер, 2–4 → ордера, 5–20 → ордеров, …).
+fn orders_word_ru(n: usize) -> &'static str {
+    let m100 = n % 100;
+    let m10 = n % 10;
+    if (11..=14).contains(&m100) {
+        "ордеров"
+    } else if m10 == 1 {
+        "ордер"
+    } else if (2..=4).contains(&m10) {
+        "ордера"
+    } else {
+        "ордеров"
+    }
 }
 
 #[cfg(test)]
@@ -1358,5 +1387,97 @@ mod tests {
         ];
         let (name, _, _) = best_pick(&picks).unwrap();
         assert_eq!(name, "OVER2");
+    }
+
+    /// A representative report so the full table (header + Σ + scenario band)
+    /// can be rendered and inspected in both languages without any network.
+    fn sample_report() -> DipSniperReport {
+        use crate::trading::sniper::{CapBand, Capitulation};
+        use crate::trading::sniper::SniperBucket;
+        let bucket = |index, limit_price: f64, discount_pct: f64, prob_touch: f64| SniperBucket {
+            index,
+            label: "bucket",
+            quantile: prob_touch,
+            sigma_mult: -1.0,
+            limit_price,
+            discount_pct,
+            weight: 0.3,
+            spend_usd: 100.0,
+            prob_touch,
+            new_avg_entry: None,
+            dilutes_avg: false,
+            triggered: index == 1,
+        };
+        DipSniperReport {
+            symbol: "BTC".to_string(),
+            price: 60_000.0,
+            regime: "SIDEWAYS".to_string(),
+            rsi14: Some(41.0),
+            vol_daily_pct: 3.2,
+            drift_daily_pct: 0.0,
+            anchor_price: 63_000.0,
+            z14: -1.1,
+            avg_entry: Some(58_000.0),
+            position_size: 0.05,
+            cash: 1_000.0,
+            protect_avg_entry: false,
+            guard_active: false,
+            capitulation: Capitulation {
+                score: 2,
+                max_score: 6,
+                band: CapBand::Watch,
+                z_hit: false,
+                rsi_hit: true,
+                volume_spike: false,
+                long_wick: false,
+                oi_flush: false,
+            },
+            derivatives: None,
+            buckets: vec![
+                bucket(1, 57_000.0, 5.0, 0.55),
+                bucket(2, 54_000.0, 10.0, 0.32),
+                bucket(3, 51_000.0, 15.0, 0.18),
+            ],
+            history_days: 200,
+        }
+    }
+
+    #[test]
+    fn full_render_is_clean_in_each_language() {
+        let reports = vec![(
+            "BTC".to_string(),
+            Some(58_000.0),
+            0.05,
+            Some(sample_report()),
+        )];
+
+        let en = render_ladder(&reports, 300.0, 300.0, false);
+        println!("\n===== ENGLISH =====\n{en}\n");
+        assert!(!has_cyrillic(&en), "english render leaked cyrillic:\n{en}");
+        assert!(en.contains("Buy Ladder"), "{en}");
+        assert!(en.contains("odds"), "{en}");
+        assert!(en.contains("deploy") || en.contains("no fill"), "{en}");
+        assert!(en.contains("P14") && en.contains("limit") && en.contains("disc"), "{en}");
+
+        let ru = render_ladder(&reports, 300.0, 300.0, true);
+        println!("\n===== RUSSIAN =====\n{ru}\n");
+        assert!(has_cyrillic(&ru), "russian render lost cyrillic:\n{ru}");
+        assert!(ru.contains("Лестница") || ru.contains("лестница"), "{ru}");
+        for leak in ["odds", "deploy", "limit", "disc", "spot", "Buy Ladder"] {
+            assert!(!ru.contains(leak), "russian render leaked `{leak}`:\n{ru}");
+        }
+        // Correct Russian plural, never "3 ордеров".
+        assert!(ru.contains("ордер") && !ru.contains("ордеров"), "{ru}");
+    }
+
+    #[test]
+    fn orders_word_ru_uses_correct_plural() {
+        assert_eq!(orders_word_ru(1), "ордер");
+        assert_eq!(orders_word_ru(3), "ордера");
+        assert_eq!(orders_word_ru(4), "ордера");
+        assert_eq!(orders_word_ru(5), "ордеров");
+        assert_eq!(orders_word_ru(11), "ордеров");
+        assert_eq!(orders_word_ru(21), "ордер");
+        assert_eq!(orders_word_ru(22), "ордера");
     }
 }
