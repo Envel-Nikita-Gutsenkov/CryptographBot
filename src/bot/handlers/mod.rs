@@ -10,6 +10,7 @@ pub mod bottom;
 pub mod dip;
 pub mod fng;
 pub mod forecast;
+pub mod journal;
 pub mod ladder;
 pub mod learn;
 pub mod long;
@@ -41,6 +42,7 @@ pub use bottom::{build_bottom_signal, handle_bottom_callback, handle_bottom_cmd}
 pub use dip::{build_dip_report, build_dip_report_and_closes, build_dip_report_closes_forecast, handle_dip_callback, handle_dip_cmd};
 pub use fng::handle_fng_cmd;
 pub use forecast::{build_forecast, handle_forecast_callback, handle_forecast_cmd};
+pub use journal::handle_journal_cmd;
 pub use ladder::{handle_ladder_callback, handle_ladder_cmd};
 pub use learn::handle_learn_cmd;
 pub use long::{handle_long_callback, handle_long_cmd};

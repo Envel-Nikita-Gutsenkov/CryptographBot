@@ -205,6 +205,7 @@ fn build_handler() -> UpdateHandler<anyhow::Error> {
         .branch(case![Command::Analyze(a)].endpoint(handle_analyze_cmd))
         .branch(case![Command::Ladder(a)].endpoint(handle_ladder_cmd))
         .branch(case![Command::Decide(a)].endpoint(handle_decide_cmd))
+        .branch(case![Command::Journal(a)].endpoint(handle_journal_cmd))
         .branch(case![Command::Memo(a)].endpoint(handle_memo_cmd))
         .branch(case![Command::Goal(a)].endpoint(handle_goal_cmd))
         .branch(case![Command::Plan(a)].endpoint(handle_plan_cmd))
@@ -477,6 +478,9 @@ const HELP_PART3: &str = "📊 <b>Trading (commander mode)</b>\n\
                      • <code>/settings</code> — Interactive settings menu (includes /stats)\n\
                      • <code>/model</code> — Select AI model: <code>list</code> | <code>set N</code>\n\
                      • <code>/ver</code> — Show bot build version/hash
+\
+                     • <code>/journal</code> [N] [kind] — Admin: audit the last N decisions/answers; also <code>stats</code>, <code>grade [days]</code>, <code>prune [keep]</code>
+\
                      • <code>/learn</code> — 🎓 Interactive guided tour of every feature (buttons only)
                      • <code>/backup</code> — Export JSON backup file\n\
                      • <code>/restore</code> — Restore from JSON backup file (send file after command)\n\
@@ -742,6 +746,16 @@ async fn handle_ladder_cmd(
     args: String,
 ) -> anyhow::Result<()> {
     handlers::handle_ladder_cmd(bot, msg, store, cmc, sqlite, config, args).await
+}
+
+async fn handle_journal_cmd(
+    bot: Bot,
+    msg: Message,
+    sqlite: Arc<crate::db::SqliteStore>,
+    config: Arc<Config>,
+    args: String,
+) -> anyhow::Result<()> {
+    handlers::handle_journal_cmd(bot, msg, sqlite, config, args).await
 }
 
 async fn handle_decide_cmd(

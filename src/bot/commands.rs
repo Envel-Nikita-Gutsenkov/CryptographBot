@@ -116,6 +116,8 @@ pub enum Command {
     Allow(String),
     #[command(description = "Admin: revoke user access: /revoke USER_ID")]
     Revoke(String),
+    #[command(description = "Admin: audit journal: /journal [N|stats|grade|prune]")]
+    Journal(String),
     #[command(description = "Admin: reset stats & caches (keeps portfolio): /reset")]
     Reset,
     #[command(description = "Admin: list approved users")]
