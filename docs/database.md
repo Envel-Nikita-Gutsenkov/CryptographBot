@@ -104,6 +104,33 @@ fast concurrent reads.
 models) and consumed by the lazy ranker; `model_stats` drives
 underperformance detection and role assignment.
 
+### Decision journal (`journal`)
+
+A single bounded audit table of everything the bot did, so past behaviour can
+be analysed without grepping live logs.
+
+| Column | Meaning |
+|---|---|
+| `kind` | `inbound` (every update seen by the ACL filter), `decision` (`/decide`, `/ladder`, `/dip`, `/sniper`, `/forecast`, `/bottom`, `/analyze`), `answer` (the reply the user actually saw) |
+| `command`, `args` | Which command arrived and with what arguments (`/ladder BTC 300` → `/ladder` + `BTC 300`); callbacks store their payload |
+| `symbol`, `action`, `confidence` | Per-coin verdict (`buy`/`scale`/`wait`/`hold`) |
+| `reason` | One-line human reason behind the verdict |
+| `context_json` | Market snapshot at decision time: spot, avg entry, RSI, σ, regime, solved levels with `P(touch)` |
+| `result` | Truncated text of the answer |
+| `outcome` | Reserved for later grading |
+
+It is a **ring buffer**: after each insert everything older than the newest
+`JOURNAL_KEEP_LAST` (1000) rows is deleted, every text field is clipped to 1200
+characters, and rows older than `JOURNAL_MAX_AGE_DAYS` (120) are swept at
+startup. Steady-state size is 1–3 MB regardless of uptime. WAL is capped at
+1 MB via `journal_size_limit`.
+
+Inspect it with `docker exec cryptograph ./cryptograph journal [N] [kind]`,
+`journal stats`, `journal grade 14` (score past decisions against the price
+actually realised 14 days later, from local `price_history`), `journal prune`,
+or `journal selftest` (write-and-read-back check). The same data is available
+in Telegram via `/journal`.
+
 ---
 
 ## 4. Trading Module Schema (`src/trading/store/`)

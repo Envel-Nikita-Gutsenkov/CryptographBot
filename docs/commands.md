@@ -240,6 +240,7 @@ available from the CLI — see [trading/README.md](trading/README.md).
 | `/model set 3` | Pin a preferred model |
 | `/ver` | Build version and git hash |
 | `/reset` | Clear caches, statistics and model health (portfolio is kept) |
+| `/journal` | Decision journal: last 10 entries; `/journal 50 decision`, `/journal stats`, `/journal grade 14`, `/journal prune` |
 | `/allow 123456789` | Grant access |
 | `/revoke 123456789` | Revoke access |
 | `/acl` | List approved users |
