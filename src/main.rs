@@ -184,9 +184,25 @@ async fn main_inner() -> anyhow::Result<()> {
         let sqlite = db::SqliteStore::new(&config.sqlite_db)?;
         // `journal stats` — row counts by kind, to see volume vs the ring cap.
         if args.get(2).map(|s| s.as_str()) == Some("stats") {
-            for (kind, action, n) in sqlite.journal_stats()? {
+            let stats = sqlite.journal_stats()?;
+            if stats.is_empty() {
+                println!(
+                    "journal empty (cap {} rows, {} days)",
+                    db::sqlite::JOURNAL_KEEP_LAST,
+                    db::sqlite::JOURNAL_MAX_AGE_DAYS
+                );
+                return Ok(());
+            }
+            let mut total = 0i64;
+            for (kind, action, n) in stats {
+                total += n;
                 println!("{kind:10} {action:12} {n}");
             }
+            println!(
+                "total {total} of {} kept (age cap {} days)",
+                db::sqlite::JOURNAL_KEEP_LAST,
+                db::sqlite::JOURNAL_MAX_AGE_DAYS
+            );
             return Ok(());
         }
         // `journal prune` — force the ring-buffer trim now (also runs on boot).
