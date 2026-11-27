@@ -89,16 +89,18 @@ pub fn aihealth_actions() -> InlineKeyboardMarkup {
 
 // ── Main menu ─────────────────────────────────────────────────────────────────
 
+/// The main menu intentionally stays small: only the everyday entry points.
+/// Secondary views live behind their own commands and sub-menus
+/// (`/long`, `/distribution`, `/plan`, `/stats`, Portfolio, Settings) so the
+/// keyboard does not turn into a wall of buttons.
 pub fn main_menu() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new([
-        row2("💵 Prices", cb::PRICE, "📉 60–360D", "long:menu"),
-        row2("📊 Top Movers", cb::TOP10, "💼 Portfolio", cb::PORTFOLIO),
-        row2("📈 P&L", cb::PNL, "🥧 Allocation", cb::DISTRIBUTION),
-        row2("📋 Transfers", cb::TRANSFERS, "🔔 Alerts", cb::ALERTS),
+        row2("💵 Prices", cb::PRICE, "📊 Top Movers", cb::TOP10),
+        row2("💼 Portfolio", cb::PORTFOLIO, "📈 P&L", cb::PNL),
         row2("👛 Wallets", cb::WALLETS, "💱 Convert", cb::CONVERT),
-        row2("⚙️ Settings", cb::SETTINGS, "🧠 AI Analysis", "menu:ai"),
-        row2("🎯 Plan", cb::PLAN, "📰 News", "menu:news"),
-        row2("📊 Stats", "setting:stats", "📈 Trading", "menu:trading"),
+        row2("📋 Transfers", cb::TRANSFERS, "🔔 Alerts", cb::ALERTS),
+        row2("🧠 AI Analysis", "menu:ai", "📰 News", "menu:news"),
+        row2("📈 Trading", "menu:trading", "⚙️ Settings", cb::SETTINGS),
     ])
 }
 
@@ -608,4 +610,55 @@ pub fn patch_confirm_menu(token: &str) -> InlineKeyboardMarkup {
         btn("✅ Apply", &cb::patch_confirm(token)),
         btn("❌ Cancel", &cb::patch_cancel(token)),
     ]])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn button_texts(m: &InlineKeyboardMarkup) -> Vec<String> {
+        m.inline_keyboard
+            .iter()
+            .flatten()
+            .map(|b| b.text.clone())
+            .collect()
+    }
+
+    /// The main menu must stay lean. If someone re-adds a secondary view
+    /// (long-range, allocation chart, plan, stats) it belongs in a sub-menu or
+    /// a command, not here — this test is the guard against clutter creep.
+    #[test]
+    fn main_menu_stays_lean_and_duplicate_free() {
+        let texts = button_texts(&main_menu());
+        assert!(
+            texts.len() <= 12,
+            "main menu grew past 12 buttons ({}): {texts:?}",
+            texts.len()
+        );
+        for junk in ["60–360D", "Allocation", "Plan", "Stats"] {
+            assert!(
+                !texts.iter().any(|t| t.contains(junk)),
+                "main menu must not contain the secondary `{junk}` button: {texts:?}"
+            );
+        }
+        let mut seen = std::collections::HashSet::new();
+        for t in &texts {
+            assert!(seen.insert(t.clone()), "duplicate main-menu button `{t}`");
+        }
+    }
+
+    /// Every button on the main menu must have a non-empty callback payload.
+    #[test]
+    fn main_menu_callbacks_are_wired() {
+        for row in &main_menu().inline_keyboard {
+            for b in row {
+                match &b.kind {
+                    teloxide::types::InlineKeyboardButtonKind::CallbackData(d) => {
+                        assert!(!d.is_empty(), "empty callback for `{}`", b.text)
+                    }
+                    _ => panic!("main-menu button `{}` is not a callback", b.text),
+                }
+            }
+        }
+    }
 }
