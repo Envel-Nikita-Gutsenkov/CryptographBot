@@ -1210,12 +1210,14 @@ async fn check_user(
     let detail_html = model_output_to_html(&detail);
     let msg = format!("{emoji} <b>{header}</b>\n\n{headline_html}\n\n{detail_html}");
 
+    crate::bot::outbound::record(user_id, "watcher", &msg);
     if let Err(e) = bot
         .send_message(ChatId(user_id as i64), &msg)
         .parse_mode(teloxide::types::ParseMode::Html)
         .await
     {
         warn!("Watcher: failed to notify user {user_id}: {e}");
+        crate::bot::outbound::record(user_id, "watcher_failed", &msg);
     }
 
     Ok(())
@@ -1360,6 +1362,9 @@ pub async fn run_security_scan(bot: &Bot, store: &Store, sqlite: &SqliteStore, c
                 .await
             {
                 warn!("Security scan: failed to notify user {user_id}: {e}");
+                crate::bot::outbound::record(user_id, "security_failed", &digest);
+            } else {
+                crate::bot::outbound::record(user_id, "security", &digest);
             }
         }
     }
@@ -1521,12 +1526,14 @@ async fn send_security_alert(
     let msg =
         format!("🚨 <b>AI Market Alert</b>\n\n⚠️ <b>Security incident detected</b>\n\n{detail_html}");
     info!("Security alert (watcher) for {user_id}: {msg}");
+    crate::bot::outbound::record(user_id, "security", &msg);
     if let Err(e) = bot
         .send_message(ChatId(user_id as i64), &msg)
         .parse_mode(teloxide::types::ParseMode::Html)
         .await
     {
         warn!("Watcher: failed to send security alert to {user_id}: {e}");
+        crate::bot::outbound::record(user_id, "security_failed", &msg);
     }
 }
 

@@ -272,6 +272,7 @@ async fn scan_dips(
         }
 
         let text = format!("🔔 <b>Proactive dip alert</b>\n\n{}", report.render_html());
+        crate::bot::outbound::record(user_id, "dip_alert", &text);
         let sent = bot
             .send_message(ChatId(user_id as i64), &text)
             .parse_mode(teloxide::types::ParseMode::Html)
@@ -404,6 +405,7 @@ async fn scan_sniper(
                 keyboards::sniper_actions(sym),
             )
         };
+        crate::bot::outbound::record(user_id, kind, &text);
         let sent = bot
             .send_message(ChatId(user_id as i64), &text)
             .parse_mode(teloxide::types::ParseMode::Html)

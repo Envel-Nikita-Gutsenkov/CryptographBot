@@ -2,6 +2,7 @@ pub mod commands;
 pub mod handlers;
 pub mod keyboards;
 pub mod mdv2;
+pub mod outbound;
 pub mod rich_messages;
 pub mod state;
 pub mod updates;
@@ -42,6 +43,7 @@ pub async fn start(
     sqlite: Arc<crate::db::SqliteStore>,
 ) {
     let handler = build_handler();
+    outbound::init((*sqlite).clone());
     let storage = InMemStorage::<State>::new();
     let patch_store: PatchStore = new_patch_store();
     // Rich messages (`sendRichMessage`) come back inside updates as objects

@@ -131,6 +131,28 @@ actually realised 14 days later, from local `price_history`), `journal prune`,
 or `journal selftest` (write-and-read-back check). The same data is available
 in Telegram via `/journal`.
 
+### Outbound message log (`outbound_messages`)
+
+The exact text the bot **sent**, so a user report ("it sent me garbage") can be
+checked against reality instead of reconstructed from news rows or guessed.
+Telegram gives a bot no way to read its own outgoing history, so the send paths
+record the message themselves through `crate::bot::outbound::record`.
+
+| Column | Meaning |
+|---|---|
+| `user_id` | Recipient chat id |
+| `kind` | Where it came from: `rich` (rich-message payload), `ai` (HTML AI reply), `security` / `security_failed`, `watcher` / `watcher_failed` (proactive alerts), `dip_alert`, `price_alert`, `selftest` |
+| `text` | The delivered text, clipped to 4000 characters |
+
+Written by the proactive/AI send paths only — proactive messages are the ones a
+user cannot re-trigger on demand, which is exactly when the text matters. It is
+a ring buffer: newest `OUTBOUND_KEEP_LAST` (300) rows, `OUTBOUND_MAX_AGE_DAYS`
+(14) days, per-row cap 4000 chars. A one-line preview is also logged at `INFO`
+so `docker logs` shows recent sends without querying the DB.
+
+Inspect with `docker exec cryptograph ./cryptograph outbound [N]` (newest
+first) or `outbound selftest` (write-and-read-back check).
+
 ---
 
 ## 4. Trading Module Schema (`src/trading/store/`)

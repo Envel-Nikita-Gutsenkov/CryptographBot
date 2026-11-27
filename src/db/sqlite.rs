@@ -27,6 +27,34 @@ fn truncate_journal_field(s: &str) -> String {
     out
 }
 
+/// Hard cap on the outbound message log — what the bot actually sent, kept so a
+/// user can report "it sent me garbage" and we can read the exact text.
+/// Same ring-buffer discipline as the journal: newest `OUTBOUND_KEEP_LAST` rows
+/// survive, every text is truncated on insert, so disk use is bounded.
+pub const OUTBOUND_KEEP_LAST: i64 = 300;
+/// Age sweep for the outbound log, applied with the other retention sweeps.
+pub const OUTBOUND_MAX_AGE_DAYS: i64 = 14;
+/// Body cap for one outbound message. 300 rows × this is a few MB at most.
+const OUTBOUND_TEXT_MAX_CHARS: usize = 4000;
+
+fn truncate_outbound_text(s: &str) -> String {
+    if s.chars().count() <= OUTBOUND_TEXT_MAX_CHARS {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(OUTBOUND_TEXT_MAX_CHARS).collect();
+    out.push('…');
+    out
+}
+
+fn trim_outbound(conn: &Connection, keep: i64) -> rusqlite::Result<usize> {
+    conn.execute(
+        "DELETE FROM outbound_messages
+         WHERE id <= (SELECT id FROM outbound_messages
+                      ORDER BY id DESC LIMIT 1 OFFSET ?1)",
+        params![keep.max(0)],
+    )
+}
+
 fn trim_journal(conn: &Connection, keep: i64) -> rusqlite::Result<usize> {
     // Keep the newest `keep` rows. When the table has `keep` rows or fewer the
     // subquery yields NULL and `id <= NULL` matches nothing — a no-op, so this
@@ -61,6 +89,11 @@ pub enum SqliteMessage {
         reason: String,
         context_json: String,
         result: String,
+    },
+    RecordOutbound {
+        user_id: u64,
+        kind: String,
+        text: String,
     },
     LogPrice {
         symbol: String,
@@ -149,6 +182,17 @@ pub struct JournalRow {
     pub context_json: String,
     pub result: String,
     pub outcome: Option<String>,
+}
+
+/// One stored outbound message — the exact text the bot sent, kept so a user
+/// report ("it sent me this") can be read back verbatim. Bounded ring buffer:
+/// [`OUTBOUND_KEEP_LAST`] rows, [`OUTBOUND_MAX_AGE_DAYS`] days, per-row cap.
+#[derive(Debug, Clone)]
+pub struct OutboundRow {
+    pub created_at: String,
+    pub user_id: u64,
+    pub kind: String,
+    pub text: String,
 }
 
 /// One graded decision: what the bot said, the price it saw, and where the
@@ -420,6 +464,21 @@ impl SqliteStore {
                             warn!("Failed to rotate journal: {}", e);
                         }
                     }
+                    SqliteMessage::RecordOutbound {
+                        user_id,
+                        kind,
+                        text,
+                    } => {
+                        let res = conn.execute(
+                            "INSERT INTO outbound_messages (user_id, kind, text) VALUES (?1, ?2, ?3)",
+                            params![user_id, kind, truncate_outbound_text(&text)],
+                        );
+                        if let Err(e) = res {
+                            warn!("Failed to record outbound message to SQLite: {}", e);
+                        } else if let Err(e) = trim_outbound(&conn, OUTBOUND_KEEP_LAST) {
+                            warn!("Failed to rotate outbound log: {}", e);
+                        }
+                    }
                     SqliteMessage::LogPrice {
                         symbol,
                         price,
@@ -569,6 +628,15 @@ impl SqliteStore {
                             &format!(
                                 "DELETE FROM journal WHERE created_at < datetime('now', '-{} days')",
                                 JOURNAL_MAX_AGE_DAYS
+                            ),
+                            [],
+                        );
+                        // Outbound log: same treatment (row cap on insert + age
+                        // sweep) so it can never grow unbounded.
+                        let _ = conn.execute(
+                            &format!(
+                                "DELETE FROM outbound_messages WHERE created_at < datetime('now', '-{} days')",
+                                OUTBOUND_MAX_AGE_DAYS
                             ),
                             [],
                         );
@@ -848,6 +916,44 @@ impl SqliteStore {
         });
     }
 
+    /// Fire-and-forget the exact text the bot is about to send, so a user can
+    /// say "it sent me this" and the message can be read back instead of
+    /// reconstructed. Same `try_send` reasoning as [`record_journal`]; the table
+    /// is a ring buffer capped at [`OUTBOUND_KEEP_LAST`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_outbound(&self, user_id: u64, kind: &str, text: &str) {
+        let _ = self.tx.try_send(SqliteMessage::RecordOutbound {
+            user_id,
+            kind: kind.to_string(),
+            text: text.to_string(),
+        });
+    }
+
+    /// Most recent outbound messages, newest first.
+    pub fn recent_outbound(&self, limit: i64) -> anyhow::Result<Vec<OutboundRow>> {
+        let conn = Connection::open(&self.db_path)?;
+        let mut stmt = conn.prepare(
+            "SELECT created_at, user_id, kind, text FROM outbound_messages
+             ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit.max(0)], |r| {
+            Ok(OutboundRow {
+                created_at: r.get(0)?,
+                user_id: r.get(1)?,
+                kind: r.get(2)?,
+                text: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Total rows in the bounded outbound log (used by `outbound selftest`).
+    #[allow(dead_code)]
+    pub fn outbound_count(&self) -> anyhow::Result<i64> {
+        let conn = Connection::open(&self.db_path)?;
+        Ok(conn.query_row("SELECT COUNT(*) FROM outbound_messages", [], |r| r.get(0))?)
+    }
+
     /// Most recent journal entries, newest first, truncated to `limit`.
     pub fn recent_journal(&self, limit: i64) -> anyhow::Result<Vec<JournalRow>> {
         let conn = Connection::open(&self.db_path)?;
@@ -877,6 +983,7 @@ impl SqliteStore {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Counts grouped by (kind, command)
     /// Counts grouped by (kind, command) — the basis for "what commands came
     /// in and how often the bot answered" usage/accuracy analysis.
     pub fn journal_stats(&self) -> anyhow::Result<Vec<(String, String, i64)>> {
@@ -2180,6 +2287,20 @@ fn init_db(conn: &mut Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_journal_user ON journal(user_id);
         CREATE INDEX IF NOT EXISTS idx_journal_kind ON journal(kind, created_at);
 
+        -- Outbound message log: the exact text the bot sent, so a complaint
+        -- about a garbled alert can be re-read from the DB instead of guessed
+        -- from the news feed. Also a ring buffer (row cap on insert +
+        -- age sweep) and truncated on insert, so disk use is bounded.
+        CREATE TABLE IF NOT EXISTS outbound_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            user_id INTEGER NOT NULL,
+            kind TEXT NOT NULL DEFAULT '',
+            text TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_outbound_created ON outbound_messages(created_at);
+
         CREATE TABLE IF NOT EXISTS price_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             symbol TEXT NOT NULL,
@@ -2759,6 +2880,65 @@ mod tests {
         assert_eq!(verdict, "ok");
         drop(conn);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn outbound_ring_buffer_keeps_only_the_newest_rows() {
+        // Same disk guarantee as the journal: the outbound log is a ring buffer,
+        // so logging every send can never grow the database without bound.
+        let path = std::env::temp_dir().join(format!(
+            "cryptograph_outbound_trim_{}_{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let conn = open_and_init_db(&path.to_string_lossy()).unwrap();
+        for i in 0..5 {
+            conn.execute(
+                "INSERT INTO outbound_messages (user_id, kind, text) VALUES (?1, 'rich', ?2)",
+                params![i, format!("msg{i}")],
+            )
+            .unwrap();
+        }
+        let removed = trim_outbound(&conn, 3).unwrap();
+        assert_eq!(removed, 2);
+        let remaining: Vec<String> = conn
+            .prepare("SELECT text FROM outbound_messages ORDER BY id ASC")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(remaining, vec!["msg2", "msg3", "msg4"]);
+        assert_eq!(trim_outbound(&conn, 3).unwrap(), 0);
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn record_outbound_actually_enqueues_a_row() {
+        // Regression guard mirroring `record_journal`: a fire-and-forget writer
+        // must use `try_send`, otherwise sends look logged but write nothing.
+        let store = tmp_store();
+        store.record_outbound(42, "rich", "the exact text the bot sent");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let rows = store.recent_outbound(10).unwrap();
+            if let Some(row) = rows.first() {
+                assert_eq!(row.user_id, 42);
+                assert_eq!(row.kind, "rich");
+                assert_eq!(row.text, "the exact text the bot sent");
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "record_outbound never committed a row"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     #[test]

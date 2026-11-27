@@ -45,8 +45,15 @@ pub async fn send_rich_message_markdown(
     // Telegram returns HTTP 200 with `{"ok":false,...}` for some rejections,
     // so a bare status check reports success on a message that never rendered.
     if !status.is_success() || !is_ok(&body) {
+        // Also keep the rejected payload: a message the user never saw is the
+        // one you most often need to replay.
+        crate::bot::outbound::record(chat_id as u64, "rich_failed", markdown);
         return Err(anyhow::anyhow!("Failed to send rich message: {body}"));
     }
+
+    // Log what actually reached the user (bounded ring buffer + a log preview),
+    // so a bad-looking card can be traced back byte for byte.
+    crate::bot::outbound::record(chat_id as u64, "rich", markdown);
 
     Ok(())
 }

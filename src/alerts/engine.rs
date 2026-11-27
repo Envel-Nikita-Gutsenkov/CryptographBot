@@ -244,6 +244,7 @@ async fn process_user(
         }
     }
 
+    crate::bot::outbound::record(user_id, "price_alert", &combined_msg);
     if let Err(e) = bot
         .send_message(ChatId(user_id as i64), &combined_msg)
         .parse_mode(teloxide::types::ParseMode::Html)

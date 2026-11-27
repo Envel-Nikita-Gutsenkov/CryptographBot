@@ -197,6 +197,7 @@ pub async fn send_rich_message_via_api_with_markup(
 ) -> anyhow::Result<()> {
     sanitize_ai_text(&mut text);
     let html = crate::format::markdown_to_html(&text);
+    crate::bot::outbound::record(chat_id.0 as u64, "ai", &html);
     bot.send_message(chat_id, html)
         .parse_mode(ParseMode::Html)
         .reply_markup(markup)

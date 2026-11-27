@@ -334,6 +334,65 @@ async fn main_inner() -> anyhow::Result<()> {
         }
         return Ok(());
     }
+    // `cryptograph outbound [N]` — dump the newest messages the bot actually
+    // sent (rich/HTML/MarkdownV2), so "it sent me garbage" can be checked
+    // against the real text instead of a reconstruction from logs.
+    if args.len() > 1 && (args[1] == "outbound" || args[1] == "--outbound") {
+        let config = Arc::new(config::Config::from_env()?);
+        if let Some(parent) = std::path::Path::new(&config.sqlite_db).parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        db::SqliteStore::initialize_schema(&config.sqlite_db)?;
+        let sqlite = db::SqliteStore::new(&config.sqlite_db)?;
+        // `outbound selftest` — write a probe row and read it back, so an empty
+        // log is provably the ring buffer being empty and not a broken writer.
+        if args.get(2).map(|s| s.as_str()) == Some("selftest") {
+            let probe = format!("selftest {}", chrono::Utc::now().to_rfc3339());
+            sqlite.record_outbound(0, "selftest", &probe);
+            // The sink is async; give the writer a moment to commit.
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let rows = sqlite.recent_outbound(5)?;
+            match rows.first() {
+                Some(r) if r.kind == "selftest" => {
+                    println!("outbound selftest OK (wrote and read back: {})", r.text);
+                }
+                Some(r) => println!(
+                    "outbound selftest FAILED: newest row is kind={} text={:?}",
+                    r.kind, r.text
+                ),
+                None => println!("outbound selftest FAILED: nothing could be read back"),
+            }
+            return Ok(());
+        }
+        let limit: i64 = args
+            .get(2)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20)
+            .min(db::sqlite::OUTBOUND_KEEP_LAST);
+        let rows = sqlite.recent_outbound(limit)?;
+        if rows.is_empty() {
+            println!(
+                "outbound empty (cap {} rows, {} days) — nothing sent since this build started",
+                db::sqlite::OUTBOUND_KEEP_LAST,
+                db::sqlite::OUTBOUND_MAX_AGE_DAYS
+            );
+            return Ok(());
+        }
+        println!(
+            "{} row(s), newest first (cap {} rows, {} days)\n",
+            rows.len(),
+            db::sqlite::OUTBOUND_KEEP_LAST,
+            db::sqlite::OUTBOUND_MAX_AGE_DAYS
+        );
+        for r in rows {
+            println!("─── {} [{}] user={} ───", r.created_at, r.kind, r.user_id);
+            println!("{}", r.text);
+            println!();
+        }
+        return Ok(());
+    }
     if args.len() > 2 && (args[1] == "analyze" || args[1] == "--analyze") {
         let config = Arc::new(config::Config::from_env()?);
         if let Some(parent) = std::path::Path::new(&config.sqlite_db).parent() {
