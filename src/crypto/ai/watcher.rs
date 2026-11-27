@@ -780,6 +780,32 @@ fn remember_topics(
 
 /// Pull the sentence that mentions the incident, so a security alert can be
 /// generated even when the LLM call fails or returns `none`.
+/// Paid-article RSS bodies often end with promotional boilerplate
+/// ("Read the full story on …", "Get The Catalyst in your inbox"). Fed to the
+/// digest model, that ad copy gets paraphrased as if it were part of the
+/// incident, so the alert reads like filler. Cut everything from the first
+/// promo marker — the headline still carries the actual claim.
+fn strip_teaser(body: &str) -> String {
+    const CUT_MARKERS: &[&str] = &[
+        "read the full story",
+        "read more",
+        "continue reading",
+        "subscribe to",
+        "sign up for",
+        "get the catalyst",
+    ];
+    // ASCII-lowercasing preserves byte offsets, so the cut index stays valid.
+    let lower = body.to_ascii_lowercase();
+    let cut = CUT_MARKERS
+        .iter()
+        .filter_map(|m| lower.find(m))
+        .min();
+    match cut {
+        Some(pos) => body[..pos].trim_end().to_string(),
+        None => body.trim_end().to_string(),
+    }
+}
+
 fn extract_security_snippet(text: &str) -> Option<String> {
     // Split on `.`/`!`/newline only when followed by whitespace or the end, so a
     // decimal like `$6.3B` does not truncate the sentence.
@@ -1229,7 +1255,12 @@ pub async fn run_security_scan(bot: &Bot, store: &Store, sqlite: &SqliteStore, c
             };
             for (_source, title, body, _url, _fetched_at) in articles {
                 let body: String = body.chars().take(SECURITY_ARTICLE_CHARS).collect();
-                let text = format!("{title}. {body}");
+                let body = strip_teaser(&body);
+                let text = if body.is_empty() {
+                    title.clone()
+                } else {
+                    format!("{title}. {body}")
+                };
                 // The GENERAL feed also carries oil, macro and politics; only
                 // crypto-related headlines may reach the incident detector.
                 if sym == "GENERAL" && !crypto_relevant(&text.to_lowercase()) {
@@ -1273,6 +1304,11 @@ pub async fn run_security_scan(bot: &Bot, store: &Store, sqlite: &SqliteStore, c
 
         let lang = store.read(user_id, |p| p.settings.preferred_language.clone());
         let digest = compose_security_digest(&ai, &fresh, &lang, sqlite).await;
+        // The exact text the user receives is otherwise unrecoverable: only
+        // "alerting user …" was logged, so a complaint about a garbled alert
+        // could not be diagnosed. Keep a bounded preview.
+        let preview: String = digest.chars().take(600).collect();
+        info!("Security digest for {user_id}: {preview}");
 
         // Mark every key the delivered text carries — including the named
         // entities the composed digest mentions. The digest is what the user
@@ -1348,7 +1384,12 @@ async fn fresh_security_incidents(
         };
         for (_source, title, body, _url, _fetched_at) in articles {
             let body: String = body.chars().take(SECURITY_ARTICLE_CHARS).collect();
-            let text = format!("{title}. {body}");
+            let body = strip_teaser(&body);
+            let text = if body.is_empty() {
+                title.clone()
+            } else {
+                format!("{title}. {body}")
+            };
             if sym == "GENERAL" && !crypto_relevant(&text.to_lowercase()) {
                 continue;
             }
@@ -1479,6 +1520,7 @@ async fn send_security_alert(
     let detail_html = model_output_to_html(&detail);
     let msg =
         format!("🚨 <b>AI Market Alert</b>\n\n⚠️ <b>Security incident detected</b>\n\n{detail_html}");
+    info!("Security alert (watcher) for {user_id}: {msg}");
     if let Err(e) = bot
         .send_message(ChatId(user_id as i64), &msg)
         .parse_mode(teloxide::types::ParseMode::Html)
@@ -1653,6 +1695,30 @@ mod tests {
         seen.insert("binance".into(), now - chrono::Duration::days(3));
         // Entity cooldown is a month → still suppressed.
         assert!(!topic_is_fresh(&seen, "binance", now));
+    }
+
+    #[test]
+    fn teaser_boilerplate_is_stripped_before_digest() {
+        // CryptoSlate ships a paywall teaser as the body: the real incident is
+        // in the headline, and the trailing promo copy must never reach the
+        // digest model (it used to paraphrase "Get The Catalyst in your inbox").
+        let body = "Coinkite’s November postmortem details the Mk5 checks. \
+                    Read the full story on CryptoSlateGet The Catalyst in your inbox";
+        let clean = strip_teaser(body);
+        assert!(!clean.to_lowercase().contains("get the catalyst"));
+        assert!(!clean.to_lowercase().contains("read the full story"));
+        assert!(clean.contains("postmortem"));
+    }
+
+    #[test]
+    fn strip_teaser_leaves_plain_bodies_alone() {
+        let body = "Binance confirmed a $40M loss after a bridge exploit.";
+        assert_eq!(strip_teaser(body), body);
+    }
+
+    #[test]
+    fn strip_teaser_can_empty_a_pure_promo_body() {
+        assert_eq!(strip_teaser("Read more on our site."), "");
     }
 
     #[test]
